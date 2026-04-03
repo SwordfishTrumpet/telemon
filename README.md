@@ -28,7 +28,7 @@ You need a Telegram bot token and chat ID. If you don't have these, follow [Gett
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/yourusername/telemon.git
+git clone https://github.com/SwordfishTrumpet/telemon.git
 cd telemon
 
 # 2. Copy the example config and edit it
