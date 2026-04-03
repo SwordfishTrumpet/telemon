@@ -1,0 +1,20 @@
+# Telemon - Environment Configuration
+.env
+
+# Log files
+*.log
+sys_monitor_cron.log
+
+# State files
+/tmp/telemon_*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
