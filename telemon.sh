@@ -402,18 +402,70 @@ check_system_processes() {
         local state="OK"
         local detail="Process <code>${proc}</code> is running"
 
-        if ! pgrep -x "$proc" &>/dev/null; then
-            # Fallback: check via systemctl for services like docker/sshd
-            if systemctl is-active --quiet "$proc" 2>/dev/null; then
-                state="OK"
-            else
-                state="CRITICAL"
-                detail="Process <code>${proc}</code> is <b>NOT running</b>"
-            fi
+        # First check if process exists via pgrep
+        if pgrep -x "$proc" &>/dev/null; then
+            state="OK"
+        else
+            # Check systemd service status
+            local systemd_status
+            systemd_status=$(systemctl show -p ActiveState --value "$proc" 2>/dev/null || echo "unknown")
+            
+            case "$systemd_status" in
+                active)
+                    state="OK"
+                    ;;
+                failed)
+                    state="CRITICAL"
+                    detail="Systemd service <code>${proc}</code> has <b>FAILED</b> - check logs with: journalctl -u ${proc}"
+                    ;;
+                activating)
+                    state="WARNING"
+                    detail="Systemd service <code>${proc}</code> is <b>still starting</b> (may be stuck)"
+                    ;;
+                inactive|dead)
+                    state="CRITICAL"
+                    detail="Systemd service <code>${proc}</code> is <b>inactive/stopped</b>"
+                    ;;
+                *)
+                    state="CRITICAL"
+                    detail="Process <code>${proc}</code> is <b>NOT running</b> (status: ${systemd_status})"
+                    ;;
+            esac
         fi
 
         check_state_change "proc_${proc}" "$state" "$detail"
     done
+}
+
+# ===========================================================================
+# CHECK: Failed Systemd Services (system-wide)
+# ===========================================================================
+check_failed_systemd_services() {
+    # Get list of failed services
+    local failed_services
+    failed_services=$(systemctl --failed --no-legend --no-pager 2>/dev/null | awk '/failed/ {print $1}' | grep -v "^●$")
+    
+    if [[ -n "$failed_services" ]]; then
+        local count
+        count=$(echo "$failed_services" | wc -l)
+        
+        local state="CRITICAL"
+        local detail="<b>${count} failed systemd service(s):</b>"
+        
+        # List first 3 failed services
+        local service_list
+        service_list=$(echo "$failed_services" | head -3 | tr '\n' ' ')
+        detail+=" ${service_list}"
+        
+        if [[ "$count" -gt 3 ]]; then
+            detail+=" (+$((count - 3)) more)"
+        fi
+        
+        check_state_change "systemd_failed" "$state" "$detail"
+    else
+        # No failed services - mark as OK if previously in another state
+        check_state_change "systemd_failed" "OK" "All systemd services healthy"
+    fi
 }
 
 # ===========================================================================
@@ -584,6 +636,7 @@ main() {
     [[ "${ENABLE_ZOMBIE_CHECK:-true}" == "true" ]] && check_zombies
     [[ "${ENABLE_INTERNET_CHECK:-true}" == "true" ]] && check_internet
     [[ "${ENABLE_SYSTEM_PROCESSES:-true}" == "true" ]] && check_system_processes
+    [[ "${ENABLE_FAILED_SYSTEMD_SERVICES:-true}" == "true" ]] && check_failed_systemd_services
     [[ "${ENABLE_DOCKER_CONTAINERS:-true}" == "true" ]] && check_docker_containers
     [[ "${ENABLE_PM2_PROCESSES:-true}" == "true" ]] && check_pm2_processes
 
