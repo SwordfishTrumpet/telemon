@@ -33,12 +33,24 @@ The main monitoring agent runs every 5 minutes via cron. It performs stateful ch
 
 ## Configuration Agent: `.env`
 
-The configuration agent defines thresholds and targets:
+The configuration agent defines thresholds, targets, and feature toggles:
 
 ```bash
 # Telegram credentials
 TELEGRAM_BOT_TOKEN="<your-bot-token>"
 TELEGRAM_CHAT_ID="<your-chat-id>"
+
+# Feature toggles (enable/disable individual checks)
+ENABLE_CPU_CHECK=true
+ENABLE_MEMORY_CHECK=true
+ENABLE_DISK_CHECK=true
+ENABLE_SWAP_CHECK=true
+ENABLE_IOWAIT_CHECK=true
+ENABLE_ZOMBIE_CHECK=true
+ENABLE_INTERNET_CHECK=true
+ENABLE_SYSTEM_PROCESSES=true
+ENABLE_DOCKER_CONTAINERS=true
+ENABLE_PM2_PROCESSES=true
 
 # Thresholds
 CPU_THRESHOLD_WARN=70        # % of cores
@@ -52,11 +64,13 @@ PING_FAIL_THRESHOLD=3          # consecutive failures
 # Confirmation Count
 CONFIRMATION_COUNT=3           # consecutive matches before alerting
 
-# Monitored entities
+# Monitored entities (space-separated, empty to disable)
 CRITICAL_SYSTEM_PROCESSES="sshd docker"
 CRITICAL_CONTAINERS="postgres zilean"
 CRITICAL_PM2_PROCESSES="hound"
 ```
+
+**Disabling Checks:** Set `ENABLE_*` to `false` or set process/container lists to empty string `""`.
 
 ---
 

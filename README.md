@@ -49,6 +49,18 @@ Edit `.env` to customize your monitoring:
 TELEGRAM_BOT_TOKEN="your-bot-token"
 TELEGRAM_CHAT_ID="your-chat-id"
 
+# Enable/disable checks (set to "false" to disable)
+ENABLE_CPU_CHECK=true
+ENABLE_MEMORY_CHECK=true
+ENABLE_DISK_CHECK=true
+ENABLE_SWAP_CHECK=true
+ENABLE_IOWAIT_CHECK=true
+ENABLE_ZOMBIE_CHECK=true
+ENABLE_INTERNET_CHECK=true
+ENABLE_SYSTEM_PROCESSES=true
+ENABLE_DOCKER_CONTAINERS=true
+ENABLE_PM2_PROCESSES=true
+
 # Alert thresholds
 CPU_THRESHOLD_WARN=70          # % of available cores
 CPU_THRESHOLD_CRIT=80
@@ -56,15 +68,46 @@ MEM_THRESHOLD_WARN=15          # % free memory remaining
 MEM_THRESHOLD_CRIT=10
 DISK_THRESHOLD_WARN=85         # % disk used
 DISK_THRESHOLD_CRIT=90
+SWAP_THRESHOLD_WARN=50         # % swap used
+SWAP_THRESHOLD_CRIT=80
+IOWAIT_THRESHOLD_WARN=30       # % CPU waiting for I/O
+IOWAIT_THRESHOLD_CRIT=50
+ZOMBIE_THRESHOLD_WARN=5        # number of zombie processes
+ZOMBIE_THRESHOLD_CRIT=20
 
 # Confirmation count (prevents false alarms)
 CONFIRMATION_COUNT=3           # Alert only after 3 consecutive matches
                                # With 5-min cron = 15 min confirmation
 
-# What to monitor
+# What to monitor (space-separated lists, empty to disable)
 CRITICAL_SYSTEM_PROCESSES="sshd docker"
 CRITICAL_CONTAINERS="postgres zilean"
 CRITICAL_PM2_PROCESSES="hound"
+```
+
+### Disabling Checks
+
+**To disable a specific check**, set its `ENABLE_` variable to `false`:
+
+```bash
+# Don't monitor swap (e.g., if system has no swap)
+ENABLE_SWAP_CHECK=false
+
+# Don't monitor PM2 (e.g., if not using PM2)
+ENABLE_PM2_PROCESSES=false
+
+# Don't monitor Docker (e.g., if not using Docker)
+ENABLE_DOCKER_CONTAINERS=false
+```
+
+**To disable process/container monitoring**, set the list to empty:
+
+```bash
+# Disable all system process monitoring
+CRITICAL_SYSTEM_PROCESSES=""
+
+# Disable all container monitoring  
+CRITICAL_CONTAINERS=""
 ```
 
 ### Getting Telegram Credentials

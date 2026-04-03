@@ -575,17 +575,17 @@ main() {
         log "INFO" "First run detected - using immediate alerts (confirmation=1)"
     fi
 
-    # Run all checks
-    check_cpu
-    check_memory
-    check_disk
-    check_swap
-    check_iowait
-    check_zombies
-    check_internet
-    check_system_processes
-    check_docker_containers
-    check_pm2_processes
+    # Run all checks (respecting ENABLE_ flags)
+    [[ "${ENABLE_CPU_CHECK:-true}" == "true" ]] && check_cpu
+    [[ "${ENABLE_MEMORY_CHECK:-true}" == "true" ]] && check_memory
+    [[ "${ENABLE_DISK_CHECK:-true}" == "true" ]] && check_disk
+    [[ "${ENABLE_SWAP_CHECK:-true}" == "true" ]] && check_swap
+    [[ "${ENABLE_IOWAIT_CHECK:-true}" == "true" ]] && check_iowait
+    [[ "${ENABLE_ZOMBIE_CHECK:-true}" == "true" ]] && check_zombies
+    [[ "${ENABLE_INTERNET_CHECK:-true}" == "true" ]] && check_internet
+    [[ "${ENABLE_SYSTEM_PROCESSES:-true}" == "true" ]] && check_system_processes
+    [[ "${ENABLE_DOCKER_CONTAINERS:-true}" == "true" ]] && check_docker_containers
+    [[ "${ENABLE_PM2_PROCESSES:-true}" == "true" ]] && check_pm2_processes
 
     # Restore confirmation count for state saving
     CONFIRMATION_COUNT="$saved_confirm_count"
