@@ -288,6 +288,113 @@ check_internet() {
 }
 
 # ===========================================================================
+# CHECK: Swap Usage
+# ===========================================================================
+check_swap() {
+    local swap_total swap_used swap_pct
+    
+    # Read swap info from /proc/swaps
+    if [[ -f /proc/swaps ]]; then
+        # Skip header line, sum up all swap partitions
+        swap_total=0
+        swap_used=0
+        while read -r device type size used priority; do
+            [[ "$device" == "Filename" ]] && continue
+            swap_total=$((swap_total + size))
+            swap_used=$((swap_used + used))
+        done < /proc/swaps
+        
+        if [[ "$swap_total" -gt 0 ]]; then
+            swap_pct=$(( (swap_used * 100) / swap_total ))
+            local swap_total_mb=$(( swap_total / 1024 ))
+            local swap_used_mb=$(( swap_used / 1024 ))
+            
+            local state="OK"
+            local detail="Swap: ${swap_used_mb}MB used of ${swap_total_mb}MB (${swap_pct}%)"
+            
+            if (( swap_pct >= SWAP_THRESHOLD_CRIT )); then
+                state="CRITICAL"
+                detail="Swap: <b>${swap_used_mb}MB</b> used of ${swap_total_mb}MB (<b>${swap_pct}%</b>, threshold: ${SWAP_THRESHOLD_CRIT}%)"
+            elif (( swap_pct >= SWAP_THRESHOLD_WARN )); then
+                state="WARNING"
+                detail="Swap: <b>${swap_used_mb}MB</b> used of ${swap_total_mb}MB (<b>${swap_pct}%</b>, threshold: ${SWAP_THRESHOLD_WARN}%)"
+            fi
+            
+            check_state_change "swap" "$state" "$detail"
+        fi
+    fi
+}
+
+# ===========================================================================
+# CHECK: I/O Wait (CPU waiting for disk I/O)
+# ===========================================================================
+check_iowait() {
+    # Read /proc/stat to get CPU stats
+    local iowait
+    iowait=$(awk '/^cpu / {print $6}' /proc/stat)
+    
+    if [[ -n "$iowait" ]]; then
+        # Calculate percentage (iowait is in jiffies, need to calculate %)
+        # Read current values
+        local user nice system idle iowait irq softirq steal guest guest_nice
+        read -r user nice system idle iowait irq softirq steal guest guest_nice < <(awk '/^cpu / {print $2,$3,$4,$5,$6,$7,$8,$9,$10,$11}' /proc/stat)
+        
+        local total=$((user + nice + system + idle + iowait + irq + softirq + steal))
+        local iowait_pct=0
+        if [[ "$total" -gt 0 ]]; then
+            iowait_pct=$(( (iowait * 100) / total ))
+        fi
+        
+        local state="OK"
+        local detail="I/O Wait: ${iowait_pct}% of CPU time"
+        
+        if (( iowait_pct >= IOWAIT_THRESHOLD_CRIT )); then
+            state="CRITICAL"
+            detail="I/O Wait: <b>${iowait_pct}%</b> of CPU time waiting for disk (threshold: ${IOWAIT_THRESHOLD_CRIT}%)"
+        elif (( iowait_pct >= IOWAIT_THRESHOLD_WARN )); then
+            state="WARNING"
+            detail="I/O Wait: <b>${iowait_pct}%</b> of CPU time waiting for disk (threshold: ${IOWAIT_THRESHOLD_WARN}%)"
+        fi
+        
+        check_state_change "iowait" "$state" "$detail"
+    fi
+}
+
+# ===========================================================================
+# CHECK: Zombie Processes
+# ===========================================================================
+check_zombies() {
+    local zombie_count
+    zombie_count=$(ps aux | awk '$8 ~ /^Z/ {count++} END {print count+0}')
+    
+    local state="OK"
+    local detail="Zombie processes: ${zombie_count}"
+    
+    if (( zombie_count >= ZOMBIE_THRESHOLD_CRIT )); then
+        state="CRITICAL"
+        detail="Zombie processes: <b>${zombie_count}</b> (threshold: ${ZOMBIE_THRESHOLD_CRIT})"
+    elif (( zombie_count >= ZOMBIE_THRESHOLD_WARN )); then
+        state="WARNING"
+        detail="Zombie processes: <b>${zombie_count}</b> (threshold: ${ZOMBIE_THRESHOLD_WARN})"
+    fi
+    
+    check_state_change "zombies" "$state" "$detail"
+}
+
+# ===========================================================================
+# HELPER: Get Top CPU/Memory Processes
+# Called when CPU or Memory is in WARNING/CRITICAL state
+# ===========================================================================
+get_top_processes() {
+    local count="${1:-5}"
+    echo "Top ${count} processes by CPU:"
+    ps aux --sort=-%cpu | head -$((count + 1)) | tail -${count} | awk '{printf "  %s %5s%% %s\n", $2, $3, $11}'
+    echo ""
+    echo "Top ${count} processes by Memory:"
+    ps aux --sort=-%mem | head -$((count + 1)) | tail -${count} | awk '{printf "  %s %5s%% %s\n", $2, $4, $11}'
+}
+
+# ===========================================================================
 # CHECK: System Processes (via pgrep / systemctl)
 # ===========================================================================
 check_system_processes() {
@@ -472,6 +579,9 @@ main() {
     check_cpu
     check_memory
     check_disk
+    check_swap
+    check_iowait
+    check_zombies
     check_internet
     check_system_processes
     check_docker_containers

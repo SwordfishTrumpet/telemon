@@ -177,11 +177,40 @@ crontab -e  # delete the telemon line
 
 ## Requirements
 
-- Bash 4.0+
-- `curl` (for Telegram API)
-- `awk`, `nproc`, `df`, `pgrep` (standard Unix tools)
-- `docker` (optional, for container monitoring)
-- `pm2` (optional, for PM2 process monitoring)
+### Operating System Support
+
+Telemon is designed for **Linux systems** and has been tested on:
+
+| Distribution | Status | Notes |
+|--------------|--------|-------|
+| Ubuntu 20.04+ | ✅ Fully supported | Primary development target |
+| Debian 11+ | ✅ Fully supported | Systemd services work out of box |
+| CentOS/RHEL 8+ | ✅ Supported | May need EPEL for some tools |
+| Alpine Linux | ⚠️ Partial | BusyBox tools may differ |
+| macOS | ❌ Not supported | Uses Linux-specific /proc filesystem |
+| Windows WSL | ⚠️ Partial | Some /proc metrics may differ |
+
+### Software Requirements
+
+All required tools are pre-installed on most Linux distributions:
+
+- **Bash 4.0+** (standard on all modern Linux)
+- **curl** (for Telegram API calls)
+- **Standard Unix tools**: `awk`, `nproc`, `df`, `pgrep`, `ps`, `ping`
+- **Optional**: `docker` (for container monitoring)
+- **Optional**: `pm2` (for PM2 process monitoring)
+- **Optional**: `logrotate` (for system log rotation)
+
+### Why Linux Only?
+
+Telemon reads from Linux-specific interfaces:
+- `/proc/loadavg` — CPU load information
+- `/proc/meminfo` — Memory statistics  
+- `/proc/swaps` — Swap usage
+- `/proc/stat` — I/O wait metrics
+- `/proc/[pid]/stat` — Process states (for zombie detection)
+
+These are not available on macOS or Windows natively.
 
 ## File Structure
 

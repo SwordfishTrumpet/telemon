@@ -157,6 +157,14 @@ crontab -e  # delete the telemon line
 
 ## Integration Notes
 
+### Operating System
+
+- **Target OS**: Linux (Ubuntu, Debian, CentOS/RHEL, Alpine)
+- **Not supported**: macOS, Windows (uses Linux-specific /proc filesystem)
+- **Tested on**: Ubuntu 20.04+, Debian 11+, CentOS 8+
+
+### Requirements
+
 - Designed for headless servers/VPS
 - Requires Telegram bot (create via @BotFather)
 - Get chat ID via @userinfobot or by messaging bot and checking:
@@ -164,6 +172,15 @@ crontab -e  # delete the telemon line
 - Docker checks require user in docker group or sudo
 - PM2 checks require PM2 to be installed globally
 - **Zero maintenance**: Self-rotating logs, persistent state, cron-scheduled
+
+### Linux Dependencies
+
+Telemon reads from these Linux-specific interfaces:
+- `/proc/loadavg` — CPU load
+- `/proc/meminfo` — Memory stats
+- `/proc/swaps` — Swap usage
+- `/proc/stat` — I/O wait
+- `/proc/[pid]/stat` — Process states
 
 ---
 
