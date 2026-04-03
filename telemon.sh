@@ -28,6 +28,52 @@ source "$ENV_FILE"
 mkdir -p "$(dirname "$LOG_FILE")"
 
 # ---------------------------------------------------------------------------
+# Lock file to prevent overlapping runs
+# Uses flock (from util-linux) if available, falls back to PID file
+# ---------------------------------------------------------------------------
+LOCK_FILE="${STATE_FILE:-/tmp/telemon_sys_alert_state}.lock"
+
+acquire_lock() {
+    # Try flock first (most reliable)
+    if command -v flock &>/dev/null; then
+        # Open file descriptor for lock file
+        exec 200>"$LOCK_FILE"
+        if ! flock -n 200 2>/dev/null; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] Another instance is running - exiting" >&2
+            exit 0
+        fi
+        return 0
+    fi
+    
+    # Fallback: PID file mechanism
+    if [[ -f "$LOCK_FILE" ]]; then
+        local old_pid
+        old_pid=$(cat "$LOCK_FILE" 2>/dev/null) || old_pid=""
+        if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] Another instance (PID $old_pid) is running - exiting" >&2
+            exit 0
+        fi
+        # Stale lock file, remove it
+        rm -f "$LOCK_FILE"
+    fi
+    echo $$ > "$LOCK_FILE"
+}
+
+release_lock() {
+    if command -v flock &>/dev/null; then
+        flock -u 200 2>/dev/null || true
+        exec 200>&- 2>/dev/null || true
+    fi
+    rm -f "$LOCK_FILE" 2>/dev/null || true
+}
+
+# Acquire lock on startup
+acquire_lock
+
+# Release lock on exit
+trap release_lock EXIT
+
+# ---------------------------------------------------------------------------
 # Logging helper
 # ---------------------------------------------------------------------------
 log() {
@@ -64,115 +110,215 @@ rotate_logs() {
 rotate_logs
 
 # ---------------------------------------------------------------------------
-# State file management
+# Timeout wrapper for commands that might hang
+# Usage: run_with_timeout <seconds> <command> [args...]
+# Returns: 0 on success, 124 on timeout, command's exit code otherwise
 # ---------------------------------------------------------------------------
-# The state file stores one key=value:count per line:
-#   cpu=CRITICAL:2
-#   mem=OK:0
-#   disk_sda1=WARNING:1
-#   inet=CRITICAL:3
-#   proc_sshd=OK:0
-#   container_zilean=CRITICAL:1
-#   pm2_hound=CRITICAL:2
-#
-# Format: state:consecutive_count
-# - state: OK | WARNING | CRITICAL
-# - consecutive_count: how many times this state has been seen consecutively
-#
-# An alert fires only when a key's value is confirmed CONFIRMATION_COUNT times.
-# This prevents false alarms from transient spikes.
+run_with_timeout() {
+    local timeout_sec="$1"
+    shift
+    
+    # Use timeout command if available (coreutils)
+    if command -v timeout &>/dev/null; then
+        timeout "$timeout_sec" "$@" 2>/dev/null
+        return $?
+    fi
+    
+    # Fallback: bash timeout using background job
+    local pid
+    "$@" &
+    pid=$!
+    
+    local count=0
+    while kill -0 "$pid" 2>/dev/null; do
+        sleep 1
+        count=$((count + 1))
+        if [[ $count -ge $timeout_sec ]]; then
+            kill -TERM "$pid" 2>/dev/null || true
+            sleep 1
+            kill -KILL "$pid" 2>/dev/null || true
+            log "WARN" "Command timed out after ${timeout_sec}s: $*"
+            return 124
+        fi
+    done
+    
+    wait "$pid" 2>/dev/null
+    return $?
+}
+
+# Default timeout for external commands (seconds)
+CHECK_TIMEOUT="${CHECK_TIMEOUT:-30}"
+
+# ---------------------------------------------------------------------------
+# Threshold validation
+# ---------------------------------------------------------------------------
+validate_thresholds() {
+    local has_errors=false
+    
+    # Helper to check if value is a valid number
+    is_valid_number() {
+        [[ "$1" =~ ^[0-9]+$ ]]
+    }
+    
+    # Helper to check warn < crit
+    check_threshold_pair() {
+        local name="$1"
+        local warn="$2"
+        local crit="$3"
+        
+        if ! is_valid_number "$warn"; then
+            log "ERROR" "Invalid ${name}_THRESHOLD_WARN: '${warn}' must be a positive integer"
+            has_errors=true
+        fi
+        if ! is_valid_number "$crit"; then
+            log "ERROR" "Invalid ${name}_THRESHOLD_CRIT: '${crit}' must be a positive integer"
+            has_errors=true
+        fi
+        if is_valid_number "$warn" && is_valid_number "$crit"; then
+            if [[ "$warn" -ge "$crit" ]]; then
+                log "WARN" "${name}_THRESHOLD_WARN (${warn}) should be less than ${name}_THRESHOLD_CRIT (${crit})"
+            fi
+        fi
+    }
+    
+    # Validate all threshold pairs
+    check_threshold_pair "CPU" "${CPU_THRESHOLD_WARN:-70}" "${CPU_THRESHOLD_CRIT:-80}"
+    check_threshold_pair "MEM" "${MEM_THRESHOLD_WARN:-15}" "${MEM_THRESHOLD_CRIT:-10}"
+    check_threshold_pair "DISK" "${DISK_THRESHOLD_WARN:-85}" "${DISK_THRESHOLD_CRIT:-90}"
+    check_threshold_pair "SWAP" "${SWAP_THRESHOLD_WARN:-50}" "${SWAP_THRESHOLD_CRIT:-80}"
+    check_threshold_pair "IOWAIT" "${IOWAIT_THRESHOLD_WARN:-30}" "${IOWAIT_THRESHOLD_CRIT:-50}"
+    check_threshold_pair "ZOMBIE" "${ZOMBIE_THRESHOLD_WARN:-5}" "${ZOMBIE_THRESHOLD_CRIT:-20}"
+    
+    # Validate confirmation count
+    if ! is_valid_number "${CONFIRMATION_COUNT:-3}"; then
+        log "ERROR" "Invalid CONFIRMATION_COUNT: '${CONFIRMATION_COUNT}' must be a positive integer"
+        has_errors=true
+    elif [[ "${CONFIRMATION_COUNT:-3}" -lt 1 ]]; then
+        log "ERROR" "CONFIRMATION_COUNT must be at least 1"
+        has_errors=true
+    fi
+    
+    # Validate ping threshold
+    if ! is_valid_number "${PING_FAIL_THRESHOLD:-3}"; then
+        log "ERROR" "Invalid PING_FAIL_THRESHOLD: '${PING_FAIL_THRESHOLD}' must be a positive integer"
+        has_errors=true
+    fi
+    
+    if [[ "$has_errors" == "true" ]]; then
+        log "ERROR" "Configuration validation failed - please fix .env file"
+        # Don't exit, just warn - thresholds have defaults
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# State Management (Stateful Alert Deduplication)
+# ---------------------------------------------------------------------------
+# State file format: key=STATE:count (e.g., cpu=CRITICAL:3)
+# - Tracks last known state and consecutive occurrence count
+# - Only alerts when state is confirmed (prevents false alarms)
 # ---------------------------------------------------------------------------
 
+# Associative arrays for state tracking
 declare -A PREV_STATE
-declare -A PREV_COUNT
 declare -A CURR_STATE
-declare -A CURR_COUNT
-ALERTS=""  # accumulated HTML alert lines
+declare -A PREV_COUNT
+declare -A STATE_DETAIL
+
+# Global variable to accumulate alerts
+ALERTS=""
 
 load_state() {
+    PREV_STATE=()
+    PREV_COUNT=()
+    
     if [[ -f "$STATE_FILE" ]]; then
         while IFS='=' read -r key value; do
-            [[ -z "$key" || "$key" == \#* ]] && continue
-            # Parse state:count format (default count=0 if no colon)
+            [[ -z "$key" ]] && continue
+            # Parse value as STATE:count
             local state="${value%%:*}"
             local count="${value##*:}"
-            [[ "$state" == "$value" ]] && count=0  # no colon found
             PREV_STATE["$key"]="$state"
-            PREV_COUNT["$key"]="$count"
+            PREV_COUNT["$key"]="${count:-0}"
         done < "$STATE_FILE"
     fi
 }
 
 save_state() {
-    : > "$STATE_FILE"
+    # Create temp file and atomically move
+    local tmp_file="${STATE_FILE}.tmp.$$"
+    
     for key in "${!CURR_STATE[@]}"; do
-        echo "${key}=${CURR_STATE[$key]}:${CURR_COUNT[$key]:-0}" >> "$STATE_FILE"
-    done
+        local state="${CURR_STATE[$key]}"
+        local count="${PREV_COUNT[$key]:-0}"
+        echo "${key}=${state}:${count}"
+    done > "$tmp_file"
+    
+    mv "$tmp_file" "$STATE_FILE"
 }
 
-# ---------------------------------------------------------------------------
-# Alert accumulator
-# ---------------------------------------------------------------------------
-# Compares current state to previous for a given key.
-# Only queues a message when the state is confirmed CONFIRMATION_COUNT times.
-# This prevents false alarms from transient spikes.
-# ---------------------------------------------------------------------------
 check_state_change() {
     local key="$1"
-    local new_state="$2"   # OK | WARNING | CRITICAL
-    local message="$3"     # human-readable detail
-
-    local prev_state="${PREV_STATE[$key]:-UNKNOWN}"
-    local prev_count="${PREV_COUNT[$key]:-0}"
+    local new_state="$2"
+    local detail="$3"
     
-    # Default confirmation count from env (default to 3 if not set)
+    CURR_STATE["$key"]="$new_state"
+    STATE_DETAIL["$key"]="$detail"
+    
+    local prev_state="${PREV_STATE[$key]:-OK}"
+    local prev_count="${PREV_COUNT[$key]:-0}"
     local confirm_count="${CONFIRMATION_COUNT:-3}"
     
-    # Determine new consecutive count
-    local new_count=0
-    if [[ "$prev_state" == "$new_state" ]]; then
-        new_count=$((prev_count + 1))
-    else
-        new_count=1  # state changed, start counting from 1
-        log "INFO" "[${key}] State changed ${prev_state} -> ${new_state}, starting confirmation count"
-    fi
-    
-    # Store current state and count
-    CURR_STATE["$key"]="$new_state"
-    CURR_COUNT["$key"]="$new_count"
-    
-    # Only alert when we've seen the same state CONFIRMATION_COUNT times
-    # This ensures transient spikes don't trigger false alarms
+    # Determine if we should alert
     local should_alert=false
     
-    if [[ "$new_count" -eq "$confirm_count" ]]; then
-        # Reached confirmation threshold - now we can alert
-        should_alert=true
+    if [[ "$new_state" == "$prev_state" ]]; then
+        # State unchanged - increment count up to confirmation threshold
+        if [[ "$prev_count" -lt "$confirm_count" ]]; then
+            prev_count=$((prev_count + 1))
+            PREV_COUNT["$key"]=$prev_count
+            # Alert if we just reached confirmation threshold
+            if [[ "$prev_count" -eq "$confirm_count" && "$new_state" != "OK" ]]; then
+                should_alert=true
+            fi
+        fi
+    else
+        # State changed - reset count to 1 (first occurrence of new state)
+        PREV_COUNT["$key"]=1
+        # Alert immediately on state change (count=1 means first detection)
+        # But only if it's not OK (we alert on OK -> non-OK transitions)
+        if [[ "$new_state" != "OK" ]]; then
+            should_alert=true
+        elif [[ "$prev_state" != "OK" ]]; then
+            # Was not OK, now OK - resolution alert
+            should_alert=true
+        fi
     fi
     
-    if [[ "$should_alert" != "true" ]]; then
-        return
+    if [[ "$should_alert" == "true" ]]; then
+        local emoji=""
+        case "$new_state" in
+            CRITICAL) emoji="&#128308;" ;;  # Red circle
+            WARNING)  emoji="&#128992;" ;;  # Orange circle
+            OK)       emoji="&#128994;" ;;  # Green circle
+        esac
+        
+        ALERTS+="${emoji} <b>${key}</b>: ${detail}%0A%0A"
+        log "INFO" "State change confirmed for ${key}: ${prev_state} -> ${new_state} (count: ${PREV_COUNT[$key]})"
     fi
-    
-    local icon
-    case "$new_state" in
-        CRITICAL) icon="&#128680; CRITICAL" ;;   # alarm siren
-        WARNING)  icon="&#9888;&#65039; WARNING" ;;
-        OK)       icon="&#9989; RESOLVED" ;;
-    esac
-    
-    # Add confirmation count to message if > 1
-    local confirm_note=""
-    if [[ "$confirm_count" -gt 1 ]]; then
-        confirm_note=" (confirmed ${new_count}x)"
-    fi
-    
-    ALERTS+="<b>${icon}:</b> ${message}${confirm_note}%0A"
-    log "ALERT" "[${key}] ${prev_state} -> ${new_state}${confirm_note}: ${message}"
 }
 
 # ===========================================================================
-# CHECK: CPU Load
+# HTML escaping helper for Telegram
+# ===========================================================================
+html_escape() {
+    local text="$1"
+    # Escape HTML entities that break Telegram parsing
+    text="${text//&/&amp;}"
+    text="${text//</&lt;}"
+    text="${text//>/&gt;}"
+    text="${text//\"/&quot;}"
+    echo "$text"
+}
 # ===========================================================================
 check_cpu() {
     local cores
@@ -196,6 +342,11 @@ check_cpu() {
     fi
 
     check_state_change "cpu" "$state" "$detail"
+    
+    # Capture top processes if CPU is under stress
+    if [[ "$state" == "WARNING" || "$state" == "CRITICAL" ]]; then
+        TOP_PROCESSES_INFO=$(get_top_processes 5)
+    fi
 }
 
 # ===========================================================================
@@ -225,6 +376,11 @@ check_memory() {
     fi
 
     check_state_change "mem" "$state" "$detail"
+    
+    # Capture top processes if memory is under stress (and not already captured by CPU)
+    if [[ "$state" == "WARNING" || "$state" == "CRITICAL" ]] && [[ -z "$TOP_PROCESSES_INFO" ]]; then
+        TOP_PROCESSES_INFO=$(get_top_processes 5)
+    fi
 }
 
 # ===========================================================================
@@ -384,15 +540,21 @@ check_zombies() {
 # ===========================================================================
 # HELPER: Get Top CPU/Memory Processes
 # Called when CPU or Memory is in WARNING/CRITICAL state
+# Returns: formatted string for alerts
 # ===========================================================================
 get_top_processes() {
     local count="${1:-5}"
-    echo "Top ${count} processes by CPU:"
-    ps aux --sort=-%cpu | head -$((count + 1)) | tail -${count} | awk '{printf "  %s %5s%% %s\n", $2, $3, $11}'
-    echo ""
-    echo "Top ${count} processes by Memory:"
-    ps aux --sort=-%mem | head -$((count + 1)) | tail -${count} | awk '{printf "  %s %5s%% %s\n", $2, $4, $11}'
+    local output=""
+    output+="<pre>Top ${count} processes by CPU:\n"
+    output+=$(ps aux --sort=-%cpu | head -$((count + 1)) | tail -${count} | awk '{printf "  %s %5s%% %s\n", $2, $3, $11}')
+    output+="\n\nTop ${count} processes by Memory:\n"
+    output+=$(ps aux --sort=-%mem | head -$((count + 1)) | tail -${count} | awk '{printf "  %s %5s%% %s\n", $2, $4, $11}')
+    output+="</pre>"
+    echo "$output"
 }
+
+# Global variable to store top processes info for alerts
+TOP_PROCESSES_INFO=""
 
 # ===========================================================================
 # CHECK: System Processes (via pgrep / systemctl)
@@ -408,7 +570,7 @@ check_system_processes() {
         else
             # Check systemd service status
             local systemd_status
-            systemd_status=$(systemctl show -p ActiveState --value "$proc" 2>/dev/null || echo "unknown")
+            systemd_status=$(run_with_timeout "$CHECK_TIMEOUT" systemctl show -p ActiveState --value "$proc" 2>/dev/null || echo "unknown")
             
             case "$systemd_status" in
                 active)
@@ -443,7 +605,7 @@ check_system_processes() {
 check_failed_systemd_services() {
     # Get list of failed services
     local failed_services
-    failed_services=$(systemctl --failed --no-legend --no-pager 2>/dev/null | awk '/failed/ {print $1}' | grep -v "^●$")
+    failed_services=$(run_with_timeout "$CHECK_TIMEOUT" systemctl --failed --no-legend --no-pager 2>/dev/null | awk '/failed/ {print $1}' | grep -v "^●$")
     
     if [[ -n "$failed_services" ]]; then
         local count
@@ -483,14 +645,14 @@ check_docker_containers() {
         local detail="Container <code>${container}</code> is running"
 
         local status
-        status=$(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null || echo "missing")
+        status=$(run_with_timeout "$CHECK_TIMEOUT" docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null || echo "missing")
 
         case "$status" in
             running)
                 state="OK"
                 # Also check health if available
                 local health
-                health=$(docker inspect -f '{{.State.Health.Status}}' "$container" 2>/dev/null || echo "none")
+                health=$(run_with_timeout "$CHECK_TIMEOUT" docker inspect -f '{{.State.Health.Status}}' "$container" 2>/dev/null || echo "none")
                 if [[ "$health" == "unhealthy" ]]; then
                     state="WARNING"
                     detail="Container <code>${container}</code> is running but <b>unhealthy</b>"
@@ -521,7 +683,7 @@ check_pm2_processes() {
     if ! command -v pm2 &>/dev/null; then
         # Try common paths
         local pm2_bin=""
-        for candidate in /home/remcov/.npm-global/bin/pm2 /usr/local/bin/pm2 /usr/bin/pm2; do
+        for candidate in "${HOME}/.npm-global/bin/pm2" /usr/local/bin/pm2 /usr/bin/pm2; do
             if [[ -x "$candidate" ]]; then
                 pm2_bin="$candidate"
                 break
@@ -536,7 +698,7 @@ check_pm2_processes() {
     fi
 
     local jlist
-    jlist=$("$pm2_bin" jlist 2>/dev/null) || jlist="[]"
+    jlist=$(run_with_timeout "$CHECK_TIMEOUT" "$pm2_bin" jlist 2>/dev/null) || jlist="[]"
 
     for proc in $CRITICAL_PM2_PROCESSES; do
         local state="OK"
@@ -557,6 +719,8 @@ except Exception:
 " 2>/dev/null) || pm2_status="error"
         # Trim to first line only (pm2 can emit banners on stderr)
         pm2_status="${pm2_status%%$'\n'*}"
+        # Escape HTML to prevent Telegram parse errors
+        pm2_status=$(html_escape "$pm2_status")
 
         case "$pm2_status" in
             online)
@@ -581,6 +745,118 @@ except Exception:
         esac
 
         check_state_change "pm2_${proc}" "$state" "$detail"
+    done
+}
+
+# ===========================================================================
+# CHECK: Website/Site Reachability Monitor
+# Monitors HTTP/HTTPS endpoints for availability, response time, and SSL expiry
+# ===========================================================================
+check_sites() {
+    # Parse space-separated list of site URLs
+    for site in $CRITICAL_SITES; do
+        # Parse optional parameters from URL format:
+        # https://example.com|expected_status=200|max_response_ms=5000|check_ssl=true
+        local url="${site%%|*}"
+        local params="${site#*|}"
+        
+        # Skip if no URL
+        [[ -z "$url" ]] && continue
+        
+        # Default parameters
+        local expected_status="${SITE_EXPECTED_STATUS:-200}"
+        local max_response_ms="${SITE_MAX_RESPONSE_MS:-10000}"
+        local check_ssl="${SITE_CHECK_SSL:-false}"
+        local ssl_warn_days="${SITE_SSL_WARN_DAYS:-7}"
+        
+        # Parse custom parameters if present
+        if [[ "$site" == *"|"* ]]; then
+            # Extract parameters from the URL string
+            local param_str="${site#*|}"
+            while [[ "$param_str" == *"="* ]]; do
+                local key="${param_str%%=*}"
+                local rest="${param_str#*=}"
+                local val="${rest%%|*}"
+                
+                case "$key" in
+                    expected_status) expected_status="$val" ;;
+                    max_response_ms) max_response_ms="$val" ;;
+                    check_ssl) check_ssl="$val" ;;
+                esac
+                
+                param_str="${rest#*|}"
+                [[ "$param_str" == "$rest" ]] && break
+            done
+        fi
+        
+        # Sanitize key for state file (remove special chars)
+        local key="site_$(echo "$url" | sed 's|[^a-zA-Z0-9]|_|g' | sed 's|__*|_|g' | sed 's|^_||')"
+        
+        local state="OK"
+        local detail=""
+        local curl_opts="-s -o /dev/null -w '%{http_code}|%{time_total}|%{redirect_url}|%{ssl_verify_result}'"
+        local curl_cmd="curl ${curl_opts} --max-time $((max_response_ms / 1000 + 5)) -L --insecure"
+        
+        # Add SSL certificate info retrieval if HTTPS and SSL check enabled
+        local ssl_info=""
+        if [[ "$url" == https://* ]] && [[ "$check_ssl" == "true" ]]; then
+            ssl_info=$(run_with_timeout "$CHECK_TIMEOUT" curl -sI -o /dev/null -w '%{cert_expiry}' "$url" 2>/dev/null || echo "")
+        fi
+        
+        # Perform the HTTP check
+        local response
+        response=$(run_with_timeout "$CHECK_TIMEOUT" bash -c "$curl_cmd '$url'" 2>/dev/null || echo "000|0|||1")
+        
+        local http_code="${response%%|*}"
+        local rest="${response#*|}"
+        local response_time="${rest%%|*}"
+        rest="${rest#*|}"
+        local redirect_url="${rest%%|*}"
+        rest="${rest#*|}"
+        local ssl_verify="${rest%%|*}"
+        
+        # Convert response time to milliseconds
+        local response_ms=$(awk "BEGIN {printf \"%.0f\", ${response_time} * 1000}" 2>/dev/null || echo "0")
+        
+        # Determine state based on checks
+        if [[ "$http_code" == "000" ]]; then
+            state="CRITICAL"
+            detail="Site <code>$(html_escape "$url")</code> is <b>UNREACHABLE</b> - connection failed"
+        elif [[ "$http_code" != "$expected_status" ]]; then
+            state="CRITICAL"
+            detail="Site <code>$(html_escape "$url")</code> returned HTTP <b>${http_code}</b> (expected: ${expected_status})"
+        elif [[ "$response_ms" -gt "$max_response_ms" ]]; then
+            state="WARNING"
+            detail="Site <code>$(html_escape "$url")</code> slow response: <b>${response_ms}ms</b> (threshold: ${max_response_ms}ms)"
+        else
+            state="OK"
+            detail="Site <code>$(html_escape "$url")</code> healthy (${http_code}, ${response_ms}ms)"
+        fi
+        
+        # Check SSL certificate expiry if enabled and HTTPS
+        if [[ "$state" == "OK" ]] && [[ "$url" == https://* ]] && [[ "$check_ssl" == "true" ]] && [[ -n "$ssl_info" ]]; then
+            # Parse certificate expiry date
+            local expiry_timestamp
+            expiry_timestamp=$(date -d "$ssl_info" +%s 2>/dev/null || echo "0")
+            local now_timestamp=$(date +%s)
+            local days_until_expiry=$(( (expiry_timestamp - now_timestamp) / 86400 ))
+            
+            if [[ "$days_until_expiry" -le 0 ]]; then
+                state="CRITICAL"
+                detail="Site <code>$(html_escape "$url")</code> SSL certificate <b>EXPIRED</b>"
+            elif [[ "$days_until_expiry" -le "$ssl_warn_days" ]]; then
+                state="WARNING"
+                detail="Site <code>$(html_escape "$url")</code> SSL expires in <b>${days_until_expiry} days</b>"
+            fi
+        fi
+        
+        # Check SSL verification errors
+        if [[ "$state" == "OK" ]] && [[ "$url" == https://* ]] && [[ "$ssl_verify" != "" ]] && [[ "$ssl_verify" != "0" ]]; then
+            state="WARNING"
+            detail="Site <code>$(html_escape "$url")</code> has <b>SSL certificate issues</b> (verify code: ${ssl_verify})"
+        fi
+        
+        check_state_change "$key" "$state" "$detail"
     done
 }
 
@@ -612,6 +888,9 @@ send_telegram() {
 # ===========================================================================
 main() {
     log "INFO" "--- Monitor run started ---"
+    
+    # Validate configuration thresholds
+    validate_thresholds
 
     local is_first_run=false
     if [[ ! -f "$STATE_FILE" ]]; then
@@ -639,6 +918,7 @@ main() {
     [[ "${ENABLE_FAILED_SYSTEMD_SERVICES:-true}" == "true" ]] && check_failed_systemd_services
     [[ "${ENABLE_DOCKER_CONTAINERS:-true}" == "true" ]] && check_docker_containers
     [[ "${ENABLE_PM2_PROCESSES:-true}" == "true" ]] && check_pm2_processes
+    [[ "${ENABLE_SITE_MONITOR:-false}" == "true" ]] && check_sites
 
     # Restore confirmation count for state saving
     CONFIRMATION_COUNT="$saved_confirm_count"
@@ -690,6 +970,11 @@ main() {
         summary+="-----------------------------%0A%0A"
 
         local full_message="${header}${summary}${ALERTS}"
+        
+        # Append top processes info if available
+        if [[ -n "$TOP_PROCESSES_INFO" ]]; then
+            full_message+="%0A<b>Process Details:</b>%0A${TOP_PROCESSES_INFO}"
+        fi
 
         send_telegram "$full_message" || true
         log "INFO" "Alert dispatched to Telegram (${crit_count}C/${warn_count}W/${ok_count}OK)"

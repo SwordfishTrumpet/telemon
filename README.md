@@ -13,6 +13,7 @@ Telemon acts as a "silent guardian" for your server — it watches CPU, memory, 
 - **Confirmation Count** — Configurable consecutive check requirement prevents false alarms from transient spikes
 - **System Vitals** — CPU load, memory, disk space, internet connectivity
 - **Process Monitoring** — System processes, Docker containers, PM2 processes
+- **Website Monitoring** — HTTP/HTTPS endpoint health, SSL certificate expiry
 - **HTML Telegram Messages** — Clean, emoji-rich alerts with hostname and timestamps
 - **State Persistence** — Tracks state across reboots, knows when things resolve
 - **Self-Healing Logs** — Automatic log rotation prevents disk space issues
@@ -61,6 +62,7 @@ ENABLE_SYSTEM_PROCESSES=true
 ENABLE_FAILED_SYSTEMD_SERVICES=true
 ENABLE_DOCKER_CONTAINERS=true
 ENABLE_PM2_PROCESSES=true
+ENABLE_SITE_MONITOR=false    # Set to true to enable website monitoring
 
 # Alert thresholds
 CPU_THRESHOLD_WARN=70          # % of available cores
@@ -76,6 +78,12 @@ IOWAIT_THRESHOLD_CRIT=50
 ZOMBIE_THRESHOLD_WARN=5        # number of zombie processes
 ZOMBIE_THRESHOLD_CRIT=20
 
+# Website monitoring (requires ENABLE_SITE_MONITOR=true)
+SITE_EXPECTED_STATUS=200       # Expected HTTP status code
+SITE_MAX_RESPONSE_MS=10000     # Response time threshold (milliseconds)
+SITE_CHECK_SSL=false           # Enable SSL certificate expiry checks
+SITE_SSL_WARN_DAYS=7           # Days before expiry to warn
+
 # Confirmation count (prevents false alarms)
 CONFIRMATION_COUNT=3           # Alert only after 3 consecutive matches
                                # With 5-min cron = 15 min confirmation
@@ -84,6 +92,7 @@ CONFIRMATION_COUNT=3           # Alert only after 3 consecutive matches
 CRITICAL_SYSTEM_PROCESSES="sshd docker"
 CRITICAL_CONTAINERS="postgres zilean"
 CRITICAL_PM2_PROCESSES="hound"
+CRITICAL_SITES=""              # URLs to monitor, e.g., "https://example.com"
 ```
 
 ### Disabling Checks
@@ -110,6 +119,54 @@ CRITICAL_SYSTEM_PROCESSES=""
 # Disable all container monitoring  
 CRITICAL_CONTAINERS=""
 ```
+
+### Website Monitoring
+
+Telemon can monitor HTTP/HTTPS endpoints for availability, response time, and SSL certificate health.
+
+**Basic setup:**
+
+```bash
+# Enable site monitoring
+ENABLE_SITE_MONITOR=true
+
+# Add URLs to monitor (space-separated)
+CRITICAL_SITES="https://example.com https://api.example.com"
+```
+
+**Advanced per-site configuration:**
+
+You can customize settings per-site using pipe-separated parameters:
+
+```bash
+# Format: URL|param1=value1|param2=value2
+CRITICAL_SITES="
+  https://example.com|max_response_ms=5000|check_ssl=true
+  https://api.example.com|expected_status=200|max_response_ms=3000
+  https://status.example.com|expected_status=204
+"
+```
+
+Available parameters:
+- `expected_status` — HTTP status code expected (default: 200)
+- `max_response_ms` — Response time threshold in milliseconds (default: 10000)
+- `check_ssl` — Enable SSL certificate expiry checking (default: false)
+
+**SSL certificate monitoring:**
+
+```bash
+# Enable SSL checks globally
+SITE_CHECK_SSL=true
+SITE_SSL_WARN_DAYS=7    # Warn when cert expires in 7 days
+
+# Or enable per-site
+CRITICAL_SITES="https://example.com|check_ssl=true"
+```
+
+**Alert conditions:**
+- 🚨 **CRITICAL**: Site unreachable, wrong HTTP status, or SSL certificate expired
+- ⚠️ **WARNING**: Slow response time, SSL expires soon, or SSL verification issues
+- ✅ **RESOLVED**: Site healthy again
 
 ### Getting Telegram Credentials
 
@@ -212,12 +269,61 @@ bash telemon.sh
 tail -f telemon.log
 tail -f telemon_cron.log
 
+# Administration (backup, restore, status, validate)
+bash telemon-admin.sh status      # Show current status
+bash telemon-admin.sh backup      # Create backup
+bash telemon-admin.sh restore <path>  # Restore from backup
+bash telemon-admin.sh validate    # Validate configuration
+bash telemon-admin.sh logs 50     # View last 50 log lines
+bash telemon-admin.sh reset-state # Reset alert state
+
+# Update to latest version
+bash update.sh
+
+# Uninstall
+bash uninstall.sh        # Keep config and logs
+bash uninstall.sh --full   # Remove everything
+
 # Reset state (forces fresh alerts)
 rm /tmp/telemon_sys_alert_state
 
 # Remove cron job
 crontab -e  # delete the telemon line
 ```
+
+## Alternative Deployment Methods
+
+### Systemd Timer (Alternative to Cron)
+
+Telemon can run as a systemd timer for better integration with modern Linux systems:
+
+```bash
+# The install script creates systemd files automatically
+# To use systemd instead of cron:
+sudo systemctl enable telemon.timer
+sudo systemctl start telemon.timer
+
+# Check status
+systemctl status telemon.timer
+journalctl -u telemon -f
+```
+
+See [systemd/README.md](systemd/README.md) for detailed setup.
+
+### Docker
+
+Run Telemon in a container:
+
+```bash
+# Build and run with docker-compose
+docker-compose up -d
+
+# Or run manually
+docker build -t telemon .
+docker run -v $(pwd)/.env:/opt/telemon/.env:ro telemon
+```
+
+See [docker-compose.yml](docker-compose.yml) for configuration options.
 
 ## Requirements
 
@@ -260,15 +366,42 @@ These are not available on macOS or Windows natively.
 
 ```
 telemon/
-├── telemon.sh          # Main monitoring script
-├── install.sh          # Setup script (cron, permissions)
-├── .env.example        # Configuration template
-├── .env                # Your actual config (gitignored)
-├── .gitignore          # Excludes .env and logs
-├── LICENSE             # MIT License
-├── README.md           # This file
-└── AGENTS.md           # Architecture documentation
+├── telemon.sh              # Main monitoring script
+├── install.sh              # Setup script (cron, permissions)
+├── uninstall.sh            # Clean removal script
+├── update.sh               # Update to latest version
+├── telemon-admin.sh        # Administration utility
+├── .env.example            # Configuration template
+├── .env                    # Your actual config (gitignored)
+├── .gitignore              # Excludes .env and logs
+├── LICENSE                 # MIT License
+├── README.md               # This file
+├── CHANGELOG.md            # Version history
+├── CONTRIBUTING.md         # Contribution guidelines
+├── AGENTS.md               # Architecture documentation
+├── telemon-logrotate.conf  # Logrotate configuration
+├── systemd/                # Systemd service files
+│   ├── telemon@.service
+│   ├── telemon.timer
+│   └── README.md
+├── Dockerfile              # Docker image
+├── docker-compose.yml      # Docker Compose config
+└── docs/                   # Documentation
+    ├── man/
+    │   └── telemon.1       # Man page
+    ├── QUICKREF.md         # Quick reference card
+    └── TROUBLESHOOTING.md  # Troubleshooting guide
 ```
+
+## Documentation
+
+- [README.md](README.md) - This file (setup and usage)
+- [AGENTS.md](AGENTS.md) - Architecture and agent behavior
+- [docs/QUICKREF.md](docs/QUICKREF.md) - Quick reference card
+- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) - Troubleshooting guide
+- [docs/man/telemon.1](docs/man/telemon.1) - Man page
+- [CONTRIBUTING.md](CONTRIBUTING.md) - Contribution guidelines
+- [CHANGELOG.md](CHANGELOG.md) - Version history
 
 ## Architecture
 
@@ -280,18 +413,23 @@ See [AGENTS.md](AGENTS.md) for detailed architecture documentation including:
 
 ## Troubleshooting
 
-**No alerts received?**
+See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for detailed troubleshooting with flowcharts.
+
+**Quick fixes:**
+
+| Problem | Quick Solution |
+|---------|---------------|
+| No alerts received? | Run `bash telemon-admin.sh validate` to check config |
+| False alarms? | Increase `CONFIRMATION_COUNT` in `.env` |
+| Docker checks failing? | Add user to docker group: `sudo usermod -aG docker $USER` |
+| State stuck? | Run `bash telemon-admin.sh reset-state` |
+| Need to update? | Run `bash update.sh` |
+
+**Common checks:**
 - Check `.env` has valid `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
 - Run manually: `bash telemon.sh` and check output
 - Verify cron job: `crontab -l`
-
-**False alarms?**
-- Increase `CONFIRMATION_COUNT` in `.env`
-- Adjust thresholds (e.g., `CPU_THRESHOLD_CRIT`)
-
-**Docker/PM2 checks failing?**
-- Ensure user has permissions (docker group for Docker)
-- Verify commands are in PATH
+- View logs: `bash telemon-admin.sh logs 100`
 
 ## Set & Forget Guarantee
 
@@ -318,10 +456,13 @@ MIT License — see [LICENSE](LICENSE) file.
 
 ## Contributing
 
-Contributions welcome! Please:
+See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed contribution guidelines.
+
+Quick start:
 1. Fork the repository
 2. Create a feature branch
-3. Submit a pull request
+3. Run tests: `bash telemon-admin.sh validate`
+4. Submit a pull request
 
 ---
 

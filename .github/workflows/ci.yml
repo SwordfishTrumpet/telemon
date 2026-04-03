@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Run ShellCheck
+      uses: ludeeus/action-shellcheck@master
+      with:
+        severity: warning
+        check_together: 'yes'
+      env:
+        SHELLCHECK_OPTS: -e SC1090 -e SC1091
+
+  syntax-check:
+    name: Bash Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Check telemon.sh syntax
+      run: bash -n telemon.sh
+    
+    - name: Check install.sh syntax
+      run: bash -n install.sh
+    
+    - name: Check uninstall.sh syntax
+      run: bash -n uninstall.sh
+    
+    - name: Check update.sh syntax
+      run: bash -n update.sh
+    
+    - name: Check telemon-admin.sh syntax
+      run: bash -n telemon-admin.sh
+
+  test-run:
+    name: Test Run (Dry Mode)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Create test .env
+      run: |
+        cp .env.example .env
+        # Use dummy values for testing
+        sed -i 's/your-bot-token-here/test-token/' .env
+        sed -i 's/your-chat-id-here/123456789/' .env
+    
+    - name: Validate configuration
+      run: |
+        bash telemon-admin.sh validate
+      continue-on-error: true
+    
+    - name: Check script structure
+      run: |
+        # Verify all required functions exist
+        grep -q "check_cpu()" telemon.sh || exit 1
+        grep -q "check_memory()" telemon.sh || exit 1
+        grep -q "check_disk()" telemon.sh || exit 1
+        grep -q "send_telegram()" telemon.sh || exit 1
+        echo "All required functions found"
+
+  markdown-lint:
+    name: Markdown Lint
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Run markdownlint
+      uses: DavidAnson/markdownlint-cli2-action@v14
+      with:
+        globs: '**/*.md'
+      continue-on-error: true

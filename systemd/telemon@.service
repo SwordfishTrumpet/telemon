@@ -1,0 +1,13 @@
+[Unit]
+Description=Telemon System Health Monitor
+After=network.target
+
+[Service]
+Type=oneshot
+User=%I
+ExecStart=%h/telemon/telemon.sh
+StandardOutput=append:%h/telemon/telemon_cron.log
+StandardError=append:%h/telemon/telemon_cron.log
+
+[Install]
+WantedBy=multi-user.target

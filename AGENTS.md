@@ -22,6 +22,7 @@ The main monitoring agent runs every 5 minutes via cron. It performs stateful ch
 - System process health (sshd, docker)
 - Docker container status (postgres, zilean)
 - PM2 process monitoring (hound)
+- Website/endpoint monitoring (HTTP/HTTPS reachability, SSL expiry)
 
 **State Management:**
 - State file: `/tmp/telemon_sys_alert_state`
@@ -52,6 +53,7 @@ ENABLE_SYSTEM_PROCESSES=true
 ENABLE_FAILED_SYSTEMD_SERVICES=true
 ENABLE_DOCKER_CONTAINERS=true
 ENABLE_PM2_PROCESSES=true
+ENABLE_SITE_MONITOR=false
 
 # Thresholds
 CPU_THRESHOLD_WARN=70        # % of cores
@@ -69,9 +71,69 @@ CONFIRMATION_COUNT=3           # consecutive matches before alerting
 CRITICAL_SYSTEM_PROCESSES="sshd docker"
 CRITICAL_CONTAINERS="postgres zilean"
 CRITICAL_PM2_PROCESSES="hound"
+CRITICAL_SITES="https://example.com https://api.example.com"
 ```
 
-**Disabling Checks:** Set `ENABLE_*` to `false` or set process/container lists to empty string `""`.
+**Disabling Checks:** Set `ENABLE_*` to `false` or set process/container/site lists to empty string `""`.
+
+---
+
+## Site Monitoring Agent
+
+The site monitoring agent performs HTTP/HTTPS health checks on configured endpoints. It tracks availability, response time, and SSL certificate health.
+
+### Configuration
+
+```bash
+# Enable site monitoring
+ENABLE_SITE_MONITOR=true
+
+# URLs to monitor (space-separated)
+# Format: URL or URL|param1=value1|param2=value2
+CRITICAL_SITES="https://example.com|max_response_ms=5000|check_ssl=true"
+
+# Global defaults
+SITE_EXPECTED_STATUS=200       # Expected HTTP status code
+SITE_MAX_RESPONSE_MS=10000     # Response time threshold (ms)
+SITE_CHECK_SSL=false           # Enable SSL expiry checks
+SITE_SSL_WARN_DAYS=7           # Days before expiry to warn
+```
+
+### Per-Site Parameters
+
+Override defaults per-site using pipe syntax:
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `expected_status` | HTTP status code expected | `expected_status=200` |
+| `max_response_ms` | Response time threshold (ms) | `max_response_ms=3000` |
+| `check_ssl` | Enable SSL expiry check | `check_ssl=true` |
+
+**Example:**
+```bash
+CRITICAL_SITES="
+  https://example.com|max_response_ms=5000|check_ssl=true
+  https://api.example.com|expected_status=200|max_response_ms=3000
+  https://status.example.com|expected_status=204
+"
+```
+
+### Alert Conditions
+
+| Condition | State | Details |
+|-----------|-------|---------|
+| Connection fails | CRITICAL | DNS resolution, timeout, or connection refused |
+| Wrong HTTP status | CRITICAL | Response code ≠ expected_status |
+| Slow response | WARNING | Response time > max_response_ms |
+| SSL expired | CRITICAL | Certificate has expired |
+| SSL expiring soon | WARNING | Certificate expires within SITE_SSL_WARN_DAYS |
+| SSL verification fails | WARNING | Certificate chain or hostname mismatch |
+
+### State Key Format
+
+Site state keys are generated from the URL:
+- `https://example.com` → `site_https_example_com`
+- `https://api.example.com/v1/health` → `site_https_api_example_com_v1_health`
 
 ---
 
@@ -186,6 +248,7 @@ crontab -e  # delete the telemon line
   `https://api.telegram.org/bot<TOKEN>/getUpdates`
 - Docker checks require user in docker group or sudo
 - PM2 checks require PM2 to be installed globally
+- Site monitoring requires `curl` (standard on most systems)
 - **Zero maintenance**: Self-rotating logs, persistent state, cron-scheduled
 
 ### Linux Dependencies

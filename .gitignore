@@ -1,12 +1,19 @@
 # Telemon - Environment Configuration
 .env
 
+# Internal documentation (not for GitHub)
+AGENTS.md
+
 # Log files
 *.log
-sys_monitor_cron.log
+telemon_cron.log
 
 # State files
 /tmp/telemon_*
+
+# Backup directories
+backups/
+.backup-*
 
 # OS files
 .DS_Store
