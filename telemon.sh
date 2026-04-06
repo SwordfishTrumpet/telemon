@@ -165,7 +165,8 @@ validate_thresholds() {
         local name="$1"
         local warn="$2"
         local crit="$3"
-        
+        local inverted="${4:-false}"  # true = lower value is worse (e.g. available memory %)
+
         if ! is_valid_number "$warn"; then
             log "ERROR" "Invalid ${name}_THRESHOLD_WARN: '${warn}' must be a positive integer"
             has_errors=true
@@ -175,15 +176,21 @@ validate_thresholds() {
             has_errors=true
         fi
         if is_valid_number "$warn" && is_valid_number "$crit"; then
-            if [[ "$warn" -ge "$crit" ]]; then
-                log "WARN" "${name}_THRESHOLD_WARN (${warn}) should be less than ${name}_THRESHOLD_CRIT (${crit})"
+            if [[ "$inverted" == "true" ]]; then
+                if [[ "$warn" -le "$crit" ]]; then
+                    log "WARN" "${name}_THRESHOLD_WARN (${warn}) should be greater than ${name}_THRESHOLD_CRIT (${crit}) for inverted metrics"
+                fi
+            else
+                if [[ "$warn" -ge "$crit" ]]; then
+                    log "WARN" "${name}_THRESHOLD_WARN (${warn}) should be less than ${name}_THRESHOLD_CRIT (${crit})"
+                fi
             fi
         fi
     }
     
     # Validate all threshold pairs
     check_threshold_pair "CPU" "${CPU_THRESHOLD_WARN:-70}" "${CPU_THRESHOLD_CRIT:-80}"
-    check_threshold_pair "MEM" "${MEM_THRESHOLD_WARN:-15}" "${MEM_THRESHOLD_CRIT:-10}"
+    check_threshold_pair "MEM" "${MEM_THRESHOLD_WARN:-15}" "${MEM_THRESHOLD_CRIT:-10}" "true"
     check_threshold_pair "DISK" "${DISK_THRESHOLD_WARN:-85}" "${DISK_THRESHOLD_CRIT:-90}"
     check_threshold_pair "SWAP" "${SWAP_THRESHOLD_WARN:-50}" "${SWAP_THRESHOLD_CRIT:-80}"
     check_threshold_pair "IOWAIT" "${IOWAIT_THRESHOLD_WARN:-30}" "${IOWAIT_THRESHOLD_CRIT:-50}"
@@ -387,12 +394,13 @@ check_memory() {
 # CHECK: Disk Space
 # ===========================================================================
 check_disk() {
-    # Parse df output, skip tmpfs/devtmpfs/overlay/squashfs
+    # Parse df output, skip tmpfs/devtmpfs/overlay/squashfs/loop
     while read -r filesystem size used avail pct mountpoint; do
         [[ "$filesystem" == "Filesystem" ]] && continue
         [[ "$filesystem" == tmpfs* || "$filesystem" == devtmpfs* ]] && continue
         [[ "$filesystem" == overlay* || "$filesystem" == squashfs* ]] && continue
         [[ "$filesystem" == udev* || "$filesystem" == efivarfs* ]] && continue
+        [[ "$filesystem" == /dev/loop* ]] && continue  # Skip loop-mounted ISOs
         [[ "$mountpoint" == /snap/* ]] && continue
         [[ "$mountpoint" == /boot/efi ]] && continue
         [[ "$mountpoint" == /dev || "$mountpoint" == /dev/* ]] && continue
@@ -485,35 +493,37 @@ check_swap() {
 # CHECK: I/O Wait (CPU waiting for disk I/O)
 # ===========================================================================
 check_iowait() {
-    # Read /proc/stat to get CPU stats
-    local iowait
-    iowait=$(awk '/^cpu / {print $6}' /proc/stat)
-    
-    if [[ -n "$iowait" ]]; then
-        # Calculate percentage (iowait is in jiffies, need to calculate %)
-        # Read current values
-        local user nice system idle iowait irq softirq steal guest guest_nice
-        read -r user nice system idle iowait irq softirq steal guest guest_nice < <(awk '/^cpu / {print $2,$3,$4,$5,$6,$7,$8,$9,$10,$11}' /proc/stat)
-        
-        local total=$((user + nice + system + idle + iowait + irq + softirq + steal))
-        local iowait_pct=0
-        if [[ "$total" -gt 0 ]]; then
-            iowait_pct=$(( (iowait * 100) / total ))
-        fi
-        
-        local state="OK"
-        local detail="I/O Wait: ${iowait_pct}% of CPU time"
-        
-        if (( iowait_pct >= IOWAIT_THRESHOLD_CRIT )); then
-            state="CRITICAL"
-            detail="I/O Wait: <b>${iowait_pct}%</b> of CPU time waiting for disk (threshold: ${IOWAIT_THRESHOLD_CRIT}%)"
-        elif (( iowait_pct >= IOWAIT_THRESHOLD_WARN )); then
-            state="WARNING"
-            detail="I/O Wait: <b>${iowait_pct}%</b> of CPU time waiting for disk (threshold: ${IOWAIT_THRESHOLD_WARN}%)"
-        fi
-        
-        check_state_change "iowait" "$state" "$detail"
+    # Calculate iowait% over a 1-second interval using two /proc/stat samples.
+    # /proc/stat values are cumulative since boot, so a single sample gives the
+    # lifetime average (always near 0 on long-running systems) -- useless.
+    # Delta between two samples gives the actual current interval percentage.
+    local u1 n1 s1 id1 iw1 irq1 sirq1 st1 g1 gn1
+    local u2 n2 s2 id2 iw2 irq2 sirq2 st2 g2 gn2
+
+    read -r u1 n1 s1 id1 iw1 irq1 sirq1 st1 g1 gn1 < <(awk '/^cpu / {print $2,$3,$4,$5,$6,$7,$8,$9,$10,$11}' /proc/stat)
+    sleep 1
+    read -r u2 n2 s2 id2 iw2 irq2 sirq2 st2 g2 gn2 < <(awk '/^cpu / {print $2,$3,$4,$5,$6,$7,$8,$9,$10,$11}' /proc/stat)
+
+    local dtotal=$(( (u2-u1) + (n2-n1) + (s2-s1) + (id2-id1) + (iw2-iw1) + (irq2-irq1) + (sirq2-sirq1) + (st2-st1) ))
+    local diowait=$(( iw2 - iw1 ))
+
+    local iowait_pct=0
+    if [[ "$dtotal" -gt 0 ]]; then
+        iowait_pct=$(( (diowait * 100) / dtotal ))
     fi
+
+    local state="OK"
+    local detail="I/O Wait: ${iowait_pct}% of CPU time"
+
+    if (( iowait_pct >= IOWAIT_THRESHOLD_CRIT )); then
+        state="CRITICAL"
+        detail="I/O Wait: <b>${iowait_pct}%</b> of CPU time waiting for disk (threshold: ${IOWAIT_THRESHOLD_CRIT}%)"
+    elif (( iowait_pct >= IOWAIT_THRESHOLD_WARN )); then
+        state="WARNING"
+        detail="I/O Wait: <b>${iowait_pct}%</b> of CPU time waiting for disk (threshold: ${IOWAIT_THRESHOLD_WARN}%)"
+    fi
+
+    check_state_change "iowait" "$state" "$detail"
 }
 
 # ===========================================================================
@@ -545,9 +555,9 @@ check_zombies() {
 get_top_processes() {
     local count="${1:-5}"
     local output=""
-    output+="<pre>Top ${count} processes by CPU:\n"
+    output+="<pre>Top ${count} processes by CPU:"$'\n'
     output+=$(ps aux --sort=-%cpu | head -$((count + 1)) | tail -${count} | awk '{printf "  %s %5s%% %s\n", $2, $3, $11}')
-    output+="\n\nTop ${count} processes by Memory:\n"
+    output+=$'\n\n'"Top ${count} processes by Memory:"$'\n'
     output+=$(ps aux --sort=-%mem | head -$((count + 1)) | tail -${count} | awk '{printf "  %s %5s%% %s\n", $2, $4, $11}')
     output+="</pre>"
     echo "$output"
@@ -605,7 +615,7 @@ check_system_processes() {
 check_failed_systemd_services() {
     # Get list of failed services
     local failed_services
-    failed_services=$(run_with_timeout "$CHECK_TIMEOUT" systemctl --failed --no-legend --no-pager 2>/dev/null | awk '/failed/ {print $1}' | grep -v "^●$")
+    failed_services=$(run_with_timeout "$CHECK_TIMEOUT" systemctl --failed --no-legend --no-pager 2>/dev/null | awk '/failed/ {print $1}' | grep -v "^●$" || true)
     
     if [[ -n "$failed_services" ]]; then
         local count
@@ -749,6 +759,78 @@ except Exception:
 }
 
 # ===========================================================================
+# CHECK: NVMe / SMART Health
+# Uses smartctl to check critical_warning, media errors, temp, and % used
+# Only runs if smartctl is available
+# ===========================================================================
+check_nvme_health() {
+    local device="${NVME_DEVICE:-/dev/nvme0n1}"
+    
+    if ! command -v smartctl &>/dev/null; then
+        return
+    fi
+    
+    if [[ ! -b "$device" ]]; then
+        return
+    fi
+    
+    local smart_out
+    smart_out=$(run_with_timeout "$CHECK_TIMEOUT" smartctl -A "$device" 2>/dev/null) || smart_out=""
+    
+    if [[ -z "$smart_out" ]]; then
+        check_state_change "nvme_health" "WARNING" "NVMe <code>${device}</code>: smartctl returned no output"
+        return
+    fi
+    
+    # Parse key fields
+    local critical_warning pct_used temp media_errors
+    critical_warning=$(echo "$smart_out" | awk '/Critical Warning:/ {print $NF}')
+    pct_used=$(echo "$smart_out"         | awk '/Percentage Used:/ {gsub(/%/,""); print $NF}')
+    temp=$(echo "$smart_out"             | awk '/^Temperature:/ {print $2}')
+    media_errors=$(echo "$smart_out"     | awk '/Media and Data Integrity Errors:/ {gsub(/,/,""); print $NF}')
+    
+    local state="OK"
+    local issues=""
+    
+    # Critical warning byte (non-zero = drive is reporting a problem)
+    if [[ -n "$critical_warning" && "$critical_warning" != "0x00" ]]; then
+        state="CRITICAL"
+        issues+=" critical_warning=${critical_warning}"
+    fi
+    
+    # Endurance used: warn at 80%, crit at 95%
+    if [[ -n "$pct_used" ]]; then
+        if (( pct_used >= 95 )); then
+            state="CRITICAL"
+            issues+=" endurance=${pct_used}%"
+        elif (( pct_used >= 80 )); then
+            [[ "$state" == "OK" ]] && state="WARNING"
+            issues+=" endurance=${pct_used}%"
+        fi
+    fi
+    
+    # Temperature: warn at 70°C, crit at 80°C (drive warning threshold is 82°C)
+    if [[ -n "$temp" ]]; then
+        if (( temp >= 80 )); then
+            state="CRITICAL"
+            issues+=" temp=${temp}°C"
+        elif (( temp >= 70 )); then
+            [[ "$state" == "OK" ]] && state="WARNING"
+            issues+=" temp=${temp}°C"
+        fi
+    fi
+    
+    local detail
+    if [[ "$state" == "OK" ]]; then
+        detail="NVMe <code>${device}</code> healthy (temp=${temp}°C, used=${pct_used}%, media_errors=${media_errors})"
+    else
+        detail="NVMe <code>${device}</code> <b>${state}</b>:${issues} (temp=${temp}°C, used=${pct_used}%, media_errors=${media_errors})"
+    fi
+    
+    check_state_change "nvme_health" "$state" "$detail"
+}
+
+# ===========================================================================
 # CHECK: Website/Site Reachability Monitor
 # Monitors HTTP/HTTPS endpoints for availability, response time, and SSL expiry
 # ===========================================================================
@@ -868,7 +950,7 @@ send_telegram() {
     # Convert %0A back to real newlines for --data-urlencode
     message="${message//%0A/$'\n'}"
     local response
-    response=$(curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    response=$(curl -s --max-time 30 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
         -d "chat_id=${TELEGRAM_CHAT_ID}" \
         -d "parse_mode=HTML" \
         --data-urlencode "text=${message}" 2>&1)
@@ -919,6 +1001,7 @@ main() {
     [[ "${ENABLE_DOCKER_CONTAINERS:-true}" == "true" ]] && check_docker_containers
     [[ "${ENABLE_PM2_PROCESSES:-true}" == "true" ]] && check_pm2_processes
     [[ "${ENABLE_SITE_MONITOR:-false}" == "true" ]] && check_sites
+    [[ "${ENABLE_NVME_CHECK:-false}" == "true" ]] && check_nvme_health
 
     # Restore confirmation count for state saving
     CONFIRMATION_COUNT="$saved_confirm_count"
@@ -948,7 +1031,12 @@ main() {
         local first_alerts=""
         for key in "${!CURR_STATE[@]}"; do
             if [[ "${CURR_STATE[$key]}" != "OK" ]]; then
-                first_alerts+="&#9888;&#65039; <b>${key}</b>: ${CURR_STATE[$key]}%0A"
+                local emoji=""
+                case "${CURR_STATE[$key]}" in
+                    CRITICAL) emoji="&#128308;" ;;
+                    WARNING)  emoji="&#128992;" ;;
+                esac
+                first_alerts+="${emoji} <b>${key}</b>: ${STATE_DETAIL[$key]:-${CURR_STATE[$key]}}%0A"
             fi
         done
 
