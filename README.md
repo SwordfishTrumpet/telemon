@@ -35,7 +35,7 @@ Telemon watches your Linux server — CPU, memory, disk, containers, services, p
 - **GPU Monitoring** — Temperature alerts via `nvidia-smi` (utilization shown in alert detail but not thresholded)
 - **UPS / Battery** — Charge level monitoring via `upower` or `apcaccess`
 - **Network Bandwidth** — Interface throughput monitoring against Mbit/s thresholds
-- **Log Pattern Matching** — Watch log files for regex patterns (e.g., `ERROR`, `OOM`)
+- **Log Pattern Matching** — Watch log files for regex patterns (e.g., `ERROR`, `OOM`); shows first 3 matching lines, truncated at 200 chars
 - **File Integrity** — SHA256 checksum monitoring for critical files (`/etc/passwd`, configs, etc.)
 - **Cron Job Heartbeats** — Detect stale cron jobs via heartbeat file age tracking
 
@@ -49,7 +49,7 @@ Telemon watches your Linux server — CPU, memory, disk, containers, services, p
 - **Two Heartbeat Modes** — File-based (NFS/shared storage) for fleet monitoring, or webhook (Healthchecks.io, UptimeRobot) for external monitoring
 
 ### Hardware Monitoring
-- **NVMe / SMART Health** — Critical warning byte, endurance wear, temperature, and media errors via `smartctl`
+- **NVMe / SMART Health** — Critical warning byte, endurance wear (warn 80%, crit 95%), temperature, and media errors via `smartctl`
 
 ### Alert Channels
 
@@ -62,7 +62,7 @@ Telemon sends alerts through up to three channels simultaneously:
 | **Email** | `EMAIL_TO`, `EMAIL_FROM` | sendmail or msmtp |
 
 - **Telegram** is the primary channel. If it fails, messages are queued and retried next cycle.
-- **Webhook** sends a JSON POST to any URL. Works with Slack, Discord, ntfy, and generic endpoints.
+- **Webhook** sends a JSON POST to any URL. Works with Slack, Discord, ntfy, and generic endpoints. See [Webhook Payload Format](#webhook-payload-format).
 - **Email** sends plain-text via `sendmail` or `msmtp`. Header injection is prevented.
 
 ### Alert Intelligence
@@ -86,24 +86,57 @@ Telemon sends alerts through up to three channels simultaneously:
 - **Scheduled Windows** — Recurring windows via `MAINT_SCHEDULE` (e.g., `"Sun 02:00-04:00;Sat 03:00-05:00"`)
 
 ### Exports & Integrations
-- **Prometheus** — Writes metrics to textfile for `node_exporter --collector.textfile` — no HTTP server needed
-- **JSON Status** — Writes current state to JSON file after each run; serve with nginx/caddy for a status API
+- **Prometheus** — Writes metrics to textfile for `node_exporter --collector.textfile` — no HTTP server needed. See [Prometheus Metrics](#prometheus-metrics).
+- **JSON Status** — Writes current state to JSON file after each run; serve with nginx/caddy for a status API. See [JSON Status Format](#json-status-format).
 - **Health Digest** — `telemon.sh --digest` sends a full health summary even when everything is OK (schedule daily/weekly via cron)
 
 ### Security
-- **Credential Protection** — Bot token passed via process substitution, hidden from `ps` and `/proc/*/cmdline`
+- **Credential Protection** — Bot token passed via process substitution, hidden from `ps` and `/proc/*/cmdline`; falls back to secure temp file in restricted containers
 - **Config Protection** — `.env` enforced to `chmod 600` (owner-only)
 - **State File Protection** — Symlink attack prevention, atomic writes via temp file + `mv`, `umask 077`
 - **Heartbeat File Protection** — Symlink-safe writes via `mv -T`, sticky bit on shared directories, no infrastructure details leaked (counts only, not key names)
 - **Code Injection Prevention** — PM2 names via environment variables, TCP port validation, hostname via env vars in Python
 - **HTML Escaping** — All user-supplied content sanitized (including single quotes) for Telegram HTML mode; untrusted heartbeat data validated against allowlists before embedding in alerts
-- **Email Safety** — Header injection prevention in email alerts
+- **Email Safety** — Header injection prevention in email alerts (newlines, carriage returns, tabs, and null bytes stripped)
 
 ### Reliability
 - **Lock File** — Prevents overlapping runs via `flock` (atomic) with PID file fallback
 - **Command Timeouts** — All external commands wrapped with configurable timeout (default 30s)
 - **Self-Healing Logs** — Automatic rotation (configurable via `LOG_MAX_SIZE_MB` and `LOG_MAX_BACKUPS`, defaults: 10MB, 5 backups)
 - **State Persistence** — Tracks state across reboots, survives cron/systemd restarts
+
+### Check Reference
+
+<details>
+<summary><strong>Complete check reference table</strong> (click to expand)</summary>
+
+| Check | Function | Enable Flag | Default | Dependencies | State Key | Thresholds |
+|-------|----------|-------------|---------|-------------|-----------|------------|
+| CPU Load | `check_cpu` | `ENABLE_CPU_CHECK` | `true` | `/proc/loadavg` | `cpu` | `CPU_THRESHOLD_WARN=70`, `_CRIT=80` (% of cores) |
+| Memory | `check_memory` | `ENABLE_MEMORY_CHECK` | `true` | `/proc/meminfo` | `mem` | `MEM_THRESHOLD_WARN=15`, `_CRIT=10` (% free, inverted) |
+| Disk Space | `check_disk` | `ENABLE_DISK_CHECK` | `true` | `df` | `disk_<mount>` | `DISK_THRESHOLD_WARN=85`, `_CRIT=90` (% used) |
+| Swap | `check_swap` | `ENABLE_SWAP_CHECK` | `true` | `/proc/swaps` | `swap` | `SWAP_THRESHOLD_WARN=50`, `_CRIT=80` (% used) |
+| I/O Wait | `check_iowait` | `ENABLE_IOWAIT_CHECK` | `true` | `/proc/stat` | `iowait` | `IOWAIT_THRESHOLD_WARN=30`, `_CRIT=50` (% CPU) |
+| Zombies | `check_zombies` | `ENABLE_ZOMBIE_CHECK` | `true` | `ps` | `zombies` | `ZOMBIE_THRESHOLD_WARN=5`, `_CRIT=20` (count) |
+| Internet | `check_internet` | `ENABLE_INTERNET_CHECK` | `true` | `ping` | `internet` | `PING_FAIL_THRESHOLD=3` (consecutive failures) |
+| Sys Processes | `check_system_processes` | `ENABLE_SYSTEM_PROCESSES` | `true` | `pgrep`, `systemctl` | `proc_<name>` | Binary: running or not |
+| Failed Systemd | `check_failed_systemd_services` | `ENABLE_FAILED_SYSTEMD_SERVICES` | `true` | `systemctl` | `systemd_failed` | Binary: any failed units |
+| Docker | `check_docker_containers` | `ENABLE_DOCKER_CONTAINERS` | `false` | `docker` | `container_<name>` | Binary: running/healthy or not |
+| PM2 | `check_pm2_processes` | `ENABLE_PM2_PROCESSES` | `false` | `pm2`, `python3` | `pm2_<name>` | Binary: online or not |
+| Sites | `check_sites` | `ENABLE_SITE_MONITOR` | `false` | `curl`, `openssl` | `site_<md5>` | Per-site: status, response time, SSL expiry |
+| NVMe | `check_nvme_health` | `ENABLE_NVME_CHECK` | `false` | `smartctl` | `nvme_health` | Critical warning byte, endurance 80/95%, temp |
+| TCP Ports | `check_tcp_ports` | `ENABLE_TCP_PORT_CHECK` | `false` | `/dev/tcp` | `port_<host>_<port>` | Binary: reachable or not |
+| CPU Temp | `check_cpu_temp` | `ENABLE_TEMP_CHECK` | `false` | `sensors` | `cpu_temp` | `TEMP_THRESHOLD_WARN=75`, `_CRIT=90` (°C) |
+| DNS | `check_dns` | `ENABLE_DNS_CHECK` | `false` | `dig`/`nslookup`/`host` | `dns` | Binary: resolves or not |
+| GPU | `check_gpu` | `ENABLE_GPU_CHECK` | `false` | `nvidia-smi` | `gpu` | `GPU_TEMP_THRESHOLD_WARN=80`, `_CRIT=95` (°C) |
+| UPS/Battery | `check_ups` | `ENABLE_UPS_CHECK` | `false` | `upower`/`apcaccess` | `ups` | `UPS_THRESHOLD_WARN=30`, `_CRIT=10` (%, inverted) |
+| Network BW | `check_network_bandwidth` | `ENABLE_NETWORK_CHECK` | `false` | `/proc/net/dev` | `net_<iface>` | `NETWORK_THRESHOLD_WARN=800`, `_CRIT=950` (Mbit/s) |
+| Log Patterns | `check_log_patterns` | `ENABLE_LOG_CHECK` | `false` | `tail`, `grep` | `log_<md5>` | Binary: patterns found or not |
+| File Integrity | `check_file_integrity` | `ENABLE_INTEGRITY_CHECK` | `false` | `sha256sum` | `integrity_<md5>` | Binary: checksum changed or not |
+| Cron Jobs | `check_cron_jobs` | `ENABLE_CRON_CHECK` | `false` | `stat` | `cron_<name>` | `max_age_minutes` per job |
+| Fleet | `check_fleet_heartbeats` | `ENABLE_FLEET_CHECK` | `false` | heartbeat files | `fleet_<label>` | `FLEET_STALE_THRESHOLD_MIN=15` |
+
+</details>
 
 ### Deployment Options
 - **Cron** — Default: every 5 minutes via crontab
@@ -316,8 +349,8 @@ CRON_WATCH_JOBS="backup:/tmp/backup_heartbeat:1440 report:/tmp/report_heartbeat:
 
 # NVMe device
 NVME_DEVICE="/dev/nvme0n1"
-NVME_TEMP_THRESHOLD_WARN=60    # °C warning
-NVME_TEMP_THRESHOLD_CRIT=75    # °C critical
+NVME_TEMP_THRESHOLD_WARN=70    # °C warning
+NVME_TEMP_THRESHOLD_CRIT=80    # °C critical
 
 # Auto-restart failed systemd services
 AUTO_RESTART_SERVICES="nginx sshd"
@@ -399,6 +432,14 @@ STATE_FILE="/tmp/telemon_sys_alert_state"
 
 # Log file
 LOG_FILE="/opt/telemon/telemon.log"
+
+# Log rotation
+LOG_MAX_SIZE_MB=10     # Max log file size before rotation
+LOG_MAX_BACKUPS=5      # Number of rotated backups to keep
+
+# Backup retention (for telemon-admin.sh backup command)
+# Set to 0 or leave empty to keep all backups
+BACKUP_KEEP_COUNT=5
 ```
 
 > **Tip:** For production, move `STATE_FILE` out of `/tmp` (cleared on reboot) to a persistent path like `/var/lib/telemon/state`.
@@ -628,6 +669,93 @@ When `AUTO_RESTART_SERVICES` is configured, Telemon automatically runs `systemct
 
 If `ESCALATION_WEBHOOK_URL` is set, alerts that remain unresolved for `ESCALATION_AFTER_MIN` minutes trigger a separate webhook. Escalation fires once per key and auto-clears when the check resolves.
 
+### Webhook Payload Format
+
+Both the alert webhook and escalation webhook send a JSON POST with `Content-Type: application/json`:
+
+**Alert webhook** (`WEBHOOK_URL`):
+```json
+{
+  "hostname": "my-server",
+  "server_label": "web-prod-01",
+  "timestamp": "2025-01-15T12:00:00Z",
+  "message": "Plain-text alert content (HTML stripped)"
+}
+```
+
+**Escalation webhook** (`ESCALATION_WEBHOOK_URL`):
+```json
+{
+  "hostname": "my-server",
+  "server_label": "web-prod-01",
+  "type": "escalation",
+  "timestamp": "2025-01-15T12:00:00Z",
+  "message": "Plain-text escalation content (HTML stripped)"
+}
+```
+
+Both payloads automatically strip HTML tags and decode entities from the Telegram-formatted message into plain text.
+
+### Prometheus Metrics
+
+When `ENABLE_PROMETHEUS_EXPORT=true`, Telemon writes a textfile to `PROMETHEUS_TEXTFILE_DIR` for [node_exporter's textfile collector](https://prometheus.io/docs/guides/node-exporter/#textfile-collector). No HTTP server or persistent process required.
+
+**Exported metrics:**
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `telemon_check_state{check="..."}` | gauge | Per-check state: 0=OK, 1=WARNING, 2=CRITICAL |
+| `telemon_checks_total` | gauge | Total number of checks in this run |
+| `telemon_last_run_timestamp` | gauge | Unix timestamp of last run |
+
+**Example output** (`telemon.prom`):
+```
+# HELP telemon_check_state Telemon check state (0=OK, 1=WARNING, 2=CRITICAL)
+# TYPE telemon_check_state gauge
+telemon_check_state{check="cpu"} 0
+telemon_check_state{check="mem"} 1
+telemon_check_state{check="disk_root"} 0
+# HELP telemon_checks_total Total number of checks in this run
+# TYPE telemon_checks_total gauge
+telemon_checks_total 12
+# HELP telemon_last_run_timestamp Unix timestamp of last run
+# TYPE telemon_last_run_timestamp gauge
+telemon_last_run_timestamp 1705312800
+```
+
+**Grafana integration:** Import the textfile metrics with standard Prometheus/Grafana dashboards. Example query: `telemon_check_state{check=~"disk_.*"} > 0` to alert on disk issues.
+
+### JSON Status Format
+
+When `ENABLE_JSON_STATUS=true`, Telemon writes a JSON file after each run (requires `python3`):
+
+```json
+{
+  "hostname": "my-server",
+  "timestamp": "2025-01-15T12:00:00Z",
+  "checks": {
+    "cpu": "OK",
+    "mem": "WARNING",
+    "disk_root": "OK",
+    "container_redis": "CRITICAL"
+  },
+  "summary": {
+    "critical": 1,
+    "warning": 1,
+    "ok": 2
+  }
+}
+```
+
+Serve with nginx/caddy for a lightweight status API endpoint:
+
+```nginx
+location /status {
+    alias /tmp/telemon_status.json;
+    default_type application/json;
+}
+```
+
 ### First-Run Bootstrap
 
 On first run (no state file), Telemon sends a single bootstrap message summarizing all check results with immediate alerts (confirmation temporarily set to 1). Subsequent runs use the configured confirmation count.
@@ -675,9 +803,12 @@ Related files:
 | File | Purpose |
 |------|---------|
 | `${STATE_FILE}` | Current check states and confirmation counts |
+| `${STATE_FILE}.detail` | State detail text (HTML) for digest reporting |
 | `${STATE_FILE}.queue` | Queued alerts from failed Telegram sends |
 | `${STATE_FILE}.cooldown` | Per-key alert rate limiting timestamps |
 | `${STATE_FILE}.escalation` | Escalation tracking (first-seen timestamps) |
+| `${STATE_FILE}.integrity` | File integrity SHA256 checksums |
+| `${STATE_FILE}.net` | Network bandwidth previous counters (rx/tx/timestamp) |
 | `${STATE_FILE}.lock` | Lock file for mutual exclusion |
 | `${HEARTBEAT_DIR}/<label>` | Heartbeat files per server (fleet monitoring) |
 
@@ -721,6 +852,7 @@ bash telemon-admin.sh backup          # Create backup of config, state, and logs
 bash telemon-admin.sh backup /path    # Backup to specific directory
 bash telemon-admin.sh restore <path>  # Restore from backup
 bash telemon-admin.sh reset-state     # Reset alert state (forces fresh alerts)
+bash telemon-admin.sh digest          # Send health digest summary
 bash telemon-admin.sh fleet-status    # Show fleet overview (heartbeat ages, statuses)
 bash telemon-admin.sh logs            # View last 50 log lines
 bash telemon-admin.sh logs 100        # View last 100 log lines
@@ -830,7 +962,7 @@ Telemon reads from Linux-specific interfaces: `/proc/loadavg`, `/proc/meminfo`, 
 
 ```
 telemon/
-├── telemon.sh              # Main monitoring script (~3300 lines)
+├── telemon.sh              # Main monitoring script (~3500 lines)
 ├── telemon-admin.sh        # Admin CLI (backup, restore, status, validate, logs)
 ├── lib/
 │   └── common.sh           # Shared helpers for auxiliary scripts
