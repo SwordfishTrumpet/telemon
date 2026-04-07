@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `server_label` field added to webhook and escalation JSON payloads
   - Fleet summary in `run_digest()` output (server count, stale/missing breakdown)
   - Fleet validation in `run_validate()` with cross-validation (webhook mode + fleet check warning)
+- **Predictive Resource Exhaustion** — trend tracking and linear regression for disk, memory, swap, and inode metrics:
+  - `linear_regression()` computes least-squares slope/intercept from historical datapoints (pure awk)
+  - `record_trend()` appends timestamped values to `${STATE_FILE}.trend` with atomic writes via `safe_write_state_file()`
+  - `check_prediction()` fires WARNING via `check_state_change()` when exhaustion projected within `PREDICT_HORIZON_HOURS`
+  - Tracks disk space (`predict_disk_*`), inodes (`predict_inode_*`), memory (`predict_memory`), and swap (`predict_swap`)
+  - Configurable via `PREDICT_HORIZON_HOURS`, `PREDICT_DATAPOINTS`, `PREDICT_MIN_DATAPOINTS`
+  - Validation in `run_validate()` with cross-validation (DATAPOINTS >= MIN_DATAPOINTS)
 - `telemon-admin.sh`: `fleet-status` command — color-coded table of all heartbeat files with age, status, and checks
 - `telemon-admin.sh`: heartbeat file included in backup/restore; heartbeat info shown in `status` output
 - `telemon-admin.sh`: `digest` command — proxy to `telemon.sh --digest` for CLI consistency

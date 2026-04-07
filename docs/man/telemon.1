@@ -22,6 +22,8 @@ Website monitoring: HTTP/HTTPS endpoints, SSL certificate expiry
 .IP \(bu 2
 Fleet heartbeat monitoring: multi-server dead man's switch via shared storage or webhook
 .IP \(bu 2
+Predictive resource exhaustion: linear regression on disk, memory, swap, and inode trends
+.IP \(bu 2
 Self-rotating logs and persistent state across reboots
 .SH CONFIGURATION
 Configuration is stored in
@@ -47,6 +49,10 @@ FLEET_HEARTBEAT_DIR|Shared directory for heartbeat files
 FLEET_STALE_THRESHOLD_SEC|Seconds before heartbeat is stale (default: 900)
 ENABLE_FLEET_CHECK|Enable fleet heartbeat monitoring (true/false)
 FLEET_EXPECTED_SERVERS|Space-separated list of expected server labels
+ENABLE_PREDICTIVE_ALERTS|Enable predictive resource exhaustion (true/false)
+PREDICT_HORIZON_HOURS|Alert when exhaustion projected within N hours (default: 24)
+PREDICT_DATAPOINTS|Maximum trend datapoints per metric (default: 48)
+PREDICT_MIN_DATAPOINTS|Minimum datapoints before predicting (default: 12)
 .TE
 .SH COMMANDS
 .TP
@@ -83,6 +89,9 @@ Cron execution output
 .TP
 .I /tmp/telemon_sys_alert_state
 State file for alert deduplication
+.TP
+.I /tmp/telemon_sys_alert_state.trend
+Trend data for predictive resource exhaustion (epoch:value pairs per metric)
 .TP
 .I /tmp/telemon_heartbeats/
 Directory for fleet heartbeat files (shared via NFS or similar)

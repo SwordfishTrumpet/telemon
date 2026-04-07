@@ -120,10 +120,20 @@ acquire_lock
 trap release_lock EXIT
 
 # ---------------------------------------------------------------------------
-# Logging helper
+# Logging helper — respects LOG_LEVEL (DEBUG < INFO < WARN < ERROR)
 # ---------------------------------------------------------------------------
+_log_level_num() {
+    case "$1" in
+        DEBUG) echo 0 ;; INFO) echo 1 ;; WARN) echo 2 ;; ERROR) echo 3 ;; *) echo 1 ;;
+    esac
+}
+
 log() {
     local level="$1"; shift
+    local min_level="${LOG_LEVEL:-INFO}"
+    if [[ "$(_log_level_num "$level")" -lt "$(_log_level_num "$min_level")" ]]; then
+        return
+    fi
     echo "$(date '+%Y-%m-%d %H:%M:%S') [${level}] $*" | tee -a "$LOG_FILE"
 }
 
@@ -148,7 +158,7 @@ rotate_logs() {
             done
             mv "$LOG_FILE" "${LOG_FILE}.1"
             : > "$LOG_FILE"
-            log "INFO" "Log rotated (size exceeded ${max_size_mb}MB)"
+            log "DEBUG" "Log rotated (size exceeded ${max_size_mb}MB)"
         fi
     fi
 }
@@ -496,7 +506,7 @@ check_state_change() {
         # Guard against clock skew (NTP corrections): negative delta means clock went backwards
         [[ "$time_since_last" -lt 0 ]] && time_since_last=$((ALERT_COOLDOWN_SEC))
         if [[ "$ALERT_COOLDOWN_SEC" -gt 0 ]] && [[ "$time_since_last" -lt "$ALERT_COOLDOWN_SEC" ]]; then
-            log "INFO" "Rate limited alert for ${key}: cooldown active (${ALERT_COOLDOWN_SEC}s)"
+            log "DEBUG" "Rate limited alert for ${key}: cooldown active (${ALERT_COOLDOWN_SEC}s)"
         else
             local emoji=""
             case "$new_state" in
@@ -569,6 +579,182 @@ except Exception: print('')
     fi
     echo ""
 }
+# ===========================================================================
+# Predictive Resource Exhaustion — linear regression + trend tracking
+# ===========================================================================
+
+# Compute slope and intercept via least-squares linear regression.
+# Input: comma-separated "epoch:value" pairs (e.g., "1712345600:82,1712345900:83")
+# Output: "slope intercept" (space-separated) on stdout.
+# Returns 1 (and prints "0 0") on insufficient/malformed data.
+linear_regression() {
+    local datapoints="$1"
+    [[ -z "$datapoints" ]] && { echo "0 0"; return 1; }
+    echo "$datapoints" | awk -F',' '{
+        n = 0; sx = 0; sy = 0; sxx = 0; sxy = 0
+        for (i = 1; i <= NF; i++) {
+            split($i, a, ":")
+            if (a[1] == "" || a[2] == "") continue
+            x = a[1] + 0; y = a[2] + 0
+            sx += x; sy += y; sxx += x*x; sxy += x*y; n++
+        }
+        if (n < 2 || (n*sxx - sx*sx) == 0) { print "0 0"; exit 1 }
+        slope = (n*sxy - sx*sy) / (n*sxx - sx*sx)
+        intercept = (sy - slope*sx) / n
+        printf "%.10f %.4f\n", slope, intercept
+    }'
+}
+
+# Record a metric datapoint for trend tracking.
+# Usage: record_trend "predict_disk_root" "83"
+# Appends epoch:value to ${STATE_FILE}.trend, capping at PREDICT_DATAPOINTS entries.
+record_trend() {
+    [[ "${ENABLE_PREDICTIVE_ALERTS:-false}" == "true" ]] || return 0
+    local key="$1"
+    local current_value="$2"
+    local trend_file="${STATE_FILE}.trend"
+    local max_points="${PREDICT_DATAPOINTS:-48}"
+    local now
+    now=$(date +%s)
+
+    # Symlink guard
+    if [[ -L "$trend_file" ]]; then
+        log "ERROR" "Trend file is a symlink — refusing to read (possible symlink attack)"
+        return 1
+    fi
+
+    # Load existing trend data (all keys)
+    declare -A trend_data
+    if [[ -f "$trend_file" ]]; then
+        while IFS='=' read -r tkey tval; do
+            [[ -z "$tkey" ]] && continue
+            trend_data["$tkey"]="$tval"
+        done < "$trend_file"
+    fi
+
+    # Append new datapoint, validating existing ones
+    local existing="${trend_data[$key]:-}"
+    local cleaned=""
+    if [[ -n "$existing" ]]; then
+        local IFS=','
+        for dp in $existing; do
+            if [[ "$dp" =~ ^[0-9]+:[0-9]+$ ]]; then
+                cleaned+="${cleaned:+,}${dp}"
+            fi
+        done
+        unset IFS
+    fi
+    cleaned+="${cleaned:+,}${now}:${current_value}"
+
+    # Cap to last max_points entries
+    local point_count
+    point_count=$(echo "$cleaned" | awk -F',' '{print NF}')
+    if [[ "$point_count" -gt "$max_points" ]]; then
+        local drop=$(( point_count - max_points ))
+        cleaned=$(echo "$cleaned" | awk -F',' -v d="$drop" '{
+            for (i = d+1; i <= NF; i++) printf "%s%s", (i>d+1?",":""), $i
+            print ""
+        }')
+    fi
+
+    trend_data["$key"]="$cleaned"
+
+    # Write all keys back atomically
+    local content=""
+    for tkey in "${!trend_data[@]}"; do
+        content+="${tkey}=${trend_data[$tkey]}"$'\n'
+    done
+    safe_write_state_file "$trend_file" "$content"
+}
+
+# Evaluate trend data and fire prediction alert if exhaustion is within horizon.
+# Usage: check_prediction "predict_disk_root" "Disk /" "83"
+check_prediction() {
+    [[ "${ENABLE_PREDICTIVE_ALERTS:-false}" == "true" ]] || return 0
+    local key="$1"
+    local label="$2"
+    local current_value="$3"
+    local trend_file="${STATE_FILE}.trend"
+    local min_points="${PREDICT_MIN_DATAPOINTS:-12}"
+    local horizon_hours="${PREDICT_HORIZON_HOURS:-24}"
+
+    # Read trend data for this key
+    local datapoints=""
+    if [[ -f "$trend_file" ]] && [[ ! -L "$trend_file" ]]; then
+        while IFS='=' read -r tkey tval; do
+            [[ "$tkey" == "$key" ]] && datapoints="$tval" && break
+        done < "$trend_file"
+    fi
+
+    [[ -z "$datapoints" ]] && return 0
+
+    # Count datapoints
+    local point_count
+    point_count=$(echo "$datapoints" | awk -F',' '{print NF}')
+    if [[ "$point_count" -lt "$min_points" ]]; then
+        log "DEBUG" "Prediction: ${key} has ${point_count}/${min_points} datapoints — waiting"
+        return 0
+    fi
+
+    # Run linear regression
+    local result
+    result=$(linear_regression "$datapoints") || {
+        log "DEBUG" "Prediction: ${key} regression failed — skipping"
+        return 0
+    }
+
+    local slope intercept
+    read -r slope intercept <<< "$result"
+
+    # Check if slope is positive (resource growing toward exhaustion)
+    local slope_positive
+    slope_positive=$(awk -v s="$slope" 'BEGIN { print (s > 0) ? "1" : "0" }')
+
+    local safe_label
+    safe_label=$(html_escape "$label")
+
+    if [[ "$slope_positive" != "1" ]]; then
+        # Not growing — clear any previous prediction alert
+        check_state_change "$key" "OK" "${safe_label} at ${current_value}% — stable or decreasing"
+        return 0
+    fi
+
+    # Calculate hours until 100%
+    local hours_to_full
+    hours_to_full=$(awk -v cv="$current_value" -v s="$slope" 'BEGIN {
+        if (s <= 0) { print -1; exit }
+        secs = (100 - cv) / s
+        hours = secs / 3600
+        printf "%.1f", hours
+    }')
+
+    # Validate result
+    if [[ -z "$hours_to_full" ]] || [[ "$hours_to_full" == "-1" ]]; then
+        check_state_change "$key" "OK" "${safe_label} at ${current_value}% — no exhaustion predicted"
+        return 0
+    fi
+
+    # Check if within horizon
+    local within_horizon
+    within_horizon=$(awk -v h="$hours_to_full" -v hz="$horizon_hours" 'BEGIN { print (h > 0 && h <= hz) ? "1" : "0" }')
+
+    if [[ "$within_horizon" == "1" ]]; then
+        # Format display: "< 1h", "~2.5h", "~18h"
+        local hours_display
+        hours_display=$(awk -v h="$hours_to_full" 'BEGIN {
+            if (h < 1) printf "< 1h"
+            else if (h < 10) printf "~%.1fh", h
+            else printf "~%.0fh", h
+        }')
+
+        check_state_change "$key" "WARNING" \
+            "&#9888; <b>PREDICTION</b>: ${safe_label} at ${current_value}% — estimated full in ${hours_display} at current rate"
+    else
+        check_state_change "$key" "OK" \
+            "${safe_label} at ${current_value}% — no exhaustion predicted within ${horizon_hours}h"
+    fi
+}
+
 # ===========================================================================
 check_cpu() {
     [[ -f /proc/loadavg ]] || { log "WARN" "check_cpu: /proc/loadavg not found — skipping"; return; }
@@ -653,8 +839,13 @@ check_memory() {
 
     check_state_change "mem" "$state" "$detail"
     
-    # Capture top processes if memory is under stress (and not already captured by CPU)
-    if [[ "$state" == "WARNING" || "$state" == "CRITICAL" ]] && [[ -z "$TOP_PROCESSES_INFO" ]]; then
+    # Predictive: track memory usage trend (usage = 100 - available%)
+    local mem_usage_pct=$(( 100 - avail_pct ))
+    record_trend "predict_memory" "$mem_usage_pct"
+    check_prediction "predict_memory" "Memory" "$mem_usage_pct"
+
+    # Capture top processes if memory is under stress
+    if [[ "$state" == "WARNING" || "$state" == "CRITICAL" ]]; then
         TOP_PROCESSES_INFO=$(get_top_processes "${TOP_PROCESS_COUNT:-5}")
     fi
 }
@@ -664,6 +855,7 @@ check_memory() {
 # ===========================================================================
 check_disk() {
     # Parse df output, skip tmpfs/devtmpfs/overlay/squashfs/loop
+    local filesystem size used avail pct mountpoint
     while read -r filesystem size used avail pct mountpoint; do
         [[ "$filesystem" == "Filesystem" ]] && continue
         [[ "$filesystem" == tmpfs* || "$filesystem" == devtmpfs* ]] && continue
@@ -702,6 +894,26 @@ check_disk() {
         fi
 
         check_state_change "$key" "$state" "$detail"
+
+        # Predictive: track disk usage trend
+        local predict_key="predict_${key}"
+        record_trend "$predict_key" "$usage"
+        check_prediction "$predict_key" "Disk ${mountpoint}" "$usage"
+
+        # Predictive: track inode usage trend (if available)
+        if [[ "${ENABLE_PREDICTIVE_ALERTS:-false}" == "true" ]]; then
+            local inode_pct_raw
+            inode_pct_raw=$(df -i "$mountpoint" 2>/dev/null | awk 'NR==2 {print $5}')
+            if [[ -n "$inode_pct_raw" ]]; then
+                local inode_usage
+                inode_usage=$(printf '%s' "$inode_pct_raw" | tr -dc '0-9')
+                if [[ "$inode_usage" =~ ^[0-9]+$ ]] && [[ "$inode_usage" -gt 0 ]]; then
+                    local inode_predict_key="predict_inode_$(echo "$mountpoint" | tr '/' '_' | sed 's/^_/root/')"
+                    record_trend "$inode_predict_key" "$inode_usage"
+                    check_prediction "$inode_predict_key" "Inode ${mountpoint}" "$inode_usage"
+                fi
+            fi
+        fi
     done < <(run_with_timeout "$CHECK_TIMEOUT" df -h --output=source,size,used,avail,pcent,target 2>/dev/null)
 }
 
@@ -710,7 +922,7 @@ check_disk() {
 # ===========================================================================
 check_internet() {
     if ! command -v ping &>/dev/null; then
-        log "INFO" "check_internet: ping not found — skipping"
+        log "DEBUG" "check_internet: ping not found — skipping"
         return
     fi
     local target="${PING_TARGET:-8.8.8.8}"
@@ -779,6 +991,10 @@ check_swap() {
             fi
             
             check_state_change "swap" "$state" "$detail"
+
+            # Predictive: track swap usage trend
+            record_trend "predict_swap" "$swap_pct"
+            check_prediction "predict_swap" "Swap" "$swap_pct"
         fi
     fi
 }
@@ -944,7 +1160,7 @@ check_system_processes() {
 # ===========================================================================
 check_failed_systemd_services() {
     if ! command -v systemctl &>/dev/null; then
-        log "INFO" "check_failed_systemd_services: systemctl not found — skipping"
+        log "DEBUG" "check_failed_systemd_services: systemctl not found — skipping"
         return
     fi
     # Get list of failed services using --state=failed for reliable output
@@ -1391,7 +1607,7 @@ check_tcp_ports() {
 # ===========================================================================
 check_cpu_temp() {
     if ! command -v sensors &>/dev/null; then
-        log "INFO" "CPU temp check: sensors not installed — skipping"
+        log "DEBUG" "CPU temp check: sensors not installed — skipping"
         return
     fi
 
@@ -1452,7 +1668,7 @@ check_dns() {
             resolved=true
         fi
     else
-        log "INFO" "DNS check: no resolver tool found (dig/nslookup/host) — skipping"
+        log "DEBUG" "DNS check: no resolver tool found (dig/nslookup/host) — skipping"
         return
     fi
 
@@ -1469,7 +1685,7 @@ check_dns() {
 # ===========================================================================
 check_gpu() {
     if ! command -v nvidia-smi &>/dev/null; then
-        log "INFO" "GPU check: nvidia-smi not installed — skipping"
+        log "DEBUG" "GPU check: nvidia-smi not installed — skipping"
         return
     fi
 
@@ -1602,7 +1818,7 @@ check_network_bandwidth() {
     # Auto-detect primary interface if not set
     if [[ -z "$iface" ]]; then
         if ! command -v ip &>/dev/null; then
-            log "INFO" "Network bandwidth check: 'ip' command not found — skipping"
+            log "DEBUG" "Network bandwidth check: 'ip' command not found — skipping"
             return
         fi
         iface=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')
@@ -1651,7 +1867,7 @@ check_network_bandwidth() {
 
     # Handle counter wraparound: report OK and let next cycle use fresh baseline
     if [[ "$rx_rate" -lt 0 ]] || [[ "$tx_rate" -lt 0 ]]; then
-        log "INFO" "check_network_bandwidth: counter wraparound detected on ${iface} — skipping rate calculation"
+        log "DEBUG" "check_network_bandwidth: counter wraparound detected on ${iface} — skipping rate calculation"
         check_state_change "net_bw" "OK" "Network ${safe_iface}: counter wraparound (awaiting next sample)"
         return
     fi
@@ -1782,6 +1998,241 @@ check_file_integrity() {
     # Save new checksums
     if [[ -n "$new_checksums" ]]; then
         safe_write_state_file "$integrity_state_file" "$new_checksums"
+    fi
+}
+
+# ===========================================================================
+# HELPER: Build drift detection alert detail
+# Constructs rich HTML alert with diff, metadata changes, and user attribution
+# ===========================================================================
+build_drift_detail() {
+    local filepath="$1" safe_fname="$2"
+    local prev_sum="$3" current_sum="$4"
+    local prev_mtime="$5" current_mtime="$6"
+    local prev_size="$7" current_size="$8"
+    local prev_owner="$9" current_owner="${10}"
+    local prev_perms="${11}" current_perms="${12}"
+    local ignore_pattern="${13}" max_diff_lines="${14}"
+    local sensitive_files="${15}" baseline_dir="${16}"
+
+    local detail=""
+    local safe_filepath
+    safe_filepath=$(html_escape "$filepath")
+
+    # Format change timestamp
+    local change_time
+    change_time=$(date -d "@${current_mtime}" '+%Y-%m-%d %H:%M:%S' 2>/dev/null \
+        || date -r "$current_mtime" '+%Y-%m-%d %H:%M:%S' 2>/dev/null \
+        || echo "unknown")
+
+    detail="<b>File:</b> <code>${safe_filepath}</code>%0A"
+    detail+="<b>Changed:</b> ${change_time}%0A"
+
+    # User attribution — try ausearch for audit trail, fallback to file owner
+    local change_user=""
+    if command -v ausearch &>/dev/null; then
+        # Search audit log for recent writes to this file (last 300 seconds)
+        change_user=$(ausearch -f "$filepath" -ts recent --raw 2>/dev/null \
+            | grep -oP 'uid=\K[0-9]+' | tail -1)
+        if [[ -n "$change_user" ]]; then
+            local username
+            username=$(getent passwd "$change_user" 2>/dev/null | cut -d: -f1)
+            change_user="${username:-uid=$change_user} (uid=${change_user})"
+        fi
+    fi
+    if [[ -z "$change_user" ]]; then
+        # Fallback: current file owner
+        local safe_owner
+        safe_owner=$(html_escape "$current_owner")
+        change_user="$safe_owner (file owner)"
+    fi
+    detail+="<b>By User:</b> $(html_escape "$change_user")%0A"
+
+    # Content diff (only if checksum changed)
+    if [[ "$prev_sum" != "$current_sum" ]]; then
+        local baseline_file="${baseline_dir}/$(printf '%s' "$filepath" | portable_md5 | cut -c1-12)"
+
+        # Check if this is a sensitive file
+        local is_sensitive=false
+        for sf in $sensitive_files; do
+            [[ "$filepath" == "$sf" ]] && { is_sensitive=true; break; }
+        done
+
+        if [[ "$is_sensitive" == "true" ]]; then
+            detail+="%0A<b>Changes:</b> <i>(content redacted — sensitive file)</i>%0A"
+        elif [[ -f "$baseline_file" ]]; then
+            local diff_output
+            diff_output=$(run_with_timeout "$CHECK_TIMEOUT" diff -u "$baseline_file" "$filepath" 2>/dev/null || true)
+
+            # Filter by ignore pattern if set
+            if [[ -n "$ignore_pattern" && -n "$diff_output" ]]; then
+                # Keep header lines (---/+++) and non-matching change lines
+                local filtered=""
+                local has_real_changes=false
+                while IFS= read -r line; do
+                    case "$line" in
+                        ---*|+++*|@@*) filtered+="${line}"$'\n' ;;
+                        [-+]*)
+                            # Strip the leading +/- for pattern matching
+                            local content="${line:1}"
+                            if ! printf '%s' "$content" | grep -qE "$ignore_pattern" 2>/dev/null; then
+                                filtered+="${line}"$'\n'
+                                has_real_changes=true
+                            fi
+                            ;;
+                        *) filtered+="${line}"$'\n' ;;
+                    esac
+                done <<< "$diff_output"
+
+                if [[ "$has_real_changes" != "true" ]]; then
+                    # All changes matched ignore pattern — no real drift
+                    printf ''
+                    return 0
+                fi
+                diff_output="$filtered"
+            fi
+
+            if [[ -n "$diff_output" ]]; then
+                # Truncate to max lines
+                local line_count
+                line_count=$(printf '%s' "$diff_output" | wc -l)
+                local truncated_diff
+                truncated_diff=$(printf '%s' "$diff_output" | head -n "$max_diff_lines")
+
+                # HTML-escape the diff
+                local safe_diff
+                safe_diff=$(html_escape "$truncated_diff")
+
+                detail+="%0A<b>Changes:</b>%0A<pre>"
+                detail+="${safe_diff}"
+                detail+="</pre>"
+
+                if [[ "$line_count" -gt "$max_diff_lines" ]]; then
+                    detail+="%0A<i>(truncated: showing ${max_diff_lines} of ${line_count} lines)</i>"
+                fi
+                detail+="%0A"
+            fi
+        fi
+    fi
+
+    # Metadata changes section
+    local meta_changes=""
+    if [[ "$prev_size" != "$current_size" ]]; then
+        local prev_size_h current_size_h
+        prev_size_h=$(numfmt --to=iec-i "$prev_size" 2>/dev/null || echo "${prev_size}B")
+        current_size_h=$(numfmt --to=iec-i "$current_size" 2>/dev/null || echo "${current_size}B")
+        meta_changes+="Size: ${prev_size_h} → ${current_size_h}%0A"
+    fi
+    if [[ "$prev_perms" != "$current_perms" ]]; then
+        meta_changes+="Permissions: ${prev_perms} → ${current_perms}%0A"
+    fi
+    if [[ "$prev_owner" != "$current_owner" ]]; then
+        local safe_prev_owner safe_curr_owner
+        safe_prev_owner=$(html_escape "$prev_owner")
+        safe_curr_owner=$(html_escape "$current_owner")
+        meta_changes+="Owner: ${safe_prev_owner} → ${safe_curr_owner}%0A"
+    fi
+
+    if [[ -n "$meta_changes" ]]; then
+        detail+="%0A<b>Metadata Changes:</b>%0A${meta_changes}"
+    fi
+
+    printf '%s' "$detail"
+}
+
+# ===========================================================================
+# CHECK: Configuration Drift Detection
+# Monitors critical files for changes with rich context (diff, metadata, user)
+# ===========================================================================
+check_drift_detection() {
+    local watch_files="${DRIFT_WATCH_FILES:-}"
+    [[ -z "$watch_files" ]] && return
+
+    local drift_state_file="${STATE_FILE}.drift"
+    local baseline_dir="${STATE_FILE}.drift.baseline"
+    local ignore_pattern="${DRIFT_IGNORE_PATTERN:-}"
+    local max_diff_lines="${DRIFT_MAX_DIFF_LINES:-20}"
+    local sensitive_files="${DRIFT_SENSITIVE_FILES:-}"
+
+    # Create baseline directory if needed (700 perms)
+    [[ -d "$baseline_dir" ]] || mkdir -m 700 "$baseline_dir" 2>/dev/null || true
+
+    # Load previous metadata from drift state file
+    declare -A prev_meta
+    if [[ -f "$drift_state_file" ]]; then
+        while IFS='=' read -r fpath meta; do
+            [[ -n "$fpath" ]] && prev_meta["$fpath"]="$meta"
+        done < "$drift_state_file"
+    fi
+
+    local new_meta=""
+    for filepath in $watch_files; do
+        [[ -f "$filepath" ]] || continue
+
+        # Gather current metadata
+        local current_sum current_mtime current_size current_owner current_perms
+        current_sum=$(run_with_timeout "$CHECK_TIMEOUT" sha256sum "$filepath" 2>/dev/null | awk '{print $1}')
+        [[ -z "$current_sum" ]] && continue
+
+        # GNU stat with BSD fallback
+        current_mtime=$(stat -c %Y "$filepath" 2>/dev/null || stat -f %m "$filepath" 2>/dev/null || echo "0")
+        current_size=$(stat -c %s "$filepath" 2>/dev/null || stat -f %z "$filepath" 2>/dev/null || echo "0")
+        current_owner=$(stat -c '%U(uid=%u)' "$filepath" 2>/dev/null || stat -f '%Su(uid=%u)' "$filepath" 2>/dev/null || echo "unknown")
+        current_perms=$(stat -c %a "$filepath" 2>/dev/null || stat -f '%Lp' "$filepath" 2>/dev/null || echo "000")
+
+        # Pack metadata: checksum|mtime|size|owner|perms
+        local current_meta="${current_sum}|${current_mtime}|${current_size}|${current_owner}|${current_perms}"
+        new_meta+="${filepath}=${current_meta}"$'\n'
+
+        # Compute state key
+        local key="drift_$(printf '%s' "$filepath" | portable_md5 | cut -c1-12)"
+        local fname
+        fname=$(basename "$filepath")
+        local safe_fname
+        safe_fname=$(html_escape "$fname")
+
+        if [[ -n "${prev_meta[$filepath]:-}" ]]; then
+            local prev="${prev_meta[$filepath]}"
+            local prev_sum="${prev%%|*}"; local rest="${prev#*|}"
+            local prev_mtime="${rest%%|*}"; rest="${rest#*|}"
+            local prev_size="${rest%%|*}"; rest="${rest#*|}"
+            local prev_owner="${rest%%|*}"
+            local prev_perms="${rest#*|}"
+
+            if [[ "$current_meta" != "$prev" ]]; then
+                # Something changed — build detail
+                local detail
+                detail=$(build_drift_detail "$filepath" "$safe_fname" \
+                    "$prev_sum" "$current_sum" \
+                    "$prev_mtime" "$current_mtime" \
+                    "$prev_size" "$current_size" \
+                    "$prev_owner" "$current_owner" \
+                    "$prev_perms" "$current_perms" \
+                    "$ignore_pattern" "$max_diff_lines" "$sensitive_files" "$baseline_dir")
+
+                # If detail is empty, ignore pattern filtered all changes
+                if [[ -z "$detail" ]]; then
+                    check_state_change "$key" "OK" "File <code>${safe_fname}</code> drift OK (filtered changes only)"
+                else
+                    check_state_change "$key" "WARNING" "$detail"
+                fi
+            else
+                check_state_change "$key" "OK" "File <code>${safe_fname}</code> drift OK"
+            fi
+        else
+            # First time — baseline
+            check_state_change "$key" "OK" "File <code>${safe_fname}</code> drift baselined"
+        fi
+
+        # Update baseline copy (for diff on next run)
+        local baseline_file="${baseline_dir}/$(printf '%s' "$filepath" | portable_md5 | cut -c1-12)"
+        cp -f "$filepath" "$baseline_file" 2>/dev/null || true
+        chmod 600 "$baseline_file" 2>/dev/null || true
+    done
+
+    # Save metadata
+    if [[ -n "$new_meta" ]]; then
+        safe_write_state_file "$drift_state_file" "$new_meta"
     fi
 }
 
@@ -1960,6 +2411,7 @@ run_all_checks() {
     [[ "${ENABLE_NETWORK_CHECK:-false}" == "true" ]] && check_network_bandwidth
     [[ "${ENABLE_LOG_CHECK:-false}" == "true" ]] && check_log_patterns
     [[ "${ENABLE_INTEGRITY_CHECK:-false}" == "true" ]] && check_file_integrity
+    [[ "${ENABLE_DRIFT_DETECTION:-false}" == "true" ]] && check_drift_detection
     [[ "${ENABLE_CRON_CHECK:-false}" == "true" ]] && check_cron_jobs
     [[ "${ENABLE_FLEET_CHECK:-false}" == "true" ]] && check_fleet_heartbeats
 }
@@ -2152,7 +2604,7 @@ send_heartbeat() {
             mv "$tmp" "$target" || { log "WARN" "Heartbeat: failed to write ${target}"; rm -f "$tmp"; return; }
         fi
 
-        log "INFO" "Heartbeat file updated: ${target}"
+        log "DEBUG" "Heartbeat file updated: ${target}"
 
     elif [[ "$mode" == "webhook" ]]; then
         local url="${HEARTBEAT_URL:-}"
@@ -2165,7 +2617,7 @@ send_heartbeat() {
         if [[ "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
             log "WARN" "Heartbeat ping failed (HTTP ${http_code})"
         else
-            log "INFO" "Heartbeat ping sent to ${url%%\?*}"
+            log "DEBUG" "Heartbeat ping sent to ${url%%\?*}"
         fi
     else
         log "WARN" "Heartbeat: unknown HEARTBEAT_MODE '${mode}' (expected 'file' or 'webhook')"
@@ -2186,12 +2638,12 @@ dispatch_with_retry() {
         local queued_msg
         queued_msg=$(cat "$ALERT_QUEUE_FILE" 2>/dev/null)
         if [[ -n "$queued_msg" ]]; then
-            log "INFO" "Retrying queued alert from previous cycle"
+            log "DEBUG" "Retrying queued alert from previous cycle"
             if send_telegram "$queued_msg" 2>/dev/null; then
                 send_webhook "$queued_msg" || true
                 send_email "$queued_msg" || true
                 rm -f "$ALERT_QUEUE_FILE"
-                log "INFO" "Queued alert delivered successfully"
+                log "DEBUG" "Queued alert delivered successfully"
             fi
         fi
     fi
@@ -2257,6 +2709,12 @@ is_in_maintenance_window() {
         # Validate time components are numeric before arithmetic
         if ! [[ "$start_h" =~ ^[0-9]+$ && "$start_m" =~ ^[0-9]+$ && "$end_h" =~ ^[0-9]+$ && "$end_m" =~ ^[0-9]+$ ]]; then
             log "WARN" "Invalid MAINT_SCHEDULE entry: '${entry}' — skipping"
+            continue
+        fi
+
+        # Validate hour/minute ranges
+        if (( 10#$start_h > 23 || 10#$start_m > 59 || 10#$end_h > 23 || 10#$end_m > 59 )); then
+            log "WARN" "Invalid time range in MAINT_SCHEDULE entry: '${entry}' — hours must be 0-23, minutes 0-59"
             continue
         fi
 
@@ -2412,7 +2870,7 @@ run_validate() {
         ENABLE_GPU_CHECK ENABLE_UPS_CHECK ENABLE_NETWORK_CHECK \
         ENABLE_LOG_CHECK ENABLE_INTEGRITY_CHECK ENABLE_CRON_CHECK \
         ENABLE_FLEET_CHECK ENABLE_HEARTBEAT ENABLE_PROMETHEUS_EXPORT \
-        ENABLE_JSON_STATUS; do
+        ENABLE_JSON_STATUS ENABLE_PREDICTIVE_ALERTS ENABLE_DRIFT_DETECTION; do
         local val="${!enable_var:-}"
         if [[ -n "$val" && "$val" != "true" && "$val" != "false" ]]; then
             echo "  WARN: ${enable_var}='${val}' — expected 'true' or 'false' (value treated as false)"
@@ -2531,6 +2989,7 @@ run_validate() {
         "NETWORK_CHECK:/proc/net/dev" \
         "LOG_CHECK:LOG_WATCH_FILES" \
         "INTEGRITY_CHECK:INTEGRITY_WATCH_FILES" \
+        "DRIFT_DETECTION:DRIFT_WATCH_FILES" \
         "CRON_CHECK:CRON_WATCH_JOBS"; do
         local ck="${check_pair%%:*}"
         local dep="${check_pair##*:}"
@@ -2555,6 +3014,12 @@ run_validate() {
         enabled=$((enabled + 1))
     else
         echo "  OFF:  FLEET_CHECK"
+    fi
+    if [[ "${ENABLE_PREDICTIVE_ALERTS:-false}" == "true" ]]; then
+        echo "  ON:   PREDICTIVE_ALERTS (horizon: ${PREDICT_HORIZON_HOURS:-24}h, datapoints: ${PREDICT_DATAPOINTS:-48})"
+        enabled=$((enabled + 1))
+    else
+        echo "  OFF:  PREDICTIVE_ALERTS"
     fi
 
     # Empty-list warnings for extended checks
@@ -2591,6 +3056,52 @@ run_validate() {
                 warnings=$((warnings + 1))
             fi
         done
+    fi
+
+    # Drift detection validation
+    if [[ "${ENABLE_DRIFT_DETECTION:-false}" == "true" ]]; then
+        if [[ -z "${DRIFT_WATCH_FILES:-}" ]]; then
+            echo "  WARN: DRIFT_DETECTION enabled but DRIFT_WATCH_FILES is empty"
+            warnings=$((warnings + 1))
+        else
+            for df_file in ${DRIFT_WATCH_FILES}; do
+                if [[ ! -f "$df_file" ]]; then
+                    echo "  WARN: DRIFT_WATCH_FILES: '${df_file}' does not exist (will be monitored when created)"
+                    warnings=$((warnings + 1))
+                elif [[ ! -r "$df_file" ]]; then
+                    echo "  WARN: DRIFT_WATCH_FILES: '${df_file}' is not readable"
+                    warnings=$((warnings + 1))
+                fi
+            done
+        fi
+
+        # Validate ignore pattern regex
+        if [[ -n "${DRIFT_IGNORE_PATTERN:-}" ]]; then
+            echo "" | grep -qE "${DRIFT_IGNORE_PATTERN}" 2>/dev/null
+            if [[ $? -eq 2 ]]; then
+                echo "  FAIL: DRIFT_IGNORE_PATTERN is not a valid regex"
+                errors=$((errors + 1))
+            fi
+        fi
+
+        # Validate max diff lines is a positive integer
+        if [[ -n "${DRIFT_MAX_DIFF_LINES:-}" ]]; then
+            if ! is_valid_number "${DRIFT_MAX_DIFF_LINES}" 2>/dev/null; then
+                echo "  FAIL: DRIFT_MAX_DIFF_LINES must be a positive integer"
+                errors=$((errors + 1))
+            fi
+        fi
+
+        # Check for diff command
+        if ! command -v diff &>/dev/null; then
+            echo "  WARN: DRIFT_DETECTION enabled but 'diff' command not found (install diffutils)"
+            warnings=$((warnings + 1))
+        fi
+
+        # Note about ausearch availability
+        if ! command -v ausearch &>/dev/null; then
+            echo "  INFO: DRIFT_DETECTION: ausearch not found — user attribution will use file owner only"
+        fi
     fi
 
     # Log pattern validation
@@ -2814,6 +3325,17 @@ run_validate() {
                 echo "  WARN: Invalid MAINT_SCHEDULE entry: '${ms_entry}' (expected: 'Day HH:MM-HH:MM' or 'Day H:MM-H:MM')"
                 warnings=$((warnings + 1))
                 maint_valid=false
+            else
+                # Validate hour/minute ranges
+                local ms_time_range="${ms_entry##* }"
+                local ms_start="${ms_time_range%%-*}"
+                local ms_end="${ms_time_range##*-}"
+                local ms_sh="${ms_start%%:*}" ms_sm="${ms_start##*:}"
+                local ms_eh="${ms_end%%:*}" ms_em="${ms_end##*:}"
+                if (( 10#$ms_sh > 23 || 10#$ms_sm > 59 || 10#$ms_eh > 23 || 10#$ms_em > 59 )); then
+                    echo "  WARN: MAINT_SCHEDULE entry '${ms_entry}': hours must be 0-23, minutes 0-59"
+                    warnings=$((warnings + 1))
+                fi
             fi
         done
         unset IFS
@@ -2908,6 +3430,45 @@ run_validate() {
         warnings=$((warnings + 1))
     else
         echo "  OK:   LOG_MAX_BACKUPS=${lmb}"
+    fi
+
+    # LOG_LEVEL
+    local ll="${LOG_LEVEL:-INFO}"
+    if [[ ! "$ll" =~ ^(DEBUG|INFO|WARN|ERROR)$ ]]; then
+        echo "  WARN: LOG_LEVEL '${ll}' is invalid (must be DEBUG, INFO, WARN, or ERROR)"
+        warnings=$((warnings + 1))
+    else
+        echo "  OK:   LOG_LEVEL=${ll}"
+    fi
+
+    # Predictive alerts parameter validation
+    if [[ "${ENABLE_PREDICTIVE_ALERTS:-false}" == "true" ]]; then
+        local phh="${PREDICT_HORIZON_HOURS:-24}"
+        if ! is_valid_number "$phh" || [[ "$phh" -lt 1 ]]; then
+            echo "  FAIL: PREDICT_HORIZON_HOURS '${phh}' must be a positive integer"
+            errors=$((errors + 1))
+        else
+            echo "  OK:   PREDICT_HORIZON_HOURS=${phh}"
+        fi
+
+        local pmd="${PREDICT_MIN_DATAPOINTS:-12}"
+        if ! is_valid_number "$pmd" || [[ "$pmd" -lt 3 ]]; then
+            echo "  FAIL: PREDICT_MIN_DATAPOINTS '${pmd}' must be a positive integer >= 3"
+            errors=$((errors + 1))
+        else
+            echo "  OK:   PREDICT_MIN_DATAPOINTS=${pmd}"
+        fi
+
+        local pdp="${PREDICT_DATAPOINTS:-48}"
+        if ! is_valid_number "$pdp" || [[ "$pdp" -lt 3 ]]; then
+            echo "  FAIL: PREDICT_DATAPOINTS '${pdp}' must be a positive integer >= 3"
+            errors=$((errors + 1))
+        elif is_valid_number "$pmd" && [[ "$pdp" -lt "$pmd" ]]; then
+            echo "  FAIL: PREDICT_DATAPOINTS (${pdp}) must be >= PREDICT_MIN_DATAPOINTS (${pmd})"
+            errors=$((errors + 1))
+        else
+            echo "  OK:   PREDICT_DATAPOINTS=${pdp}"
+        fi
     fi
 
     # PING_TARGET validation (if internet check enabled)
@@ -3218,7 +3779,7 @@ print(json.dumps(data))
         log "WARN" "Webhook delivery failed (HTTP ${http_code})"
         return 1
     fi
-    log "INFO" "Webhook delivered to ${webhook_url%%\?*}"
+    log "DEBUG" "Webhook delivered to ${webhook_url%%\?*}"
     return 0
 }
 
@@ -3278,7 +3839,7 @@ send_email() {
     } | "$mailer" -t 2>/dev/null
 
     if [[ $? -eq 0 ]]; then
-        log "INFO" "Email alert sent to ${email_to}"
+        log "DEBUG" "Email alert sent to ${email_to}"
         return 0
     else
         log "WARN" "Email delivery failed via ${mailer}"

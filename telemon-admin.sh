@@ -68,7 +68,7 @@ cmd_backup() {
     local state_variants=("$STATE_FILE" "${STATE_FILE}.cooldown" \
                           "${STATE_FILE}.queue" "${STATE_FILE}.escalation" \
                           "${STATE_FILE}.integrity" "${STATE_FILE}.net" \
-                          "${STATE_FILE}.detail")
+                          "${STATE_FILE}.detail" "${STATE_FILE}.trend")
     for file in "${state_variants[@]}"; do
         if [[ -f "$file" ]]; then
             if ! cp -p "$file" "$backup_path/" 2>/dev/null; then
@@ -222,7 +222,7 @@ cmd_restore() {
     local state_variants=("$STATE_FILE" "${STATE_FILE}.cooldown" \
                           "${STATE_FILE}.queue" "${STATE_FILE}.escalation" \
                           "${STATE_FILE}.integrity" "${STATE_FILE}.net" \
-                          "${STATE_FILE}.detail")
+                          "${STATE_FILE}.detail" "${STATE_FILE}.trend")
     for file in "${state_variants[@]}"; do
         local basename_file
         basename_file=$(basename "$file")
@@ -412,7 +412,7 @@ cmd_reset_state() {
     local state_variants=("$STATE_FILE" "${STATE_FILE}.lock" "${STATE_FILE}.cooldown" \
                           "${STATE_FILE}.queue" "${STATE_FILE}.escalation" \
                           "${STATE_FILE}.integrity" "${STATE_FILE}.net" \
-                          "${STATE_FILE}.detail")
+                          "${STATE_FILE}.detail" "${STATE_FILE}.trend")
     for file in "${state_variants[@]}"; do
         if [[ -f "$file" ]]; then
             rm -f "$file"

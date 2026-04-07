@@ -46,6 +46,15 @@ ENABLE_HEARTBEAT=true                  # Enable dead-man's-switch
 SERVER_LABEL="my-server"               # Name this instance
 ```
 
+## Predictive Alerts
+
+```bash
+ENABLE_PREDICTIVE_ALERTS=true     # Enable predictive resource alerts
+PREDICT_HORIZON_HOURS=24          # Alert when exhaustion projected within Nh
+PREDICT_DATAPOINTS=48             # Max datapoints to keep per metric
+PREDICT_MIN_DATAPOINTS=12         # Min datapoints before predicting
+```
+
 ## Troubleshooting
 
 | Problem | Solution |

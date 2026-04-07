@@ -37,7 +37,15 @@ Telemon watches your Linux server — CPU, memory, disk, containers, services, p
 - **Network Bandwidth** — Interface throughput monitoring against Mbit/s thresholds
 - **Log Pattern Matching** — Watch log files for regex patterns (e.g., `ERROR`, `OOM`); shows first 3 matching lines, truncated at 200 chars
 - **File Integrity** — SHA256 checksum monitoring for critical files (`/etc/passwd`, configs, etc.)
+- **Configuration Drift Detection** — Rich change tracking with unified diffs, metadata changes (size, permissions, owner), and user attribution. Filters comment-only changes, redacts sensitive files.
 - **Cron Job Heartbeats** — Detect stale cron jobs via heartbeat file age tracking
+
+### Predictive Resource Exhaustion
+- **Trend Tracking** — Records metric snapshots across runs in a compact trend file
+- **Linear Regression** — Calculates growth rate from historical datapoints using least-squares regression (pure awk)
+- **Exhaustion Prediction** — Fires a WARNING when disk, memory, swap, or inodes are projected to hit 100% within a configurable horizon
+- **Inode Prediction** — Tracks inode usage per mountpoint alongside disk space
+- **No Dependencies** — Pure Bash + awk, zero external tools required
 
 ### Fleet Monitoring (Multi-Server)
 - **Dead Man's Switch** — Each instance writes a heartbeat file (or pings a webhook) after every run, proving liveness
@@ -133,8 +141,10 @@ Telemon sends alerts through up to three channels simultaneously:
 | Network BW | `check_network_bandwidth` | `ENABLE_NETWORK_CHECK` | `false` | `/proc/net/dev` | `net_<iface>` | `NETWORK_THRESHOLD_WARN=800`, `_CRIT=950` (Mbit/s) |
 | Log Patterns | `check_log_patterns` | `ENABLE_LOG_CHECK` | `false` | `tail`, `grep` | `log_<md5>` | Binary: patterns found or not |
 | File Integrity | `check_file_integrity` | `ENABLE_INTEGRITY_CHECK` | `false` | `sha256sum` | `integrity_<md5>` | Binary: checksum changed or not |
+| Config Drift | `check_drift_detection` | `ENABLE_DRIFT_DETECTION` | `false` | `diff`, `stat` | `drift_<md5>` | Rich diff, metadata, user attribution |
 | Cron Jobs | `check_cron_jobs` | `ENABLE_CRON_CHECK` | `false` | `stat` | `cron_<name>` | `max_age_minutes` per job |
 | Fleet | `check_fleet_heartbeats` | `ENABLE_FLEET_CHECK` | `false` | heartbeat files | `fleet_<label>` | `FLEET_STALE_THRESHOLD_MIN=15` |
+| Predictive | `check_prediction` | `ENABLE_PREDICTIVE_ALERTS` | `false` | awk | `predict_*` | `PREDICT_HORIZON_HOURS=24` (hours to exhaustion) |
 
 </details>
 
@@ -221,6 +231,9 @@ ENABLE_CRON_CHECK=false
 # Fleet monitoring (default: false)
 ENABLE_HEARTBEAT=false
 ENABLE_FLEET_CHECK=false
+
+# Predictive alerts (default: false)
+ENABLE_PREDICTIVE_ALERTS=false
 
 # Exports (default: false)
 ENABLE_PROMETHEUS_EXPORT=false
@@ -344,6 +357,13 @@ LOG_WATCH_LINES=100
 # File integrity monitoring
 INTEGRITY_WATCH_FILES="/etc/passwd /etc/shadow /etc/ssh/sshd_config"
 
+# Configuration drift detection (rich change tracking with diffs)
+ENABLE_DRIFT_DETECTION=true
+DRIFT_WATCH_FILES="/etc/nginx/nginx.conf /etc/ssh/sshd_config"
+DRIFT_IGNORE_PATTERN="^[+-]?\s*#"  # Ignore comment-only changes
+DRIFT_MAX_DIFF_LINES=20             # Limit diff output in alerts
+DRIFT_SENSITIVE_FILES="/etc/shadow /etc/gshadow"  # Redact diff for these
+
 # Cron heartbeat tracking (name:touchfile:max_age_minutes)
 CRON_WATCH_JOBS="backup:/tmp/backup_heartbeat:1440 report:/tmp/report_heartbeat:60"
 
@@ -378,6 +398,24 @@ PROMETHEUS_TEXTFILE_DIR="/var/lib/node_exporter/textfile_collector"
 ENABLE_JSON_STATUS=true
 JSON_STATUS_FILE="/opt/telemon/status.json"
 ```
+
+### Predictive Resource Exhaustion
+
+```bash
+# Enable predictive alerts (disk, memory, swap, inodes)
+ENABLE_PREDICTIVE_ALERTS=true
+
+# Alert when exhaustion is projected within this many hours
+PREDICT_HORIZON_HOURS=24
+
+# Maximum datapoints to retain per metric (one per run)
+PREDICT_DATAPOINTS=48
+
+# Minimum datapoints required before making predictions
+PREDICT_MIN_DATAPOINTS=12
+```
+
+Telemon uses linear regression on historical datapoints to predict when a resource will reach 100%. For example, with 5-minute cron intervals, 48 datapoints covers 4 hours of history. If the trend line projects exhaustion within 24 hours, a WARNING alert fires.
 
 ### Fleet Monitoring
 
@@ -432,6 +470,7 @@ STATE_FILE="/tmp/telemon_sys_alert_state"
 
 # Log file
 LOG_FILE="/opt/telemon/telemon.log"
+LOG_LEVEL="INFO"       # Levels: DEBUG, INFO, WARN, ERROR
 
 # Log rotation
 LOG_MAX_SIZE_MB=10     # Max log file size before rotation
@@ -512,6 +551,7 @@ ENABLE_PROMETHEUS_EXPORT=true
 ENABLE_JSON_STATUS=true
 ENABLE_HEARTBEAT=true
 ENABLE_FLEET_CHECK=true
+ENABLE_PREDICTIVE_ALERTS=true
 
 SERVER_LABEL="prod-01"
 CRITICAL_SYSTEM_PROCESSES="sshd cron nginx"
@@ -809,6 +849,7 @@ Related files:
 | `${STATE_FILE}.escalation` | Escalation tracking (first-seen timestamps) |
 | `${STATE_FILE}.integrity` | File integrity SHA256 checksums |
 | `${STATE_FILE}.net` | Network bandwidth previous counters (rx/tx/timestamp) |
+| `${STATE_FILE}.trend` | Predictive trend data (epoch:value pairs per metric) |
 | `${STATE_FILE}.lock` | Lock file for mutual exclusion |
 | `${HEARTBEAT_DIR}/<label>` | Heartbeat files per server (fleet monitoring) |
 
