@@ -943,6 +943,187 @@ check_sites() {
 }
 
 # ===========================================================================
+# CLI Modes: --test, --validate
+# ===========================================================================
+run_validate() {
+    echo "Telemon configuration validation"
+    echo "================================="
+    echo ""
+    
+    local errors=0
+    local warnings=0
+    
+    # Check Telegram credentials
+    echo "[Telegram Credentials]"
+    if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || "$TELEGRAM_BOT_TOKEN" == "your-bot-token-here" ]]; then
+        echo "  FAIL: TELEGRAM_BOT_TOKEN is not set"
+        errors=$((errors + 1))
+    else
+        echo "  OK:   TELEGRAM_BOT_TOKEN is set (${TELEGRAM_BOT_TOKEN:0:10}...)"
+    fi
+    
+    if [[ -z "${TELEGRAM_CHAT_ID:-}" || "$TELEGRAM_CHAT_ID" == "your-chat-id-here" ]]; then
+        echo "  FAIL: TELEGRAM_CHAT_ID is not set"
+        errors=$((errors + 1))
+    else
+        echo "  OK:   TELEGRAM_CHAT_ID is set ($TELEGRAM_CHAT_ID)"
+    fi
+    
+    # Check .env permissions
+    echo ""
+    echo "[Security]"
+    local env_perms
+    env_perms=$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE" 2>/dev/null)
+    if [[ "$env_perms" != "600" ]]; then
+        echo "  WARN: .env permissions are $env_perms (should be 600)"
+        echo "        Fix: chmod 600 $ENV_FILE"
+        warnings=$((warnings + 1))
+    else
+        echo "  OK:   .env permissions are 600 (owner-only)"
+    fi
+    
+    # Check enabled features and their dependencies
+    echo ""
+    echo "[Enabled Checks]"
+    local enabled=0
+    for check in CPU MEMORY DISK SWAP IOWAIT ZOMBIE INTERNET; do
+        local var="ENABLE_${check}_CHECK"
+        if [[ "${!var:-true}" == "true" ]]; then
+            echo "  ON:   $check"
+            enabled=$((enabled + 1))
+        else
+            echo "  OFF:  $check"
+        fi
+    done
+    
+    if [[ "${ENABLE_SYSTEM_PROCESSES:-true}" == "true" ]]; then
+        echo "  ON:   SYSTEM_PROCESSES (${CRITICAL_SYSTEM_PROCESSES:-<empty>})"
+        enabled=$((enabled + 1))
+    else
+        echo "  OFF:  SYSTEM_PROCESSES"
+    fi
+    
+    if [[ "${ENABLE_FAILED_SYSTEMD_SERVICES:-true}" == "true" ]]; then
+        if ! command -v systemctl &>/dev/null; then
+            echo "  WARN: FAILED_SYSTEMD_SERVICES enabled but systemctl not found"
+            warnings=$((warnings + 1))
+        else
+            echo "  ON:   FAILED_SYSTEMD_SERVICES"
+            enabled=$((enabled + 1))
+        fi
+    else
+        echo "  OFF:  FAILED_SYSTEMD_SERVICES"
+    fi
+    
+    if [[ "${ENABLE_DOCKER_CONTAINERS:-false}" == "true" ]]; then
+        if ! command -v docker &>/dev/null; then
+            echo "  FAIL: DOCKER_CONTAINERS enabled but docker not found"
+            errors=$((errors + 1))
+        else
+            echo "  ON:   DOCKER_CONTAINERS (${CRITICAL_CONTAINERS:-<empty>})"
+            enabled=$((enabled + 1))
+            # Verify listed containers exist
+            for c in ${CRITICAL_CONTAINERS:-}; do
+                if docker inspect "$c" &>/dev/null; then
+                    echo "        ✓ $c exists"
+                else
+                    echo "        ✗ $c not found (will alert as CRITICAL)"
+                    warnings=$((warnings + 1))
+                fi
+            done
+        fi
+    else
+        echo "  OFF:  DOCKER_CONTAINERS"
+    fi
+    
+    if [[ "${ENABLE_PM2_PROCESSES:-false}" == "true" ]]; then
+        if ! command -v pm2 &>/dev/null; then
+            echo "  WARN: PM2_PROCESSES enabled but pm2 not found"
+            warnings=$((warnings + 1))
+        else
+            echo "  ON:   PM2_PROCESSES (${CRITICAL_PM2_PROCESSES:-<empty>})"
+            enabled=$((enabled + 1))
+        fi
+    else
+        echo "  OFF:  PM2_PROCESSES"
+    fi
+    
+    if [[ "${ENABLE_SITE_MONITOR:-false}" == "true" ]]; then
+        echo "  ON:   SITE_MONITOR"
+        enabled=$((enabled + 1))
+        for site in ${CRITICAL_SITES:-}; do
+            local url="${site%%|*}"
+            echo "        → $url"
+        done
+    else
+        echo "  OFF:  SITE_MONITOR"
+    fi
+    
+    if [[ "${ENABLE_NVME_CHECK:-false}" == "true" ]]; then
+        if ! command -v smartctl &>/dev/null; then
+            echo "  WARN: NVME_CHECK enabled but smartctl not found"
+            warnings=$((warnings + 1))
+        else
+            echo "  ON:   NVME_CHECK (${NVME_DEVICE:-/dev/nvme0n1})"
+            enabled=$((enabled + 1))
+        fi
+    else
+        echo "  OFF:  NVME_CHECK"
+    fi
+    
+    # Threshold validation
+    echo ""
+    echo "[Thresholds]"
+    validate_thresholds 2>&1 | grep -v "Monitor run" || echo "  All thresholds valid."
+    
+    # Summary
+    echo ""
+    echo "================================="
+    echo "Checks enabled: $enabled"
+    echo "Errors: $errors | Warnings: $warnings"
+    if [[ $errors -gt 0 ]]; then
+        echo "STATUS: FAIL — fix errors above before running"
+        return 1
+    elif [[ $warnings -gt 0 ]]; then
+        echo "STATUS: OK (with warnings)"
+        return 0
+    else
+        echo "STATUS: OK"
+        return 0
+    fi
+}
+
+run_test() {
+    echo "Telemon test mode"
+    echo "================="
+    echo ""
+    
+    # Validate first
+    if ! run_validate; then
+        echo ""
+        echo "Fix validation errors before testing."
+        return 1
+    fi
+    
+    echo ""
+    echo "[Telegram Connectivity Test]"
+    echo "  Sending test message..."
+    
+    local test_msg="<b>&#128421; [$(hostname)] Telemon Test</b>%0A"
+    test_msg+="<i>$(date '+%Y-%m-%d %H:%M:%S %Z')</i>%0A%0A"
+    test_msg+="&#9989; Configuration is valid. Telegram delivery works.%0A"
+    test_msg+="This is a test message from <code>telemon.sh --test</code>."
+    
+    if send_telegram "$test_msg"; then
+        echo "  OK: Test message sent — check your Telegram!"
+        return 0
+    else
+        echo "  FAIL: Could not send message. Check bot token and chat ID."
+        return 1
+    fi
+}
+
+# ===========================================================================
 # Telegram Dispatch
 # ===========================================================================
 send_telegram() {
@@ -969,6 +1150,29 @@ send_telegram() {
 # Main
 # ===========================================================================
 main() {
+    # Handle CLI flags
+    case "${1:-}" in
+        --test|-t)
+            run_test
+            exit $?
+            ;;
+        --validate|-v)
+            run_validate
+            exit $?
+            ;;
+        --help|-h)
+            echo "Usage: telemon.sh [OPTIONS]"
+            echo ""
+            echo "Options:"
+            echo "  --test, -t       Validate config and send a test Telegram message"
+            echo "  --validate, -v   Validate configuration without sending anything"
+            echo "  --help, -h       Show this help"
+            echo ""
+            echo "With no options, runs a full monitoring check cycle."
+            exit 0
+            ;;
+    esac
+    
     log "INFO" "--- Monitor run started ---"
     
     # Validate configuration thresholds

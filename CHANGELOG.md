@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- CLI flags for `telemon.sh`: `--test` / `-t` (validate + send test Telegram message), `--validate` / `-v` (check config without sending), `--help` / `-h`
+- `install.sh`: `--yes` / `-y` flag for non-interactive installs (CI, scripting, automation)
+- `install.sh`: automatically sets `.env` to `chmod 600` (owner-only) to protect bot tokens
+- `.env.example`: clarified that `CRITICAL_CONTAINERS` uses container names from `docker ps --format '{{.Names}}'`, not image names
+- `README.md`: "Common Configurations" section with copy-paste `.env` quickstart profiles for Docker host, web server, media server, bare metal, and Node.js setups
 - Uninstall script (`uninstall.sh`) for clean removal
 - Update mechanism (`update.sh`) with git integration
 - Administration utility (`telemon-admin.sh`) for backup/restore/status
@@ -64,5 +69,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - .env.example with all configuration options
 - MIT License
 
-[Unreleased]: https://github.com/yourusername/telemon/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/yourusername/telemon/releases/tag/v1.0.0
+[Unreleased]: https://github.com/SwordfishTrumpet/telemon/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/SwordfishTrumpet/telemon/releases/tag/v1.0.0

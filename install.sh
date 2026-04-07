@@ -11,6 +11,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MONITOR_SCRIPT="${SCRIPT_DIR}/telemon.sh"
 CRON_SCHEDULE="*/5 * * * *"
 
+# Parse flags
+AUTO_YES=false
+for arg in "$@"; do
+    case "$arg" in
+        -y|--yes) AUTO_YES=true ;;
+        -h|--help)
+            echo "Usage: bash install.sh [--yes|-y]"
+            echo ""
+            echo "Options:"
+            echo "  -y, --yes    Non-interactive mode: skip prompts, run test automatically"
+            exit 0
+            ;;
+    esac
+done
+
 # Use flock in cron if available to prevent overlapping runs
 if command -v flock &>/dev/null; then
     LOCK_FILE="/tmp/telemon_sys_alert_state.lock"
@@ -54,6 +69,15 @@ if [[ ! -f "${SCRIPT_DIR}/.env" ]]; then
     exit 1
 fi
 echo "  .env found."
+
+# Secure .env file permissions (contains Telegram bot token)
+local_perms=$(stat -c '%a' "${SCRIPT_DIR}/.env" 2>/dev/null || stat -f '%Lp' "${SCRIPT_DIR}/.env" 2>/dev/null)
+if [[ "$local_perms" != "600" ]]; then
+    chmod 600 "${SCRIPT_DIR}/.env"
+    echo "  .env permissions set to 600 (owner-only read/write)."
+else
+    echo "  .env permissions OK (600)."
+fi
 
 # ---------------------------------------------------------------------------
 # 3. Make script executable
@@ -157,8 +181,13 @@ echo "[7/7] Running initial test..."
 echo "  This will execute a full check cycle. On first run, all metrics"
 echo "  will be treated as NEW and you'll receive a Telegram message."
 echo ""
-read -rp "  Run test now? [Y/n] " answer
-answer="${answer:-Y}"
+
+if [[ "$AUTO_YES" == "true" ]]; then
+    answer="Y"
+else
+    read -rp "  Run test now? [Y/n] " answer
+    answer="${answer:-Y}"
+fi
 
 if [[ "$answer" =~ ^[Yy]$ ]]; then
     echo ""

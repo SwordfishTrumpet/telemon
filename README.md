@@ -95,6 +95,82 @@ CRITICAL_PM2_PROCESSES="hound"
 CRITICAL_SITES=""              # URLs to monitor, e.g., "https://example.com"
 ```
 
+### Common Configurations
+
+Copy-paste these `.env` snippets as starting points for common setups:
+
+<details>
+<summary><strong>Docker Host</strong> (Proxmox, NAS, home server)</summary>
+
+```bash
+ENABLE_DOCKER_CONTAINERS=true
+ENABLE_PM2_PROCESSES=false
+ENABLE_SITE_MONITOR=false
+CRITICAL_SYSTEM_PROCESSES="sshd dockerd"
+CRITICAL_CONTAINERS="postgres redis nginx"   # use container names from: docker ps --format '{{.Names}}'
+```
+
+</details>
+
+<details>
+<summary><strong>Web Server</strong> (Nginx/Apache + SSL)</summary>
+
+```bash
+ENABLE_DOCKER_CONTAINERS=false
+ENABLE_PM2_PROCESSES=false
+ENABLE_SITE_MONITOR=true
+SITE_CHECK_SSL=true
+SITE_SSL_WARN_DAYS=14
+CRITICAL_SYSTEM_PROCESSES="sshd nginx"
+CRITICAL_SITES="https://example.com|max_response_ms=5000 https://api.example.com|expected_status=200"
+```
+
+</details>
+
+<details>
+<summary><strong>Media Server</strong> (Plex/Jellyfin + rclone/mergerfs)</summary>
+
+```bash
+ENABLE_DOCKER_CONTAINERS=true
+ENABLE_PM2_PROCESSES=false
+ENABLE_SITE_MONITOR=true
+CRITICAL_SYSTEM_PROCESSES="sshd cron"
+CRITICAL_CONTAINERS="plex zurg"              # use container names from: docker ps --format '{{.Names}}'
+CRITICAL_SITES="http://localhost:32400/identity http://localhost:9999/dav/version.txt"
+SITE_EXPECTED_STATUS=200
+DISK_THRESHOLD_WARN=85
+DISK_THRESHOLD_CRIT=90
+```
+
+</details>
+
+<details>
+<summary><strong>Bare Metal / VPS</strong> (no Docker, no PM2)</summary>
+
+```bash
+ENABLE_DOCKER_CONTAINERS=false
+ENABLE_PM2_PROCESSES=false
+ENABLE_SITE_MONITOR=false
+CRITICAL_SYSTEM_PROCESSES="sshd cron"
+CRITICAL_CONTAINERS=""
+```
+
+</details>
+
+<details>
+<summary><strong>Node.js App Server</strong> (PM2-managed)</summary>
+
+```bash
+ENABLE_DOCKER_CONTAINERS=false
+ENABLE_PM2_PROCESSES=true
+ENABLE_SITE_MONITOR=true
+CRITICAL_SYSTEM_PROCESSES="sshd"
+CRITICAL_PM2_PROCESSES="api worker scheduler"
+CRITICAL_SITES="https://api.example.com|max_response_ms=3000"
+```
+
+</details>
+
 ### Disabling Checks
 
 **To disable a specific check**, set its `ENABLE_` variable to `false`:
@@ -265,6 +341,12 @@ container_postgres=OK:0
 # Run check manually
 bash telemon.sh
 
+# Validate configuration (checks credentials, permissions, dependencies)
+bash telemon.sh --validate
+
+# Send a test message (validates config + sends Telegram test)
+bash telemon.sh --test
+
 # View logs
 tail -f telemon.log
 tail -f telemon_cron.log
@@ -419,7 +501,8 @@ See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for detailed troubleshoot
 
 | Problem | Quick Solution |
 |---------|---------------|
-| No alerts received? | Run `bash telemon-admin.sh validate` to check config |
+| No alerts received? | Run `bash telemon.sh --validate` to check config |
+| Telegram not working? | Run `bash telemon.sh --test` to send a test message |
 | False alarms? | Increase `CONFIRMATION_COUNT` in `.env` |
 | Docker checks failing? | Add user to docker group: `sudo usermod -aG docker $USER` |
 | State stuck? | Run `bash telemon-admin.sh reset-state` |
