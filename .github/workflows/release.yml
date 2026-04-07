@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Get version from tag
+      id: get_version
+      run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+    
+    - name: Create Release Archive
+      run: |
+        mkdir -p telemon-${{ steps.get_version.outputs.VERSION }}
+        cp -r telemon.sh install.sh uninstall.sh update.sh telemon-admin.sh \
+              .env.example telemon-logrotate.conf README.md LICENSE \
+              CHANGELOG.md CONTRIBUTING.md docs/ \
+              telemon-${{ steps.get_version.outputs.VERSION }}/ 2>/dev/null || true
+        tar -czf telemon-${{ steps.get_version.outputs.VERSION }}.tar.gz \
+            telemon-${{ steps.get_version.outputs.VERSION }}
+        zip -r telemon-${{ steps.get_version.outputs.VERSION }}.zip \
+            telemon-${{ steps.get_version.outputs.VERSION }}
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          telemon-*.tar.gz
+          telemon-*.zip
+        generate_release_notes: true
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,135 @@
+# Changelog
+
+All notable changes to Telemon will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+- **Fleet Heartbeat Monitoring** — multi-server dead man's switch with two backends:
+  - `send_heartbeat()` writes timestamped heartbeat files (shared storage) or POSTs to a webhook URL
+  - `check_fleet_heartbeats()` detects stale/missing servers from `FLEET_EXPECTED_SERVERS` list
+  - File format: 7 tab-separated fields (label, timestamp, status, check count, warn count, crit count, uptime)
+  - `SERVER_LABEL` config (defaults to hostname) used in alert headers and heartbeat identity
+  - `server_label` field added to webhook and escalation JSON payloads
+  - Fleet summary in `run_digest()` output (server count, stale/missing breakdown)
+  - Fleet validation in `run_validate()` with cross-validation (webhook mode + fleet check warning)
+- `telemon-admin.sh`: `fleet-status` command — color-coded table of all heartbeat files with age, status, and checks
+- `telemon-admin.sh`: heartbeat file included in backup/restore; heartbeat info shown in `status` output
+- `telemon-admin.sh`: `digest` command — proxy to `telemon.sh --digest` for CLI consistency
+- `telemon.sh`: `--validate` now checks STATE_FILE directory writability, TOP_PROCESS_COUNT, SITE_EXPECTED_STATUS, SITE_MAX_RESPONSE_MS, SITE_SSL_WARN_DAYS, and LOG_WATCH_LINES
+- `telemon.sh`: CPU temperature monitoring now reports max across all CPU packages (multi-socket support)
+- `telemon.sh`: SSL certificate expiry and verification checks now run even when site returns unexpected HTTP status (previously only checked on OK)
+
+### Fixed
+- **CRITICAL**: `run_validate()` regex validation for LOG_WATCH_PATTERNS was broken — semicolon between `grep` and `[ $? -eq 2 ]` made them two independent commands, so invalid regexes were never detected
+- **CRITICAL**: `telemon-admin.sh` `cmd_restore()` lacked symlink protection — could overwrite arbitrary files via symlink attack on STATE_FILE, ENV_FILE, or LOG_FILE
+- **HIGH**: `is_in_maintenance_window()` crashed entire script on malformed MAINT_SCHEDULE — invalid time values caused arithmetic error under `set -e`; now validates components before arithmetic
+- **HIGH**: `check_cpu()` crashed on empty/malformed `/proc/loadavg` — no null-check before awk arithmetic
+- **HIGH**: Clock skew (NTP correction) broke alert rate limiting indefinitely — negative `now - last_sent` delta satisfied cooldown condition forever; now resets on negative delta
+- **HIGH**: `telemon-admin.sh` `cmd_reset_state()` only removed main state file and lock — left `.cooldown`, `.queue`, `.escalation`, `.integrity`, `.net` orphaned, causing stale data on next run
+- **MEDIUM**: `telemon-admin.sh` missing `umask 077` — backup files could be world-readable if shell had permissive umask, exposing `.env` secrets
+- **MEDIUM**: `telemon-admin.sh` `cmd_backup()` only backed up main state file — missed 5 state file variants (cooldown, queue, escalation, integrity, net); restore lost operational context
+- **MEDIUM**: `telemon-admin.sh` `cmd_backup()` had no error handling on `mkdir`/`cp` — silent backup failures reported success
+- **MEDIUM**: `check_sites()` response time conversion crashed on non-numeric curl output — now validates with regex before awk
+- **MEDIUM**: `run_digest()` word splitting in array iteration — `for key in $(echo ...)` broke on keys with spaces; replaced with `while read` from process substitution
+- **MEDIUM**: `md5sum` output format differs between GNU and BSD — added `awk '{print $1}'` for portable hash extraction in site, log, and integrity state keys
+- **LOW**: `html_escape()` used `echo` which could interpret escape sequences — replaced with `printf '%s'`
+- **LOW**: Webhook, email, and escalation HTML-stripping used `echo` — replaced with `printf '%s\n'` to prevent escape interpretation
+- **LOW**: Log pattern `<pre>` block used `echo` for already-escaped content — replaced with `printf '%s'`
+- **LOW**: Unquoted `$$` in PID lock file write — now quoted for consistency
+- **LOW**: `telemon-admin.sh` `cmd_status()` state file parsing could fail on malformed entries — added empty-value guard and `|| true` on read loop
+- **LOW**: `lib/common.sh` missing POSIX trailing newline
+- **HIGH** (fleet): Heartbeat files on shared storage validated against injection — `hb_status` checked against `^(OK|WARNING|CRITICAL)$` allowlist, `hb_check_count` against `^[0-9]+$` before embedding in HTML
+- **MEDIUM** (fleet): TOCTOU symlink race on heartbeat file write — uses `mv -T` (won't follow symlinks) with fallback, sticky bit on heartbeat directory
+- **MEDIUM** (fleet): Heartbeat files no longer expose internal state key names — replaced with numeric warn/crit counts only
+- **LOW** (fleet): `telemon-admin.sh` sanitization mismatch — `sed 's/[^a-zA-Z0-9_]/_/g'` replaced with `tr -c 'a-zA-Z0-9_.-' '_'` to match `telemon.sh` pattern (preserves hyphens and dots in filenames)
+
+### Changed
+- `telemon-admin.sh` `cmd_restore()` now restores all state file variants (cooldown, queue, escalation, integrity, net)
+- `telemon-admin.sh` `cmd_reset_state()` now removes all 7 state-related files
+
+### Added
+- CLI flags for `telemon.sh`: `--test` / `-t` (validate + send test Telegram message), `--validate` / `-v` (check config without sending), `--help` / `-h`
+- `install.sh`: `--yes` / `-y` flag for non-interactive installs (CI, scripting, automation)
+- `install.sh`: automatically sets `.env` to `chmod 600` (owner-only) to protect bot tokens
+- `.env.example`: clarified that `CRITICAL_CONTAINERS` uses container names from `docker ps --format '{{.Names}}'`, not image names
+- `README.md`: "Common Configurations" section with copy-paste `.env` quickstart profiles for Docker host, web server, media server, bare metal, and Node.js setups
+- Uninstall script (`uninstall.sh`) for clean removal
+- Update mechanism (`update.sh`) with git integration
+- Administration utility (`telemon-admin.sh`) for backup/restore/status
+- Systemd timer/service support as alternative to cron
+- Docker support with Dockerfile and docker-compose.yml
+- GitHub issue templates and PR template
+- GitHub Actions CI workflow for shellcheck and testing
+- GitHub Actions release workflow
+- Man page (`docs/man/telemon.1`)
+- Quick reference card (`docs/QUICKREF.md`)
+- CONTRIBUTING.md guidelines
+- Shared helper library (`lib/common.sh`) for auxiliary scripts
+
+### Fixed
+- **CRITICAL**: Double-flock deadlock — cron wrapped telemon.sh in `flock`, but telemon.sh also flocks internally, causing every cron run to exit immediately
+- **CRITICAL**: Bot token visible in `ps aux` / `/proc/*/cmdline` — `send_telegram()` now uses `curl --config <(...)` process substitution
+- **CRITICAL**: Bot token leaked in error logs — raw Telegram API response no longer logged, only the error description
+- **HIGH**: Duplicate alerts — state change fired at count=1 AND again at confirmation threshold; now only alerts once at confirmation threshold
+- **HIGH**: Dockerfile missing `COPY lib/ ./lib/` — admin scripts crashed in container
+- **HIGH**: `df` in `check_disk()` had no timeout — NFS hangs could freeze telemon indefinitely
+- **HIGH**: PM2 process names interpolated directly into Python string literal (code injection) — now passed via environment variable
+- **HIGH**: State file in `/tmp` was world-readable (644) and vulnerable to symlink attacks — added symlink check and `umask 077`
+- **HIGH**: Token prefix (first 10 chars) printed in `--validate` output — now shows character count only
+- **MEDIUM**: `--insecure` flag on site check curl made SSL verification always succeed — removed, SSL checks now work
+- **MEDIUM**: Site URL key collision — `https://foo-bar.com` and `https://foo.bar.com` produced same state key — now uses md5 hash
+- **LOW**: Log files created world-readable (644) — added `umask 077` at script start
+- **LOW**: Backup directory contained unencrypted `.env` copy with default permissions — now `chmod 700` dir, `chmod 600` files
+
+### Changed
+- Anonymized project - removed hardcoded user paths
+- Fixed install.sh step numbering (was 4/6, 5/6, 6/6 → now 4/7, 5/7, 6/7, 7/7)
+- Updated telemon-logrotate.conf to use environment variables
+- Docker/PM2 enable flags now default to `false` consistently (matching `.env.example`)
+- Alert deduplication rewritten: non-OK states require full confirmation count before alerting; resolution alerts only fire for previously confirmed states
+
+## [1.0.0] - 2025-01-15
+
+### Added
+- Initial release of Telemon
+- Core system monitoring: CPU, memory, disk, internet connectivity
+- Process monitoring: system processes, Docker containers, PM2 processes
+- Website monitoring: HTTP/HTTPS endpoints, SSL certificate expiry
+- Stateful alert deduplication with confirmation count
+- Self-rotating logs (10MB limit, 5 backups)
+- Lock file mechanism to prevent overlapping runs
+- Timeout wrapper for external commands
+- HTML-formatted Telegram messages with emoji indicators
+- Feature toggles (ENABLE_* variables) for all checks
+- Comprehensive threshold validation
+- First-run bootstrap message
+- Installation script with dependency checking
+- Logrotate integration
+- State persistence across reboots
+
+### System Checks
+- CPU load monitoring (% of available cores)
+- Memory availability tracking (% free)
+- Disk space monitoring (all partitions)
+- Internet connectivity (ping to 8.8.8.8)
+- Swap usage monitoring
+- I/O wait monitoring
+- Zombie process detection
+- System process health (sshd, docker, etc.)
+- Failed systemd services detection
+- Docker container status
+- PM2 process monitoring
+- Website/endpoint monitoring
+
+### Documentation
+- README.md with comprehensive setup guide
+- AGENTS.md with architecture documentation
+- .env.example with all configuration options
+- MIT License
+
+[Unreleased]: https://github.com/SwordfishTrumpet/telemon/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/SwordfishTrumpet/telemon/releases/tag/v1.0.0

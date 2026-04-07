@@ -1,0 +1,187 @@
+.TH TELEMON 1 "January 2025" "Telemon 1.0" "User Commands"
+.SH NAME
+telemon \- lightweight system health monitor with Telegram alerts
+.SH SYNOPSIS
+.B telemon
+.RI [ options ]
+.SH DESCRIPTION
+Telemon is a lightweight, self-managing system health monitor that sends Telegram alerts when system vitals change state.
+It monitors CPU, memory, disk space, connectivity, and critical processes, but only alerts on actual state changes.
+.PP
+Designed for cron execution every 5 minutes, Telemon features:
+.IP \(bu 2
+Smart alerts with state-based deduplication
+.IP \(bu 2
+Configurable confirmation count to prevent false alarms
+.IP \(bu 2
+System vitals: CPU, memory, disk, internet connectivity
+.IP \(bu 2
+Process monitoring: system processes, Docker containers, PM2 processes
+.IP \(bu 2
+Website monitoring: HTTP/HTTPS endpoints, SSL certificate expiry
+.IP \(bu 2
+Fleet heartbeat monitoring: multi-server dead man's switch via shared storage or webhook
+.IP \(bu 2
+Self-rotating logs and persistent state across reboots
+.SH CONFIGURATION
+Configuration is stored in
+.I .env
+in the Telemon directory. Key settings:
+.PP
+.TS
+tab(|);
+l l.
+TELEGRAM_BOT_TOKEN|Bot token from @BotFather
+TELEGRAM_CHAT_ID|Your Telegram chat ID
+CPU_THRESHOLD_WARN|CPU warning threshold (% of cores)
+CPU_THRESHOLD_CRIT|CPU critical threshold (% of cores)
+MEM_THRESHOLD_WARN|Memory warning threshold (% free)
+MEM_THRESHOLD_CRIT|Memory critical threshold (% free)
+DISK_THRESHOLD_WARN|Disk warning threshold (% used)
+DISK_THRESHOLD_CRIT|Disk critical threshold (% used)
+CONFIRMATION_COUNT|Consecutive checks before alerting
+SERVER_LABEL|Server identity in alerts (default: hostname)
+ENABLE_HEARTBEAT|Enable heartbeat emission (true/false)
+HEARTBEAT_MODE|Heartbeat backend: file or webhook
+FLEET_HEARTBEAT_DIR|Shared directory for heartbeat files
+FLEET_STALE_THRESHOLD_SEC|Seconds before heartbeat is stale (default: 900)
+ENABLE_FLEET_CHECK|Enable fleet heartbeat monitoring (true/false)
+FLEET_EXPECTED_SERVERS|Space-separated list of expected server labels
+.TE
+.SH COMMANDS
+.TP
+.BI "bash telemon.sh"
+Run a single check cycle manually
+.TP
+.BI "bash install.sh"
+Install cron job and set up system integration
+.TP
+.BI "bash uninstall.sh "[\-\-full]
+Remove cron job and optionally state/logs
+.TP
+.BI "bash update.sh "[\-\-check]
+Update to latest version from git
+.TP
+.BI "bash telemon-admin.sh "command
+Administration utility (backup, restore, status, validate, fleet-status)
+.TP
+.BI "bash telemon-admin.sh fleet-status"
+Display color-coded table of all fleet heartbeat files with age, status, and check counts
+.SH FILES
+.TP
+.I telemon.sh
+Main monitoring script
+.TP
+.I .env
+Configuration file (not in git)
+.TP
+.I telemon.log
+Detailed check results and state changes
+.TP
+.I telemon_cron.log
+Cron execution output
+.TP
+.I /tmp/telemon_sys_alert_state
+State file for alert deduplication
+.TP
+.I /tmp/telemon_heartbeats/
+Directory for fleet heartbeat files (shared via NFS or similar)
+.SH STATE MANAGEMENT
+Telemon uses a state file to track the last known state of each check.
+Format:
+.PP
+.EX
+cpu=CRITICAL:3
+mem=OK:0
+disk_root=WARNING:1
+.EE
+.PP
+The count indicates how many consecutive checks have shown this state.
+Alerts only fire when the count reaches CONFIRMATION_COUNT.
+.SH ALERT BEHAVIOR
+.TS
+tab(|);
+l l.
+First run|Bootstrap message with all metrics
+State unchanged|Silent (no message)
+OK → WARNING|Alert after confirmation count
+OK → CRITICAL|Alert after confirmation count
+CRITICAL → OK|Resolution alert
+WARNING → OK|Resolution alert
+.TE
+.SH EXAMPLES
+Run manually:
+.PP
+.EX
+bash telemon.sh
+.EE
+.PP
+View recent logs:
+.PP
+.EX
+tail -f telemon.log
+.EE
+.PP
+Reset state (forces fresh alerts):
+.PP
+.EX
+rm /tmp/telemon_sys_alert_state
+.EE
+.PP
+Create backup:
+.PP
+.EX
+bash telemon-admin.sh backup
+.EE
+.SH EXIT STATUS
+.TP
+.B 0
+Successful execution
+.TP
+.B 1
+Configuration error or fatal issue
+.TP
+.B 2
+Some checks failed (but execution completed)
+.SH ENVIRONMENT
+.TP
+.B SCRIPT_DIR
+Directory containing telemon.sh (auto-detected)
+.TP
+.B STATE_FILE
+Path to state file (default: /tmp/telemon_sys_alert_state)
+.TP
+.B LOG_FILE
+Path to log file (default: ./telemon.log)
+.SH NOTES
+Telemon is designed for Linux systems and uses Linux-specific /proc filesystem interfaces:
+.IP \(bu 2
+/proc/loadavg for CPU load
+.IP \(bu 2
+/proc/meminfo for memory statistics
+.IP \(bu 2
+/proc/swaps for swap usage
+.IP \(bu 2
+/proc/stat for I/O wait metrics
+.PP
+Fleet heartbeat files use a 7-field tab-separated format:
+.PP
+.EX
+label	timestamp	status	check_count	warn_count	crit_count	uptime_seconds
+.EE
+.PP
+Heartbeat files are written atomically via
+.BR mv (1)
+with symlink protection.
+The heartbeat directory should have the sticky bit set (mode 1755) to prevent other users from deleting heartbeat files.
+.SH SEE ALSO
+.BR crontab (1),
+.BR systemctl (1),
+.BR docker (1),
+.BR pm2 (1)
+.SH BUGS
+Report bugs at: https://github.com/yourusername/telemon/issues
+.SH AUTHOR
+Telemon Contributors
+.SH LICENSE
+MIT License

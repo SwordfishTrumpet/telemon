@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  telemon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: telemon
+    restart: unless-stopped
+    
+    # Mount configuration
+    volumes:
+      # Your local .env file
+      - ./.env:/opt/telemon/.env:ro
+      # State persistence
+      - telemon-state:/var/lib/telemon
+      # Log output
+      - telemon-logs:/var/log/telemon
+      # Access to host's /proc for system monitoring (optional)
+      - /proc:/host/proc:ro
+      # Docker socket for container monitoring (optional)
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    
+    environment:
+      # Override state file location for container
+      - STATE_FILE=/var/lib/telemon/state
+      - LOG_FILE=/var/log/telemon/telemon.log
+      # Use host's /proc if mounted
+      - HOST_PROC=/host/proc
+    
+    # Run as a scheduled task instead of daemon
+    # (Telemon is designed for cron/systemd, not continuous running)
+    command: >
+      sh -c '
+        while true; do
+          bash /opt/telemon/telemon.sh || true;
+          sleep 300;
+        done
+      '
+    
+    # Or use external scheduler (recommended):
+    # Remove the 'command' above and use external cron/job scheduler
+    # to run: docker-compose run --rm telemon
+
+  # Alternative: Use Ofelia or similar for scheduling
+  scheduler:
+    image: mcuadros/ofelia:latest
+    container_name: telemon-scheduler
+    restart: unless-stopped
+    command: daemon --docker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    labels:
+      ofelia.job-run.telemon.schedule: "@every 5m"
+      ofelia.job-run.telemon.container: "telemon"
+      ofelia.job-run.telemon.command: "bash /opt/telemon/telemon.sh"
+    depends_on:
+      - telemon
+    profiles:
+      - scheduler
+
+volumes:
+  telemon-state:
+  telemon-logs:
