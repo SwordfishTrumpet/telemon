@@ -57,7 +57,19 @@ portable_stat() {
             stat -c '%U(uid=%u)' "$file" 2>/dev/null || stat -f '%Su(uid=%u)' "$file" 2>/dev/null || echo "unknown"
             ;;
         perms)
-            stat -c %a "$file" 2>/dev/null || stat -f '%Lp' "$file" 2>/dev/null || echo "000"
+            local perms_val
+            perms_val=$(stat -c %a "$file" 2>/dev/null)
+            if [[ -z "$perms_val" ]]; then
+                # BSD stat returns without leading zeros, pad to 3 digits
+                perms_val=$(stat -f '%Lp' "$file" 2>/dev/null)
+                if [[ -n "$perms_val" ]]; then
+                    printf '%03d' "$perms_val"
+                else
+                    echo "000"
+                fi
+            else
+                echo "$perms_val"
+            fi
             ;;
         *)
             echo ""
@@ -68,18 +80,32 @@ portable_stat() {
 # ===========================================================================
 # Get list of state file variants for backup/restore/reset operations
 # Returns a space-separated list of state file paths
-# Usage: get_state_variants [include_drift] [include_lock]
-#   include_drift: "true" to include drift.baseline directory
+# Usage: get_state_file_variants [include_main] [include_lock] [include_drift_baseline]
+#   include_main: "true" to include main STATE_FILE (default: true for backup)
 #   include_lock: "true" to include lock files
+#   include_drift_baseline: "true" to include drift.baseline directory
 # ===========================================================================
 get_state_file_variants() {
-    local include_drift="${1:-false}"
+    local include_main="${1:-true}"
     local include_lock="${2:-false}"
+    local include_drift_baseline="${3:-false}"
     
-    local variants="${STATE_FILE}.cooldown ${STATE_FILE}.queue ${STATE_FILE}.escalation ${STATE_FILE}.integrity ${STATE_FILE}.net ${STATE_FILE}.detail ${STATE_FILE}.trend ${STATE_FILE}.drift"
+    # Base variants (always included)
+    local variants="${STATE_FILE}.cooldown ${STATE_FILE}.queue ${STATE_FILE}.escalation ${STATE_FILE}.integrity ${STATE_FILE}.net ${STATE_FILE}.detail ${STATE_FILE}.trend ${STATE_FILE}.drift ${STATE_FILE}.iowait"
     
+    # Include main state file
+    if [[ "$include_main" == "true" ]]; then
+        variants="${STATE_FILE} ${variants}"
+    fi
+    
+    # Include lock files
     if [[ "$include_lock" == "true" ]]; then
-        variants="${STATE_FILE} ${STATE_FILE}.lock ${STATE_FILE}.lock.d ${variants}"
+        variants="${STATE_FILE}.lock ${STATE_FILE}.lock.d ${variants}"
+    fi
+    
+    # Include drift baseline directory path (caller checks if it's a dir)
+    if [[ "$include_drift_baseline" == "true" ]]; then
+        variants="${STATE_FILE}.drift.baseline ${variants}"
     fi
     
     echo "$variants"

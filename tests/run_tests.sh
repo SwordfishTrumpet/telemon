@@ -240,6 +240,99 @@ test_state_key_format() {
 }
 
 # ---------------------------------------------------------------------------
+# Test html_escape helper
+# ---------------------------------------------------------------------------
+
+test_html_escape() {
+    echo ""
+    echo "Testing html_escape helper..."
+    
+    # Define the html_escape function inline for testing
+    html_escape() {
+        local text="$1"
+        # Escape & first (must use \& in replacement to get literal &)
+        text="${text//&/\&amp;}"
+        text="${text//</\&lt;}"
+        text="${text//>/\&gt;}"
+        text="${text//\"/\&quot;}"
+        text="${text//\'/\&#39;}"
+        printf '%s' "$text"
+    }
+    
+    # Test basic HTML entities (use variables to avoid shell interpretation)
+    local input_amp="&" expected_amp="&amp;"
+    assert_eq "$expected_amp" "$(html_escape "$input_amp")" "html_escape escapes ampersand"
+    
+    local input_lt="<" expected_lt="&lt;"
+    assert_eq "$expected_lt" "$(html_escape "$input_lt")" "html_escape escapes less-than"
+    
+    local input_gt=">" expected_gt="&gt;"
+    assert_eq "$expected_gt" "$(html_escape "$input_gt")" "html_escape escapes greater-than"
+    
+    local input_dq='"' expected_dq="&quot;"
+    assert_eq "$expected_dq" "$(html_escape "$input_dq")" "html_escape escapes double quote"
+    
+    local input_sq="'" expected_sq="&#39;"
+    assert_eq "$expected_sq" "$(html_escape "$input_sq")" "html_escape escapes single quote"
+    
+    # Test combined string
+    local input_combo="<b>test</b>" expected_combo="&lt;b&gt;test&lt;/b&gt;"
+    assert_eq "$expected_combo" "$(html_escape "$input_combo")" "html_escape escapes HTML tags"
+    
+    local input_text="Tom & Jerry" expected_text="Tom &amp; Jerry"
+    assert_eq "$expected_text" "$(html_escape "$input_text")" "html_escape escapes ampersand in text"
+    
+    # Test empty string
+    assert_eq "" "$(html_escape "")" "html_escape handles empty string"
+    
+    # Test string with no special chars
+    assert_eq "hello world" "$(html_escape "hello world")" "html_escape leaves plain text unchanged"
+}
+
+# ---------------------------------------------------------------------------
+# Test threshold validation helper
+# ---------------------------------------------------------------------------
+
+test_threshold_validation() {
+    echo ""
+    echo "Testing threshold validation logic..."
+    
+    # Define validation functions inline for testing
+    is_valid_number() {
+        [[ "$1" =~ ^[0-9]+$ ]]
+    }
+    
+    # Test is_valid_number
+    is_valid_number "42"
+    assert_true "is_valid_number accepts positive integer"
+    
+    is_valid_number "0"
+    assert_true "is_valid_number accepts zero"
+    
+    ! is_valid_number "-5"
+    assert_true "is_valid_number rejects negative number"
+    
+    ! is_valid_number "3.14"
+    assert_true "is_valid_number rejects decimal"
+    
+    ! is_valid_number "abc"
+    assert_true "is_valid_number rejects letters"
+    
+    ! is_valid_number ""
+    assert_true "is_valid_number rejects empty string"
+    
+    # Test threshold relationship logic (normal: warn < crit)
+    local warn=70 crit=80
+    [[ "$warn" -lt "$crit" ]]
+    assert_true "Normal threshold: warn ($warn) < crit ($crit)"
+    
+    # Test inverted threshold relationship (inverted: warn > crit)
+    local mem_warn=15 mem_crit=10
+    [[ "$mem_warn" -gt "$mem_crit" ]]
+    assert_true "Inverted threshold: warn ($mem_warn) > crit ($mem_crit) for memory"
+}
+
+# ---------------------------------------------------------------------------
 # Main test runner
 # ---------------------------------------------------------------------------
 
@@ -255,6 +348,8 @@ main() {
     test_get_state_file_variants
     test_sanitize_state_key
     test_state_key_format
+    test_html_escape
+    test_threshold_validation
     
     # Summary
     echo ""

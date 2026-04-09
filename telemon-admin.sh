@@ -65,12 +65,8 @@ cmd_backup() {
     fi
     
     # Backup state and all related files
-    local state_variants=("$STATE_FILE" "${STATE_FILE}.cooldown" \
-                          "${STATE_FILE}.queue" "${STATE_FILE}.escalation" \
-                          "${STATE_FILE}.integrity" "${STATE_FILE}.net" \
-                          "${STATE_FILE}.detail" "${STATE_FILE}.trend" \
-                          "${STATE_FILE}.drift")
-    for file in "${state_variants[@]}"; do
+    # shellcheck disable=SC2046
+    for file in $(get_state_file_variants true false false); do
         if [[ -f "$file" ]]; then
             if ! cp -p "$file" "$backup_path/" 2>/dev/null; then
                 echo -e "${RED}ERROR: Failed to backup $(basename "$file")${NC}"
@@ -230,12 +226,8 @@ cmd_restore() {
     fi
     
     # Restore state and all related files (with symlink protection)
-    local state_variants=("$STATE_FILE" "${STATE_FILE}.cooldown" \
-                          "${STATE_FILE}.queue" "${STATE_FILE}.escalation" \
-                          "${STATE_FILE}.integrity" "${STATE_FILE}.net" \
-                          "${STATE_FILE}.detail" "${STATE_FILE}.trend" \
-                          "${STATE_FILE}.drift")
-    for file in "${state_variants[@]}"; do
+    # shellcheck disable=SC2046
+    for file in $(get_state_file_variants true false false); do
         local basename_file
         basename_file=$(basename "$file")
         if [[ -f "${backup_path}/${basename_file}" ]]; then
@@ -432,12 +424,8 @@ cmd_reset_state() {
     fi
     
     # Remove main state file and all related state variants
-    local state_variants=("$STATE_FILE" "${STATE_FILE}.lock" "${STATE_FILE}.cooldown" \
-                          "${STATE_FILE}.queue" "${STATE_FILE}.escalation" \
-                          "${STATE_FILE}.integrity" "${STATE_FILE}.net" \
-                          "${STATE_FILE}.detail" "${STATE_FILE}.trend" \
-                          "${STATE_FILE}.drift")
-    for file in "${state_variants[@]}"; do
+    # shellcheck disable=SC2046
+    for file in $(get_state_file_variants true true false); do
         if [[ -f "$file" ]]; then
             rm -f "$file"
             echo "  ✓ Removed: $(basename "$file")"

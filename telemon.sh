@@ -261,7 +261,12 @@ validate_thresholds() {
     
     # Extended check thresholds (only validate if check is enabled)
     [[ "${ENABLE_TEMP_CHECK:-false}" == "true" ]] && { check_threshold_pair "TEMP" "${TEMP_THRESHOLD_WARN:-75}" "${TEMP_THRESHOLD_CRIT:-90}" || has_errors=true; }
-    [[ "${ENABLE_GPU_CHECK:-false}" == "true" ]] && { check_threshold_pair "GPU_TEMP" "${GPU_TEMP_THRESHOLD_WARN:-80}" "${GPU_TEMP_THRESHOLD_CRIT:-95}" || has_errors=true; }
+    [[ "${ENABLE_GPU_CHECK:-false}" == "true" ]] && { 
+        check_threshold_pair "GPU_TEMP" "${GPU_TEMP_THRESHOLD_WARN:-80}" "${GPU_TEMP_THRESHOLD_CRIT:-95}" || has_errors=true; 
+        # Intel GPU specific thresholds (validated separately — ok to fail if not on Intel)
+        check_threshold_pair "GPU_INTEL_UTIL" "${GPU_INTEL_UTIL_THRESHOLD_WARN:-80}" "${GPU_INTEL_UTIL_THRESHOLD_CRIT:-95}" 2>/dev/null || true
+        check_threshold_pair "GPU_INTEL_TEMP" "${GPU_INTEL_TEMP_THRESHOLD_WARN:-80}" "${GPU_INTEL_TEMP_THRESHOLD_CRIT:-95}" 2>/dev/null || true
+    }
     [[ "${ENABLE_NETWORK_CHECK:-false}" == "true" ]] && { check_threshold_pair "NETWORK" "${NETWORK_THRESHOLD_WARN:-800}" "${NETWORK_THRESHOLD_CRIT:-950}" || has_errors=true; }
     [[ "${ENABLE_UPS_CHECK:-false}" == "true" ]] && { check_threshold_pair "UPS" "${UPS_THRESHOLD_WARN:-30}" "${UPS_THRESHOLD_CRIT:-10}" "true" || has_errors=true; }
     [[ "${ENABLE_NVME_CHECK:-false}" == "true" ]] && { check_threshold_pair "NVME_TEMP" "${NVME_TEMP_THRESHOLD_WARN:-70}" "${NVME_TEMP_THRESHOLD_CRIT:-80}" || has_errors=true; }
@@ -527,12 +532,12 @@ check_state_change() {
 # ===========================================================================
 html_escape() {
     local text="$1"
-    # Escape HTML entities that break Telegram parsing
-    text="${text//&/&amp;}"
-    text="${text//</&lt;}"
-    text="${text//>/&gt;}"
-    text="${text//\"/&quot;}"
-    text="${text//\'/&#39;}"
+    # Escape & first (must use \& in replacement to get literal &)
+    text="${text//&/\&amp;}"
+    text="${text//</\&lt;}"
+    text="${text//>/\&gt;}"
+    text="${text//\"/\&quot;}"
+    text="${text//\'/\&#39;}"
     printf '%s' "$text"
 }
 
@@ -574,7 +579,19 @@ portable_stat() {
             stat -c '%U(uid=%u)' "$file" 2>/dev/null || stat -f '%Su(uid=%u)' "$file" 2>/dev/null || echo "unknown"
             ;;
         perms)
-            stat -c %a "$file" 2>/dev/null || stat -f '%Lp' "$file" 2>/dev/null || echo "000"
+            local perms_val
+            perms_val=$(stat -c %a "$file" 2>/dev/null)
+            if [[ -z "$perms_val" ]]; then
+                # BSD stat returns without leading zeros, pad to 3 digits
+                perms_val=$(stat -f '%Lp' "$file" 2>/dev/null)
+                if [[ -n "$perms_val" ]]; then
+                    printf '%03d' "$perms_val"
+                else
+                    echo "000"
+                fi
+            else
+                echo "$perms_val"
+            fi
             ;;
         *)
             echo ""
@@ -842,9 +859,15 @@ check_memory() {
         log "WARN" "check_memory: MemTotal is ${total_kb:-empty} — skipping"
         return
     fi
+    
+    # Fallback for kernels < 3.14 without MemAvailable (estimate: MemFree + Buffers + Cached)
     if [[ -z "$available_kb" ]]; then
-        log "WARN" "check_memory: MemAvailable not found in /proc/meminfo — skipping"
-        return
+        local mem_free buffers cached
+        mem_free=$(awk '/^MemFree:/ {print $2}' /proc/meminfo)
+        buffers=$(awk '/^Buffers:/ {print $2}' /proc/meminfo)
+        cached=$(awk '/^Cached:/ {print $2}' /proc/meminfo)
+        available_kb=$(( ${mem_free:-0} + ${buffers:-0} + ${cached:-0} ))
+        log "DEBUG" "check_memory: MemAvailable not found — using fallback calculation (kernel < 3.14)"
     fi
 
     # Percentage of AVAILABLE memory (not just "free")
@@ -962,12 +985,29 @@ check_internet() {
         log "WARN" "check_internet: PING_FAIL_THRESHOLD '${PING_FAIL_THRESHOLD}' is not numeric — skipping"
         return
     fi
+    
+    # Wrap entire ping check in timeout to prevent indefinite hanging
     local fail_count=0
-    for (( i=1; i<=PING_FAIL_THRESHOLD; i++ )); do
-        if ! ping -c 1 -W 3 "$target" &>/dev/null; then
-            fail_count=$(( fail_count + 1 ))
-        fi
-    done
+    local ping_timeout=$(( PING_FAIL_THRESHOLD * 5 ))  # 5 seconds per ping (including -W 3 + buffer)
+    
+    local ping_result
+    ping_result=$(run_with_timeout "$ping_timeout" bash -c '
+        target="$1"; threshold="$2"; count=0
+        for (( i=1; i<=threshold; i++ )); do
+            if ! ping -c 1 -W 3 "$target" &>/dev/null; then
+                count=$(( count + 1 ))
+            fi
+        done
+        echo "$count"
+    ' _ "$target" "$PING_FAIL_THRESHOLD" 2>/dev/null) || ping_result=""
+    
+    # Validate result is numeric
+    if [[ "$ping_result" =~ ^[0-9]+$ ]]; then
+        fail_count="$ping_result"
+    else
+        log "WARN" "check_internet: ping check timed out or failed — assuming connectivity lost"
+        fail_count="$PING_FAIL_THRESHOLD"
+    fi
 
     local state="OK"
     local safe_target
@@ -1029,43 +1069,72 @@ check_swap() {
 
 # ===========================================================================
 # CHECK: I/O Wait (CPU waiting for disk I/O)
+# Uses state file to store previous sample, calculates delta on next run
 # ===========================================================================
 check_iowait() {
     [[ -f /proc/stat ]] || { log "WARN" "check_iowait: /proc/stat not found — skipping"; return; }
-    # Calculate iowait% over a 1-second interval using two /proc/stat samples.
-    # /proc/stat values are cumulative since boot, so a single sample gives the
-    # lifetime average (always near 0 on long-running systems) -- useless.
-    # Delta between two samples gives the actual current interval percentage.
-    # Read all CPU fields dynamically (kernel versions provide 7-10+ fields)
-    local -a cpu1 cpu2
-    read -r -a cpu1 < <(awk '/^cpu / {$1=""; print}' /proc/stat)
-    sleep 1
-    read -r -a cpu2 < <(awk '/^cpu / {$1=""; print}' /proc/stat)
-
+    
+    local iowait_state_file="${STATE_FILE}.iowait"
+    
+    # Read all CPU fields from current sample
+    local -a cpu_curr
+    read -r -a cpu_curr < <(awk '/^cpu / {$1=""; print}' /proc/stat)
+    
     # Ensure we have at least 5 fields (user, nice, system, idle, iowait)
-    if [[ ${#cpu1[@]} -lt 5 || ${#cpu2[@]} -lt 5 ]]; then
+    if [[ ${#cpu_curr[@]} -lt 5 ]]; then
         log "WARN" "check_iowait: /proc/stat has fewer than 5 CPU fields — skipping"
         return
     fi
-
+    
     # iowait is the 5th field (index 4)
-    local iw1="${cpu1[4]}" iw2="${cpu2[4]}"
-
-    # Sum all fields for total, defaulting missing fields to 0
-    local dtotal=0
-    for (( i=0; i<${#cpu2[@]}; i++ )); do
-        dtotal=$(( dtotal + (${cpu2[$i]:-0}) - (${cpu1[$i]:-0}) ))
+    local iw_curr="${cpu_curr[4]}"
+    
+    # Calculate total of all fields for current sample
+    local total_curr=0
+    for (( i=0; i<${#cpu_curr[@]}; i++ )); do
+        total_curr=$(( total_curr + (${cpu_curr[$i]:-0}) ))
     done
-    local diowait=$(( iw2 - iw1 ))
-
+    
+    # Load previous sample from state file
+    local iw_prev=0 total_prev=0 prev_ts=0
+    if [[ -f "$iowait_state_file" ]]; then
+        read -r iw_prev total_prev prev_ts < "$iowait_state_file" 2>/dev/null || true
+    fi
+    
+    # Validate loaded values
+    if ! [[ "$iw_prev" =~ ^[0-9]+$ && "$total_prev" =~ ^[0-9]+$ && "$prev_ts" =~ ^[0-9]+$ ]]; then
+        iw_prev=0; total_prev=0; prev_ts=0
+    fi
+    
+    # Save current sample for next run
+    local now
+    now=$(date +%s)
+    safe_write_state_file "$iowait_state_file" "$iw_curr $total_curr $now"
+    
+    # Need previous reading to calculate rate
+    if [[ "$prev_ts" -eq 0 ]]; then
+        log "DEBUG" "check_iowait: no previous sample — baseline established"
+        return
+    fi
+    
+    # Calculate delta
+    local diowait=$(( iw_curr - iw_prev ))
+    local dtotal=$(( total_curr - total_prev ))
+    
+    # Handle counter wraparound (32-bit counters on some systems)
+    if [[ "$diowait" -lt 0 ]] || [[ "$dtotal" -lt 0 ]]; then
+        log "DEBUG" "check_iowait: counter wraparound detected — skipping calculation"
+        return
+    fi
+    
     local iowait_pct=0
     if [[ "$dtotal" -gt 0 ]]; then
         iowait_pct=$(( (diowait * 100) / dtotal ))
     fi
-
+    
     local state="OK"
     local detail="I/O Wait: ${iowait_pct}% of CPU time"
-
+    
     if (( iowait_pct >= IOWAIT_THRESHOLD_CRIT )); then
         state="CRITICAL"
         detail="I/O Wait: <b>${iowait_pct}%</b> of CPU time waiting for disk (threshold: ${IOWAIT_THRESHOLD_CRIT}%)"
@@ -1073,7 +1142,7 @@ check_iowait() {
         state="WARNING"
         detail="I/O Wait: <b>${iowait_pct}%</b> of CPU time waiting for disk (threshold: ${IOWAIT_THRESHOLD_WARN}%)"
     fi
-
+    
     check_state_change "iowait" "$state" "$detail"
 }
 
@@ -1509,10 +1578,11 @@ check_sites() {
             host_for_ssl="${host_for_ssl%%:*}"
             if command -v openssl &>/dev/null; then
                 local cert_enddate
-                cert_enddate=$(echo | run_with_timeout "$CHECK_TIMEOUT" \
-                    openssl s_client -servername "$host_for_ssl" -connect "${host_for_ssl}:443" 2>/dev/null \
-                    | openssl x509 -noout -enddate 2>/dev/null \
-                    | sed 's/notAfter=//')
+                # Use timeout wrapper to prevent hanging on slow/unresponsive SSL servers
+                cert_enddate=$(run_with_timeout "$CHECK_TIMEOUT" bash -c '
+                    echo | openssl s_client -servername "$1" -connect "$1:443" 2>/dev/null | \
+                    openssl x509 -noout -enddate 2>/dev/null | sed "s/notAfter=//"
+                ' _ "$host_for_ssl" 2>/dev/null) || cert_enddate=""
                 if [[ -n "$cert_enddate" ]]; then
                     ssl_expiry_epoch=$(parse_date_to_epoch "$cert_enddate")
                     # Guard: treat parse failure (empty or "0") as no SSL data
@@ -1599,6 +1669,16 @@ check_sites() {
 # ===========================================================================
 check_tcp_ports() {
     [[ -z "${CRITICAL_PORTS:-}" ]] && return
+    
+    # Check if bash supports /dev/tcp (some minimal builds don't)
+    if [[ ! -e /dev/tcp ]]; then
+        # Try to create a test connection to see if feature works
+        if ! bash -c 'echo test >/dev/tcp/localhost/1' 2>/dev/null; then
+            log "DEBUG" "check_tcp_ports: /dev/tcp not supported in this bash build — skipping"
+            return
+        fi
+    fi
+    
     for entry in $CRITICAL_PORTS; do
         local host="${entry%%:*}"
         local port="${entry##*:}"
@@ -1712,11 +1792,25 @@ check_dns() {
 # CHECK: GPU Usage/Temperature (nvidia-smi)
 # ===========================================================================
 check_gpu() {
-    if ! command -v nvidia-smi &>/dev/null; then
-        log "DEBUG" "GPU check: nvidia-smi not installed — skipping"
+    # Try NVIDIA first
+    if command -v nvidia-smi &>/dev/null; then
+        check_gpu_nvidia
         return
     fi
+    
+    # Try Intel GPU
+    if command -v intel_gpu_top &>/dev/null; then
+        check_gpu_intel
+        return
+    fi
+    
+    log "DEBUG" "GPU check: neither nvidia-smi nor intel_gpu_top found — skipping"
+}
 
+# ===========================================================================
+# CHECK: NVIDIA GPU (via nvidia-smi)
+# ===========================================================================
+check_gpu_nvidia() {
     local gpu_info
     gpu_info=$(run_with_timeout "$CHECK_TIMEOUT" nvidia-smi --query-gpu=index,temperature.gpu,utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null) || return
 
@@ -1766,6 +1860,102 @@ check_gpu() {
 
         check_state_change "$key" "$state" "$detail"
     done <<< "$gpu_info"
+}
+
+# ===========================================================================
+# CHECK: Intel GPU (via intel_gpu_top)
+# ===========================================================================
+check_gpu_intel() {
+    # intel_gpu_top requires root access to GPU metrics
+    # Use single sample mode with short duration to avoid hanging
+    local gpu_data
+    gpu_data=$(run_with_timeout 3 bash -c 'intel_gpu_top -s 1000 -o - 2>/dev/null | head -50' 2>/dev/null) || {
+        log "DEBUG" "check_gpu: intel_gpu_top failed or timed out (may need root)"
+        return
+    }
+    
+    [[ -z "$gpu_data" ]] && {
+        log "DEBUG" "check_gpu: intel_gpu_top returned no data"
+        return
+    }
+    
+    # Parse the output for render and video utilization
+    # Sample output includes lines like:
+    # "engines": { "Render": { "busy": 23.4 }, "Video": { "busy": 0.0 } }
+    # "frequency": { "actual": 450 }
+    
+    local render_busy="0"
+    local video_busy="0"
+    local freq="0"
+    local temp=""
+    
+    # Try to parse JSON-like output from intel_gpu_top
+    if echo "$gpu_data" | grep -q '"busy":'; then
+        render_busy=$(echo "$gpu_data" | grep -oP '"Render".*?"busy":\s*\K[0-9.]+' | head -1 || echo "0")
+        video_busy=$(echo "$gpu_data" | grep -oP '"Video".*?"busy":\s*\K[0-9.]+' | head -1 || echo "0")
+        freq=$(echo "$gpu_data" | grep -oP '"actual":\s*\K[0-9]+' | head -1 || echo "0")
+    fi
+    
+    # Get temperature from hwmon if available (standard Linux thermal interface)
+    for hwmon in /sys/class/drm/card*/device/hwmon/hwmon*/temp1_input; do
+        if [[ -r "$hwmon" ]]; then
+            local temp_milli
+            temp_milli=$(cat "$hwmon" 2>/dev/null) && {
+                temp=$(( temp_milli / 1000 ))
+                break
+            }
+        fi
+    done
+    
+    # Also check alternative hwmon path
+    if [[ -z "$temp" ]]; then
+        for hwmon in /sys/class/hwmon/hwmon*/temp1_input; do
+            if [[ -r "$hwmon" ]]; then
+                # Verify this is a GPU temp by checking the name
+                local name_path="${hwmon%/*}/name"
+                if [[ -r "$name_path" ]]; then
+                    local name
+                    name=$(cat "$name_path" 2>/dev/null)
+                    if [[ "$name" == "i915" || "$name" == "intel"* ]]; then
+                        local temp_milli
+                        temp_milli=$(cat "$hwmon" 2>/dev/null) && {
+                            temp=$(( temp_milli / 1000 ))
+                            break
+                        }
+                    fi
+                fi
+            fi
+        done
+    fi
+    
+    # Convert to integers for comparison
+    local render_int=${render_busy%.*}
+    local video_int=${video_busy%.*}
+    [[ -z "$render_int" ]] && render_int=0
+    [[ -z "$video_int" ]] && video_int=0
+    
+    local key="gpu_intel"
+    local warn_util="${GPU_INTEL_UTIL_THRESHOLD_WARN:-80}"
+    local crit_util="${GPU_INTEL_UTIL_THRESHOLD_CRIT:-95}"
+    local warn_temp="${GPU_INTEL_TEMP_THRESHOLD_WARN:-80}"
+    local crit_temp="${GPU_INTEL_TEMP_THRESHOLD_CRIT:-95}"
+    
+    local state="OK"
+    local temp_str=""
+    [[ -n "$temp" ]] && temp_str=", ${temp}°C"
+    
+    local detail="Intel GPU: ${render_int}% render, ${video_int}% video${temp_str}, ${freq} MHz"
+    
+    # Determine worst state based on utilization or temperature
+    if (( render_int >= crit_util )) || [[ -n "$temp" && "$temp" -ge "$crit_temp" ]]; then
+        state="CRITICAL"
+        detail="Intel GPU: <b>${render_int}% render</b>, ${video_int}% video${temp_str}, ${freq} MHz"
+    elif (( render_int >= warn_util )) || [[ -n "$temp" && "$temp" -ge "$warn_temp" ]]; then
+        state="WARNING"
+        detail="Intel GPU: <b>${render_int}% render</b>, ${video_int}% video${temp_str}, ${freq} MHz"
+    fi
+    
+    check_state_change "$key" "$state" "$detail"
 }
 
 # ===========================================================================
@@ -1896,7 +2086,8 @@ check_network_bandwidth() {
     # Handle counter wraparound: report OK and let next cycle use fresh baseline
     if [[ "$rx_rate" -lt 0 ]] || [[ "$tx_rate" -lt 0 ]]; then
         log "DEBUG" "check_network_bandwidth: counter wraparound detected on ${iface} — skipping rate calculation"
-        check_state_change "net_bw" "OK" "Network ${safe_iface}: counter wraparound (awaiting next sample)"
+        local iface_key_wrap="net_$(printf '%s' "$iface" | tr -c 'a-zA-Z0-9_' '_')"
+        check_state_change "$iface_key_wrap" "OK" "Network ${safe_iface}: counter wraparound (awaiting next sample)"
         return
     fi
 
@@ -1951,6 +2142,12 @@ check_log_patterns() {
         for pattern in $patterns; do
             combined_pattern+="${combined_pattern:+|}${pattern}"
         done
+        
+        # Validate the combined regex pattern before using it
+        if ! echo "" | grep -qE "$combined_pattern" 2>/dev/null; then
+            log "WARN" "check_log_patterns: invalid regex pattern '${combined_pattern}' for ${logfile} — skipping"
+            continue
+        fi
 
         while IFS= read -r line; do
             match_count=$((match_count + 1))
@@ -2801,6 +2998,10 @@ check_escalation() {
                 fi
             fi
         fi
+        # Note: Keys that are now OK are intentionally NOT added to new_escalation_state
+        # This effectively prunes resolved alerts from the escalation tracking.
+        # The _escalated markers are also automatically cleaned up since we only
+        # persist keys that are currently in WARNING/CRITICAL state.
     done
 
     # Save escalation state
@@ -3015,7 +3216,7 @@ run_validate() {
         "TCP_PORT_CHECK:CRITICAL_PORTS" \
         "TEMP_CHECK:sensors" \
         "DNS_CHECK:dig/nslookup" \
-        "GPU_CHECK:nvidia-smi" \
+        "GPU_CHECK:nvidia-smi/intel_gpu_top" \
         "UPS_CHECK:upower/apcaccess" \
         "NETWORK_CHECK:/proc/net/dev" \
         "LOG_CHECK:LOG_WATCH_FILES" \
@@ -3032,6 +3233,18 @@ run_validate() {
             echo "  OFF:  ${ck}"
         fi
     done
+
+    # GPU check — show which driver/tool is detected
+    if [[ "${ENABLE_GPU_CHECK:-false}" == "true" ]]; then
+        if command -v nvidia-smi &>/dev/null; then
+            echo "        ✓ nvidia-smi detected (NVIDIA)"
+        elif command -v intel_gpu_top &>/dev/null; then
+            echo "        ✓ intel_gpu_top detected (Intel)"
+        else
+            echo "        ⚠ No GPU tool found (nvidia-smi or intel_gpu_top)"
+            warnings=$((warnings + 1))
+        fi
+    fi
 
     # Heartbeat / Fleet checks
     if [[ "${ENABLE_HEARTBEAT:-false}" == "true" ]]; then

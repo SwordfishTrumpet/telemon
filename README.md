@@ -13,7 +13,7 @@ Telemon watches your Linux server — CPU, memory, disk, containers, services, p
 - **Memory** — Available memory percentage (inverted thresholds: lower = worse)
 - **Disk Space** — Per-partition monitoring, auto-filters tmpfs/overlay/snap
 - **Swap Usage** — Swap partition monitoring, gracefully skips if no swap
-- **I/O Wait** — CPU time spent waiting for disk I/O (two-sample differential)
+- **I/O Wait** — CPU time spent waiting for disk I/O (stateful differential sampling, no blocking sleep)
 - **Zombie Processes** — Detects processes stuck in Z state
 - **Internet Connectivity** — Ping-based reachability with configurable target and failure threshold
 
@@ -32,7 +32,7 @@ Telemon watches your Linux server — CPU, memory, disk, containers, services, p
 - **TCP Port Checks** — Reachability testing for arbitrary `host:port` pairs via `/dev/tcp`
 - **CPU Temperature** — Thermal monitoring via `lm-sensors` (`sensors` command)
 - **DNS Resolution** — Health checking via `dig`, `nslookup`, or `host` (auto-detected)
-- **GPU Monitoring** — Temperature alerts via `nvidia-smi` (utilization shown in alert detail but not thresholded)
+- **GPU Monitoring** — NVIDIA via `nvidia-smi` (temp, util, VRAM) or Intel via `intel_gpu_top` (render/video util, freq, temp)
 - **UPS / Battery** — Charge level monitoring via `upower` or `apcaccess`
 - **Network Bandwidth** — Interface throughput monitoring against Mbit/s thresholds
 - **Log Pattern Matching** — Watch log files for regex patterns (e.g., `ERROR`, `OOM`); shows first 3 matching lines, truncated at 200 chars
@@ -136,7 +136,7 @@ Telemon sends alerts through up to three channels simultaneously:
 | TCP Ports | `check_tcp_ports` | `ENABLE_TCP_PORT_CHECK` | `false` | `/dev/tcp` | `port_<host>_<port>` | Binary: reachable or not |
 | CPU Temp | `check_cpu_temp` | `ENABLE_TEMP_CHECK` | `false` | `sensors` | `cpu_temp` | `TEMP_THRESHOLD_WARN=75`, `_CRIT=90` (°C) |
 | DNS | `check_dns` | `ENABLE_DNS_CHECK` | `false` | `dig`/`nslookup`/`host` | `dns` | Binary: resolves or not |
-| GPU | `check_gpu` | `ENABLE_GPU_CHECK` | `false` | `nvidia-smi` | `gpu` | `GPU_TEMP_THRESHOLD_WARN=80`, `_CRIT=95` (°C) |
+| GPU | `check_gpu` | `ENABLE_GPU_CHECK` | `false` | `nvidia-smi` or `intel_gpu_top` | `gpu_<idx>` / `gpu_intel` | NVIDIA: `GPU_TEMP_THRESHOLD_WARN=80` (°C). Intel: `GPU_INTEL_UTIL_THRESHOLD_WARN=80` (%), `GPU_INTEL_TEMP_THRESHOLD_WARN=80` (°C) |
 | UPS/Battery | `check_ups` | `ENABLE_UPS_CHECK` | `false` | `upower`/`apcaccess` | `ups` | `UPS_THRESHOLD_WARN=30`, `_CRIT=10` (%, inverted) |
 | Network BW | `check_network_bandwidth` | `ENABLE_NETWORK_CHECK` | `false` | `/proc/net/dev` | `net_<iface>` | `NETWORK_THRESHOLD_WARN=800`, `_CRIT=950` (Mbit/s) |
 | Log Patterns | `check_log_patterns` | `ENABLE_LOG_CHECK` | `false` | `tail`, `grep` | `log_<md5>` | Binary: patterns found or not |
@@ -275,9 +275,15 @@ PING_FAIL_THRESHOLD=3         # Consecutive failures before alert
 TEMP_THRESHOLD_WARN=75
 TEMP_THRESHOLD_CRIT=90
 
-# GPU temperature (°C)
+# GPU temperature (°C) — NVIDIA only
 GPU_TEMP_THRESHOLD_WARN=80
 GPU_TEMP_THRESHOLD_CRIT=95
+
+# Intel GPU thresholds (used when intel_gpu_top detected)
+GPU_INTEL_UTIL_THRESHOLD_WARN=80   # Render engine utilization %
+GPU_INTEL_UTIL_THRESHOLD_CRIT=95
+GPU_INTEL_TEMP_THRESHOLD_WARN=80   # °C (if hwmon sensors available)
+GPU_INTEL_TEMP_THRESHOLD_CRIT=95
 
 # Network bandwidth (Mbit/s)
 NETWORK_THRESHOLD_WARN=800
@@ -577,12 +583,17 @@ ESCALATION_AFTER_MIN=30
 ```bash
 ENABLE_DOCKER_CONTAINERS=true
 ENABLE_SITE_MONITOR=true
+ENABLE_GPU_CHECK=true              # Monitor Intel iGPU for hardware transcoding
 CRITICAL_SYSTEM_PROCESSES="sshd cron"
 CRITICAL_CONTAINERS="plex zurg"
 CRITICAL_SITES="http://localhost:32400/identity http://localhost:9999/dav/version.txt"
 SITE_EXPECTED_STATUS=200
 DISK_THRESHOLD_WARN=85
 DISK_THRESHOLD_CRIT=90
+
+# Intel iGPU thresholds (for Intel Quick Sync transcoding)
+GPU_INTEL_UTIL_THRESHOLD_WARN=80
+GPU_INTEL_UTIL_THRESHOLD_CRIT=95
 ```
 
 </details>
@@ -976,7 +987,7 @@ The Docker setup mounts host `/proc` for system metrics and optionally the Docke
 | smartctl | NVMe/SMART health checks |
 | openssl | SSL certificate expiry checks |
 | sensors (lm-sensors) | CPU temperature monitoring |
-| nvidia-smi | GPU monitoring |
+| nvidia-smi / intel_gpu_top | GPU monitoring (NVIDIA or Intel) |
 | upower / apcaccess | UPS/battery monitoring |
 | dig / nslookup / host | DNS resolution checks |
 | sha256sum | File integrity monitoring |
@@ -1048,6 +1059,7 @@ See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for detailed troubleshoot
 | Webhook not sending | Check `python3` is installed |
 | PM2 checks failing | Check `pm2` and `python3` are installed |
 | NVMe checks failing | Check `smartctl` is installed, may need sudo |
+| GPU checks failing (Intel) | `intel_gpu_top` requires `CAP_PERFMON` capability or root. Try: `sudo setcap cap_perfmon=ep $(which intel_gpu_top)` |
 | Fleet check not working | Verify `FLEET_HEARTBEAT_DIR` exists and is readable |
 | No heartbeat files | Check `ENABLE_HEARTBEAT=true` and `HEARTBEAT_MODE=file` on sender |
 | Need to update | `bash update.sh` |
