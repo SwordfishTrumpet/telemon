@@ -60,6 +60,10 @@ jobs:
         bash telemon-admin.sh validate
       continue-on-error: true
     
+    - name: Run test suite
+      run: |
+        bash tests/run_tests.sh
+    
     - name: Check script structure
       run: |
         # Verify all required functions exist
@@ -67,6 +71,7 @@ jobs:
         grep -q "check_memory()" telemon.sh || exit 1
         grep -q "check_disk()" telemon.sh || exit 1
         grep -q "send_telegram()" telemon.sh || exit 1
+        grep -q "portable_stat()" telemon.sh || exit 1
         echo "All required functions found"
 
   markdown-lint:

@@ -555,6 +555,34 @@ portable_md5() {
 }
 
 # ===========================================================================
+# Cross-platform stat helper
+# Provides GNU stat compatible interface on both Linux (GNU) and macOS (BSD)
+# Usage: portable_stat <format> <file>
+#   format: mtime, size, owner (user), perms (octal)
+# ===========================================================================
+portable_stat() {
+    local fmt="$1"
+    local file="$2"
+    case "$fmt" in
+        mtime)
+            stat -c %Y "$file" 2>/dev/null || stat -f %m "$file" 2>/dev/null || echo "0"
+            ;;
+        size)
+            stat -c %s "$file" 2>/dev/null || stat -f %z "$file" 2>/dev/null || echo "0"
+            ;;
+        owner)
+            stat -c '%U(uid=%u)' "$file" 2>/dev/null || stat -f '%Su(uid=%u)' "$file" 2>/dev/null || echo "unknown"
+            ;;
+        perms)
+            stat -c %a "$file" 2>/dev/null || stat -f '%Lp' "$file" 2>/dev/null || echo "000"
+            ;;
+        *)
+            echo ""
+            ;;
+    esac
+}
+
+# ===========================================================================
 # Cross-platform date-to-epoch parser
 # Handles both GNU date (-d) and BSD date (-j -f) for macOS compatibility
 # ===========================================================================
@@ -1886,6 +1914,9 @@ check_network_bandwidth() {
 
     local state="OK"
     local detail="Network ${safe_iface}: RX ${rx_mbps} Mbit/s, TX ${tx_mbps} Mbit/s"
+    
+    # Use consistent key format: net_<iface> (replace non-alphanumeric with underscore)
+    local iface_key="net_$(printf '%s' "$iface" | tr -c 'a-zA-Z0-9_' '_')"
 
     if (( max_mbps >= crit )); then
         state="CRITICAL"
@@ -1895,7 +1926,7 @@ check_network_bandwidth() {
         detail="Network ${safe_iface}: RX <b>${rx_mbps}</b> Mbit/s, TX <b>${tx_mbps}</b> Mbit/s (threshold: ${warn} Mbit/s)"
     fi
 
-    check_state_change "net_bw" "$state" "$detail"
+    check_state_change "$iface_key" "$state" "$detail"
 }
 
 # ===========================================================================
@@ -2174,11 +2205,11 @@ check_drift_detection() {
         current_sum=$(run_with_timeout "$CHECK_TIMEOUT" sha256sum "$filepath" 2>/dev/null | awk '{print $1}')
         [[ -z "$current_sum" ]] && continue
 
-        # GNU stat with BSD fallback
-        current_mtime=$(stat -c %Y "$filepath" 2>/dev/null || stat -f %m "$filepath" 2>/dev/null || echo "0")
-        current_size=$(stat -c %s "$filepath" 2>/dev/null || stat -f %z "$filepath" 2>/dev/null || echo "0")
-        current_owner=$(stat -c '%U(uid=%u)' "$filepath" 2>/dev/null || stat -f '%Su(uid=%u)' "$filepath" 2>/dev/null || echo "unknown")
-        current_perms=$(stat -c %a "$filepath" 2>/dev/null || stat -f '%Lp' "$filepath" 2>/dev/null || echo "000")
+        # Use portable_stat helper for cross-platform compatibility
+        current_mtime=$(portable_stat mtime "$filepath")
+        current_size=$(portable_stat size "$filepath")
+        current_owner=$(portable_stat owner "$filepath")
+        current_perms=$(portable_stat perms "$filepath")
 
         # Pack metadata: checksum|mtime|size|owner|perms
         local current_meta="${current_sum}|${current_mtime}|${current_size}|${current_owner}|${current_perms}"
@@ -2262,9 +2293,9 @@ check_cron_jobs() {
 
         local file_age_sec
         local file_mtime
-        # Try GNU stat first, then BSD stat (macOS), fallback to current time (skip check)
-        file_mtime=$(stat -c %Y "$touchfile" 2>/dev/null || stat -f %m "$touchfile" 2>/dev/null || echo "")
-        if [[ -z "$file_mtime" ]]; then
+        # Use portable_stat helper for cross-platform compatibility
+        file_mtime=$(portable_stat mtime "$touchfile")
+        if [[ -z "$file_mtime" || "$file_mtime" == "0" ]]; then
             log "WARN" "Cron check: cannot stat ${touchfile} — skipping"
             continue
         fi

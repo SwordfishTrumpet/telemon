@@ -68,7 +68,8 @@ cmd_backup() {
     local state_variants=("$STATE_FILE" "${STATE_FILE}.cooldown" \
                           "${STATE_FILE}.queue" "${STATE_FILE}.escalation" \
                           "${STATE_FILE}.integrity" "${STATE_FILE}.net" \
-                          "${STATE_FILE}.detail" "${STATE_FILE}.trend")
+                          "${STATE_FILE}.detail" "${STATE_FILE}.trend" \
+                          "${STATE_FILE}.drift")
     for file in "${state_variants[@]}"; do
         if [[ -f "$file" ]]; then
             if ! cp -p "$file" "$backup_path/" 2>/dev/null; then
@@ -78,6 +79,16 @@ cmd_backup() {
             echo "  ✓ $(basename "$file") backed up"
         fi
     done
+    
+    # Backup drift detection baseline directory
+    local drift_baseline_dir="${STATE_FILE}.drift.baseline"
+    if [[ -d "$drift_baseline_dir" ]]; then
+        if cp -r "$drift_baseline_dir" "$backup_path/" 2>/dev/null; then
+            echo "  ✓ Drift baseline directory backed up"
+        else
+            echo -e "${YELLOW}WARN: Failed to backup drift baseline directory${NC}"
+        fi
+    fi
     
     # Backup logs
     if [[ -f "$LOG_FILE" ]]; then
@@ -222,7 +233,8 @@ cmd_restore() {
     local state_variants=("$STATE_FILE" "${STATE_FILE}.cooldown" \
                           "${STATE_FILE}.queue" "${STATE_FILE}.escalation" \
                           "${STATE_FILE}.integrity" "${STATE_FILE}.net" \
-                          "${STATE_FILE}.detail" "${STATE_FILE}.trend")
+                          "${STATE_FILE}.detail" "${STATE_FILE}.trend" \
+                          "${STATE_FILE}.drift")
     for file in "${state_variants[@]}"; do
         local basename_file
         basename_file=$(basename "$file")
@@ -248,6 +260,17 @@ cmd_restore() {
             echo "  ✓ ${basename_file} restored"
         fi
     done
+    
+    # Restore drift detection baseline directory
+    local drift_basename="$(basename "$STATE_FILE").drift.baseline"
+    if [[ -d "${backup_path}/${drift_basename}" ]]; then
+        if [[ -L "${STATE_FILE}.drift.baseline" ]]; then
+            echo -e "${RED}ERROR: ${STATE_FILE}.drift.baseline is a symlink — refusing to restore${NC}"
+            exit 1
+        fi
+        cp -r "${backup_path}/${drift_basename}" "${STATE_FILE}.drift.baseline"
+        echo "  ✓ drift.baseline restored"
+    fi
     
     if [[ -f "${backup_path}/$(basename "$LOG_FILE")" ]]; then
         if [[ -L "$LOG_FILE" ]]; then
@@ -412,13 +435,21 @@ cmd_reset_state() {
     local state_variants=("$STATE_FILE" "${STATE_FILE}.lock" "${STATE_FILE}.cooldown" \
                           "${STATE_FILE}.queue" "${STATE_FILE}.escalation" \
                           "${STATE_FILE}.integrity" "${STATE_FILE}.net" \
-                          "${STATE_FILE}.detail" "${STATE_FILE}.trend")
+                          "${STATE_FILE}.detail" "${STATE_FILE}.trend" \
+                          "${STATE_FILE}.drift")
     for file in "${state_variants[@]}"; do
         if [[ -f "$file" ]]; then
             rm -f "$file"
             echo "  ✓ Removed: $(basename "$file")"
         fi
     done
+    
+    # Remove drift detection baseline directory
+    local drift_baseline_dir="${STATE_FILE}.drift.baseline"
+    if [[ -d "$drift_baseline_dir" ]]; then
+        rm -rf "$drift_baseline_dir"
+        echo "  ✓ Removed: drift.baseline"
+    fi
     
     echo ""
     echo -e "${GREEN}State reset complete.${NC}"
