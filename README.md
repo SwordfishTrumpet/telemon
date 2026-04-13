@@ -1,6 +1,10 @@
 # Telemon
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![CI](https://github.com/SwordfishTrumpet/telemon/workflows/CI/badge.svg)](https://github.com/SwordfishTrumpet/telemon/actions)
+[![GitHub release](https://img.shields.io/github/v/release/SwordfishTrumpet/telemon)](https://github.com/SwordfishTrumpet/telemon/releases)
+[![GitHub stars](https://img.shields.io/github/stars/SwordfishTrumpet/telemon?style=social)](https://github.com/SwordfishTrumpet/telemon/stargazers)
+[![GitHub issues](https://img.shields.io/github/issues/SwordfishTrumpet/telemon)](https://github.com/SwordfishTrumpet/telemon/issues)
 
 > Lightweight, self-managing system health monitor with Telegram, webhook, and email alerts. Set it and forget it.
 
@@ -133,7 +137,7 @@ Telemon sends alerts through up to three channels simultaneously:
 | PM2 | `check_pm2_processes` | `ENABLE_PM2_PROCESSES` | `false` | `pm2`, `python3` | `pm2_<name>` | Binary: online or not |
 | Sites | `check_sites` | `ENABLE_SITE_MONITOR` | `false` | `curl`, `openssl` | `site_<md5>` | Per-site: status, response time, SSL expiry |
 | NVMe | `check_nvme_health` | `ENABLE_NVME_CHECK` | `false` | `smartctl` | `nvme_health` | Critical warning byte, endurance 80/95%, temp |
-| TCP Ports | `check_tcp_ports` | `ENABLE_TCP_PORT_CHECK` | `false` | `/dev/tcp` | `port_<host>_<port>` | Binary: reachable or not |
+| TCP Ports | `check_tcp_ports` | `ENABLE_TCP_PORT_CHECK` | `false` | `/dev/tcp` | `port_<md5>` | Binary: reachable or not |
 | CPU Temp | `check_cpu_temp` | `ENABLE_TEMP_CHECK` | `false` | `sensors` | `cpu_temp` | `TEMP_THRESHOLD_WARN=75`, `_CRIT=90` (°C) |
 | DNS | `check_dns` | `ENABLE_DNS_CHECK` | `false` | `dig`/`nslookup`/`host` | `dns` | Binary: resolves or not |
 | GPU | `check_gpu` | `ENABLE_GPU_CHECK` | `false` | `nvidia-smi` or `intel_gpu_top` | `gpu_<idx>` / `gpu_intel` | NVIDIA: `GPU_TEMP_THRESHOLD_WARN=80` (°C). Intel: `GPU_INTEL_UTIL_THRESHOLD_WARN=80` (%), `GPU_INTEL_TEMP_THRESHOLD_WARN=80` (°C) |
@@ -1114,6 +1118,7 @@ Telemon is designed to run indefinitely without maintenance:
 - [systemd/README.md](systemd/README.md) — Systemd setup guide
 - [CONTRIBUTING.md](CONTRIBUTING.md) — Contribution guidelines
 - [CHANGELOG.md](CHANGELOG.md) — Version history
+- [SECURITY.md](SECURITY.md) — Security policy and vulnerability reporting
 
 ## License
 

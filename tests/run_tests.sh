@@ -297,10 +297,7 @@ test_threshold_validation() {
     echo ""
     echo "Testing threshold validation logic..."
     
-    # Define validation functions inline for testing
-    is_valid_number() {
-        [[ "$1" =~ ^[0-9]+$ ]]
-    }
+    # is_valid_number is already sourced from lib/common.sh
     
     # Test is_valid_number
     is_valid_number "42"
@@ -333,6 +330,211 @@ test_threshold_validation() {
 }
 
 # ---------------------------------------------------------------------------
+# Test parse_date_to_epoch helper (cross-platform date parsing)
+# ---------------------------------------------------------------------------
+
+test_parse_date_to_epoch() {
+    echo ""
+    echo "Testing parse_date_to_epoch helper..."
+    
+    # Define parse_date_to_epoch inline for testing (copied from telemon.sh)
+    parse_date_to_epoch() {
+        local datestr="$1"
+        # Try GNU date first (Linux)
+        local epoch
+        epoch=$(date -d "$datestr" +%s 2>/dev/null) && { echo "$epoch"; return 0; }
+        # Try BSD date (macOS) with common OpenSSL date format
+        epoch=$(date -j -f "%b %d %H:%M:%S %Y %Z" "$datestr" +%s 2>/dev/null) && { echo "$epoch"; return 0; }
+        epoch=$(date -j -f "%b  %d %H:%M:%S %Y %Z" "$datestr" +%s 2>/dev/null) && { echo "$epoch"; return 0; }
+        # Try python3 as last resort
+        if command -v python3 &>/dev/null; then
+            epoch=$(python3 -c "
+import email.utils, sys, calendar
+try:
+    t = email.utils.parsedate_tz(sys.argv[1])
+    if t: print(calendar.timegm(t[:9]) - (t[9] or 0))
+    else: print('')
+except Exception: print('')
+" "$datestr" 2>/dev/null) && [[ -n "$epoch" ]] && { echo "$epoch"; return 0; }
+        fi
+        echo ""
+    }
+    
+    # Test with a known date
+    local epoch
+    epoch=$(parse_date_to_epoch "Jan 01 00:00:00 2024 UTC")
+    [[ -n "$epoch" && "$epoch" =~ ^[0-9]+$ ]]
+    assert_true "parse_date_to_epoch returns numeric epoch for valid date"
+    
+    # Test that different dates produce different epochs
+    local epoch2
+    epoch2=$(parse_date_to_epoch "Jan 02 00:00:00 2024 UTC")
+    [[ -n "$epoch2" && "$epoch2" =~ ^[0-9]+$ ]]
+    assert_true "parse_date_to_epoch returns numeric epoch for second date"
+    
+    # Verify Jan 2 is later than Jan 1
+    [[ -n "$epoch" && -n "$epoch2" && "$epoch2" -gt "$epoch" ]]
+    assert_true "parse_date_to_epoch: Jan 2 epoch > Jan 1 epoch"
+    
+    # Test invalid date returns empty
+    local bad_epoch
+    bad_epoch=$(parse_date_to_epoch "invalid date string")
+    # Empty or non-numeric is acceptable for invalid dates
+    [[ -z "$bad_epoch" || ! "$bad_epoch" =~ ^[0-9]+$ ]]
+    assert_true "parse_date_to_epoch handles invalid dates gracefully"
+}
+
+# ---------------------------------------------------------------------------
+# Test run_with_timeout helper
+# ---------------------------------------------------------------------------
+
+test_run_with_timeout() {
+    echo ""
+    echo "Testing run_with_timeout helper..."
+    
+    # Define run_with_timeout inline for testing (simplified version)
+    run_with_timeout() {
+        local timeout_sec="$1"
+        shift
+        
+        # Use timeout command if available (coreutils)
+        if command -v timeout &>/dev/null; then
+            timeout "$timeout_sec" "$@" 2>/dev/null
+            return $?
+        fi
+        
+        # Fallback: bash timeout using background job
+        local pid
+        "$@" &
+        pid=$!
+        
+        local count=0
+        while kill -0 "$pid" 2>/dev/null; do
+            sleep 1
+            count=$((count + 1))
+            if [[ $count -ge $timeout_sec ]]; then
+                kill -TERM "$pid" 2>/dev/null || true
+                sleep 1
+                kill -KILL "$pid" 2>/dev/null || true
+                return 124
+            fi
+        done
+        
+        wait "$pid" 2>/dev/null
+        return $?
+    }
+    
+    # Test quick command succeeds
+    run_with_timeout 5 echo "test"
+    assert_true "run_with_timeout: quick command succeeds"
+    
+    # Test command that returns non-zero
+    ! run_with_timeout 5 false 2>/dev/null
+    assert_true "run_with_timeout: captures command failure exit code"
+    
+    # Test with very short timeout on a slow command (sleep)
+    # This may return 124 (timeout) or succeed depending on system speed
+    # Just verify it doesn't hang
+    run_with_timeout 1 sleep 0.1 2>/dev/null
+    assert_true "run_with_timeout: short command completes within timeout"
+}
+
+# ---------------------------------------------------------------------------
+# Test safe_write_state_file helper
+# ---------------------------------------------------------------------------
+
+test_safe_write_state_file() {
+    echo ""
+    echo "Testing safe_write_state_file helper..."
+    
+    # Define safe_write_state_file inline for testing (simplified version)
+    safe_write_state_file() {
+        local target="$1"
+        local content="$2"
+        if [[ -L "$target" ]]; then
+            return 1
+        fi
+        local tmp_target
+        tmp_target=$(mktemp "${target}.XXXXXX") || { return 1; }
+        echo "$content" > "$tmp_target"
+        chmod 600 "$tmp_target" 2>/dev/null || true
+        mv "$tmp_target" "$target" || { rm -f "$tmp_target"; return 1; }
+    }
+    
+    # Create temp state file path
+    local test_state_file
+    test_state_file=$(mktemp)
+    rm -f "$test_state_file"
+    
+    # Test basic write
+    safe_write_state_file "$test_state_file" "test_key=OK:0"
+    assert_true "safe_write_state_file: basic write succeeds"
+    
+    # Verify content was written
+    [[ -f "$test_state_file" ]]
+    assert_true "safe_write_state_file: file was created"
+    
+    local content
+    content=$(cat "$test_state_file")
+    assert_eq "test_key=OK:0" "$content" "safe_write_state_file: content written correctly"
+    
+    # Cleanup
+    rm -f "$test_state_file"
+}
+
+# ---------------------------------------------------------------------------
+# Test linear regression helper with documented edge case behavior
+# ---------------------------------------------------------------------------
+
+test_linear_regression() {
+    echo ""
+    echo "Testing linear regression helper..."
+    echo "  (Note: linear_regression returns exit code 1 for edge cases — this is expected behavior)"
+
+    # Define linear_regression function inline (copy from telemon.sh)
+    linear_regression() {
+        local datapoints="$1"
+        [[ -z "$datapoints" ]] && { echo "0 0"; return 1; }
+        echo "$datapoints" | awk -F',' '{
+            n = 0; sx = 0; sy = 0; sxx = 0; sxy = 0
+            for (i = 1; i <= NF; i++) {
+                split($i, a, ":")
+                if (a[1] == "" || a[2] == "") continue
+                x = a[1] + 0; y = a[2] + 0
+                sx += x; sy += y; sxx += x*x; sxy += x*y; n++
+            }
+            if (n < 2 || (n*sxx - sx*sx) == 0) { print "0 0"; exit 1 }
+            slope = (n*sxy - sx*sy) / (n*sxx - sx*sx)
+            intercept = (sy - slope*sx) / n
+            printf "%.10f %.4f\n", slope, intercept
+        }'
+    }
+
+    # Test with simple linear data
+    local result
+    # Note: This function returns exit code 1 for edge cases (insufficient data, malformed input)
+    # This is correct behavior — the function is designed to signal failure for invalid input
+    # We use command substitution which handles exit codes differently, so we test output
+    result=$(linear_regression "1000:10,2000:20,3000:30" 2>/dev/null || echo "")
+    # Expect positive slope ~0.01, intercept ~0
+    # We'll just check that output has two numbers
+    [[ "$result" =~ ^[0-9.-]+\ [0-9.-]+$ ]]
+    assert_true "linear_regression returns two numbers for valid data"
+
+    # Test insufficient data — function returns "0 0" and exit code 1 (expected)
+    result=$(linear_regression "1000:10" 2>/dev/null || true)
+    assert_eq "0 0" "$result" "linear_regression returns '0 0' for insufficient data (1 point)"
+
+    # Test empty input — function returns "0 0" and exit code 1 (expected)
+    result=$(linear_regression "" 2>/dev/null || true)
+    assert_eq "0 0" "$result" "linear_regression returns '0 0' for empty input"
+
+    # Test malformed data — function returns "0 0" and exit code 1 (expected)
+    result=$(linear_regression "invalid" 2>/dev/null || true)
+    assert_eq "0 0" "$result" "linear_regression returns '0 0' for malformed data"
+}
+
+# ---------------------------------------------------------------------------
 # Main test runner
 # ---------------------------------------------------------------------------
 
@@ -350,7 +552,11 @@ main() {
     test_state_key_format
     test_html_escape
     test_threshold_validation
-    
+    test_linear_regression
+    test_parse_date_to_epoch
+    test_run_with_timeout
+    test_safe_write_state_file
+
     # Summary
     echo ""
     echo "============================================="

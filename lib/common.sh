@@ -122,3 +122,14 @@ portable_md5() {
     || { cksum | awk '{print $1}'; }
 }
 
+# ===========================================================================
+# Validation helper — check if value is a valid positive integer
+# Intentionally rejects floats; all Telemon thresholds are integers by design
+# Usage: is_valid_number "$value" || log "ERROR" "Not a number"
+# Returns: 0 if valid positive integer, 1 otherwise
+# Pattern: ^[0-9]+$ (accepts zero and positive integers only)
+# ===========================================================================
+is_valid_number() {
+    [[ "$1" =~ ^[0-9]+$ ]]
+}
+

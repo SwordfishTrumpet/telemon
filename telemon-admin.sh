@@ -641,9 +641,11 @@ cmd_fleet_status() {
                 STALE|WARNING)           color="$YELLOW" ;;
                 OK)                      color="$GREEN" ;;
             esac
-            printf "${color}%-20s %-12s %-10s %-8s %s${NC}\n" \
+            printf "%b%-20s %-12s %-10s %-8s %s%b\n" \
+                "$color" \
                 "${fleet_labels[$idx]}" "${fleet_ages[$idx]}" "${fleet_statuses[$idx]}" \
-                "${fleet_checks[$idx]}" "${fleet_issues[$idx]}"
+                "${fleet_checks[$idx]}" "${fleet_issues[$idx]}" \
+                "$NC"
         done
     done
 

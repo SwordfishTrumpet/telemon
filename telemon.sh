@@ -28,6 +28,8 @@ fi
 umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Source shared helpers
+source "${SCRIPT_DIR}/lib/common.sh"
 
 # ---------------------------------------------------------------------------
 # Load configuration
@@ -209,12 +211,6 @@ CHECK_TIMEOUT="${CHECK_TIMEOUT:-30}"
 # ---------------------------------------------------------------------------
 # Threshold validation
 # ---------------------------------------------------------------------------
-# Helper to check if value is a valid positive integer (intentionally rejects floats;
-# all Telemon thresholds are integers by design)
-is_valid_number() {
-    [[ "$1" =~ ^[0-9]+$ ]]
-}
-
 # Helper to check warn < crit threshold pair
 # Usage: check_threshold_pair NAME WARN CRIT [inverted]
 #   inverted=true for metrics where lower is worse (e.g. available memory %)
@@ -261,11 +257,15 @@ validate_thresholds() {
     
     # Extended check thresholds (only validate if check is enabled)
     [[ "${ENABLE_TEMP_CHECK:-false}" == "true" ]] && { check_threshold_pair "TEMP" "${TEMP_THRESHOLD_WARN:-75}" "${TEMP_THRESHOLD_CRIT:-90}" || has_errors=true; }
-    [[ "${ENABLE_GPU_CHECK:-false}" == "true" ]] && { 
-        check_threshold_pair "GPU_TEMP" "${GPU_TEMP_THRESHOLD_WARN:-80}" "${GPU_TEMP_THRESHOLD_CRIT:-95}" || has_errors=true; 
-        # Intel GPU specific thresholds (validated separately — ok to fail if not on Intel)
-        check_threshold_pair "GPU_INTEL_UTIL" "${GPU_INTEL_UTIL_THRESHOLD_WARN:-80}" "${GPU_INTEL_UTIL_THRESHOLD_CRIT:-95}" 2>/dev/null || true
-        check_threshold_pair "GPU_INTEL_TEMP" "${GPU_INTEL_TEMP_THRESHOLD_WARN:-80}" "${GPU_INTEL_TEMP_THRESHOLD_CRIT:-95}" 2>/dev/null || true
+    [[ "${ENABLE_GPU_CHECK:-false}" == "true" ]] && {
+        check_threshold_pair "GPU_TEMP" "${GPU_TEMP_THRESHOLD_WARN:-80}" "${GPU_TEMP_THRESHOLD_CRIT:-95}" || has_errors=true
+        # Intel GPU specific thresholds (log warnings but don't fail - may not be on Intel)
+        if ! check_threshold_pair "GPU_INTEL_UTIL" "${GPU_INTEL_UTIL_THRESHOLD_WARN:-80}" "${GPU_INTEL_UTIL_THRESHOLD_CRIT:-95}"; then
+            log "WARN" "GPU_INTEL_UTIL thresholds invalid — ignored if not using Intel GPU"
+        fi
+        if ! check_threshold_pair "GPU_INTEL_TEMP" "${GPU_INTEL_TEMP_THRESHOLD_WARN:-80}" "${GPU_INTEL_TEMP_THRESHOLD_CRIT:-95}"; then
+            log "WARN" "GPU_INTEL_TEMP thresholds invalid — ignored if not using Intel GPU"
+        fi
     }
     [[ "${ENABLE_NETWORK_CHECK:-false}" == "true" ]] && { check_threshold_pair "NETWORK" "${NETWORK_THRESHOLD_WARN:-800}" "${NETWORK_THRESHOLD_CRIT:-950}" || has_errors=true; }
     [[ "${ENABLE_UPS_CHECK:-false}" == "true" ]] && { check_threshold_pair "UPS" "${UPS_THRESHOLD_WARN:-30}" "${UPS_THRESHOLD_CRIT:-10}" "true" || has_errors=true; }
@@ -551,55 +551,6 @@ sanitize_state_key() {
 }
 
 # ===========================================================================
-# Portable MD5 hash: GNU md5sum or BSD md5, fallback to cksum
-# ===========================================================================
-portable_md5() {
-    md5sum 2>/dev/null | awk '{print $1}' \
-    || md5 -q 2>/dev/null \
-    || { cksum | awk '{print $1}'; }
-}
-
-# ===========================================================================
-# Cross-platform stat helper
-# Provides GNU stat compatible interface on both Linux (GNU) and macOS (BSD)
-# Usage: portable_stat <format> <file>
-#   format: mtime, size, owner (user), perms (octal)
-# ===========================================================================
-portable_stat() {
-    local fmt="$1"
-    local file="$2"
-    case "$fmt" in
-        mtime)
-            stat -c %Y "$file" 2>/dev/null || stat -f %m "$file" 2>/dev/null || echo "0"
-            ;;
-        size)
-            stat -c %s "$file" 2>/dev/null || stat -f %z "$file" 2>/dev/null || echo "0"
-            ;;
-        owner)
-            stat -c '%U(uid=%u)' "$file" 2>/dev/null || stat -f '%Su(uid=%u)' "$file" 2>/dev/null || echo "unknown"
-            ;;
-        perms)
-            local perms_val
-            perms_val=$(stat -c %a "$file" 2>/dev/null)
-            if [[ -z "$perms_val" ]]; then
-                # BSD stat returns without leading zeros, pad to 3 digits
-                perms_val=$(stat -f '%Lp' "$file" 2>/dev/null)
-                if [[ -n "$perms_val" ]]; then
-                    printf '%03d' "$perms_val"
-                else
-                    echo "000"
-                fi
-            else
-                echo "$perms_val"
-            fi
-            ;;
-        *)
-            echo ""
-            ;;
-    esac
-}
-
-# ===========================================================================
 # Cross-platform date-to-epoch parser
 # Handles both GNU date (-d) and BSD date (-j -f) for macOS compatibility
 # ===========================================================================
@@ -624,6 +575,7 @@ except Exception: print('')
     fi
     echo ""
 }
+
 # ===========================================================================
 # Predictive Resource Exhaustion — linear regression + trend tracking
 # ===========================================================================
@@ -2144,7 +2096,10 @@ check_log_patterns() {
         done
         
         # Validate the combined regex pattern before using it
-        if ! echo "" | grep -qE "$combined_pattern" 2>/dev/null; then
+        # Use 'test' as input; grep returns exit code 2 for invalid regex
+        echo "test" | grep -qE "$combined_pattern" 2>/dev/null
+        local grep_exit=$?
+        if [[ $grep_exit -eq 2 ]]; then
             log "WARN" "check_log_patterns: invalid regex pattern '${combined_pattern}' for ${logfile} — skipping"
             continue
         fi
@@ -4036,8 +3991,8 @@ send_email() {
     local email_to="${EMAIL_TO:-}"
     [[ -z "$email_to" ]] && return 0
 
-    # Basic email format validation
-    if [[ ! "$email_to" == *"@"* ]]; then
+    # Basic email format validation - require at least one char before and after @
+    if [[ ! "$email_to" =~ ^[^@]+@[^@]+$ ]]; then
         log "WARN" "send_email: EMAIL_TO '${email_to}' does not appear to be a valid email address"
         return 1
     fi
