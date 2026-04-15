@@ -364,8 +364,10 @@ LOG_WATCH_FILES="/var/log/syslog /var/log/auth.log"
 LOG_WATCH_PATTERNS="OOM|error|panic"
 LOG_WATCH_LINES=100
 
-# File integrity monitoring
-INTEGRITY_WATCH_FILES="/etc/passwd /etc/shadow /etc/ssh/sshd_config"
+# File integrity monitoring (sha256sum checksums)
+# NOTE: Files must be readable by the user running telemon.
+# Running as non-root? Remove /etc/shadow or add sudoers rules.
+INTEGRITY_WATCH_FILES="/etc/passwd /etc/ssh/sshd_config"
 
 # Configuration drift detection (rich change tracking with diffs)
 ENABLE_DRIFT_DETECTION=true
@@ -401,6 +403,8 @@ MAINT_SCHEDULE="Sun 02:00-04:00;Sat 03:00-05:00"
 
 ```bash
 # Prometheus textfile export (for node_exporter --collector.textfile)
+# NOTE: The directory must be writable by the user running telemon.
+# If using node_exporter's default path, run: sudo mkdir -p /var/lib/node_exporter/textfile_collector && sudo chmod 777 /var/lib/node_exporter/textfile_collector
 ENABLE_PROMETHEUS_EXPORT=true
 PROMETHEUS_TEXTFILE_DIR="/var/lib/node_exporter/textfile_collector"
 
@@ -568,7 +572,7 @@ CRITICAL_SYSTEM_PROCESSES="sshd cron nginx"
 CRITICAL_CONTAINERS="redis postgres myapp"
 CRITICAL_SITES="https://example.com|check_ssl=true|max_response_ms=5000"
 CRITICAL_PORTS="localhost:5432 localhost:6379"
-INTEGRITY_WATCH_FILES="/etc/passwd /etc/shadow /etc/ssh/sshd_config"
+INTEGRITY_WATCH_FILES="/etc/passwd /etc/ssh/sshd_config"
 CRON_WATCH_JOBS="backup:/tmp/backup_heartbeat:1440"
 AUTO_RESTART_SERVICES="nginx"
 FLEET_HEARTBEAT_DIR="/shared/telemon/heartbeats"
