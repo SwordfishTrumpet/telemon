@@ -2157,7 +2157,7 @@ check_file_integrity() {
         [[ -f "$filepath" ]] || continue
 
         local current_sum
-        current_sum=$(sha256sum "$filepath" 2>/dev/null | awk '{print $1}')
+        current_sum=$(sha256sum "$filepath" 2>/dev/null | awk '{print $1}') || true
         [[ -z "$current_sum" ]] && continue
 
         new_checksums+="${filepath}=${current_sum}"$'\n'
@@ -2354,7 +2354,7 @@ check_drift_detection() {
 
         # Gather current metadata
         local current_sum current_mtime current_size current_owner current_perms
-        current_sum=$(run_with_timeout "$CHECK_TIMEOUT" sha256sum "$filepath" 2>/dev/null | awk '{print $1}')
+        current_sum=$(run_with_timeout "$CHECK_TIMEOUT" sha256sum "$filepath" 2>/dev/null | awk '{print $1}') || true
         [[ -z "$current_sum" ]] && continue
 
         # Use portable_stat helper for cross-platform compatibility
@@ -4118,6 +4118,10 @@ except Exception:
 # Main
 # ===========================================================================
 main() {
+    # Disable exit-on-error for the main monitoring logic
+    # (we handle errors explicitly with proper logging)
+    set +e
+    
     # Handle CLI flags
     case "${1:-}" in
         --test|-t)
