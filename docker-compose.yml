@@ -18,7 +18,10 @@ services:
       - telemon-logs:/var/log/telemon
       # Access to host's /proc for system monitoring (optional)
       - /proc:/host/proc:ro
-      # Docker socket for container monitoring (optional)
+      # SECURITY WARNING: Docker socket mounting gives container full root access
+      # to the host via Docker API. Only use if container monitoring is required.
+      # Alternative: Use Docker socket proxy with restricted permissions
+      # - https://github.com/Tecnativa/docker-socket-proxy
       - /var/run/docker.sock:/var/run/docker.sock:ro
     
     environment:

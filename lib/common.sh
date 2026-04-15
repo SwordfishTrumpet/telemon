@@ -112,14 +112,91 @@ get_state_file_variants() {
 }
 
 # ===========================================================================
-# Portable MD5 hash helper
-# Returns MD5 hash using available tool: GNU md5sum, BSD md5, or cksum fallback
-# Usage: echo "text" | portable_md5
+# Portable SHA-256 hash helper (replaces MD5 for state key generation)
+# Returns SHA-256 hash using available tool: GNU sha256sum, BSD shasum, or openssl
+# Usage: echo "text" | portable_sha256
 # ===========================================================================
-portable_md5() {
-    md5sum 2>/dev/null | awk '{print $1}' \
-    || md5 -q 2>/dev/null \
-    || { cksum | awk '{print $1}'; }
+portable_sha256() {
+    sha256sum 2>/dev/null | awk '{print $1}' \
+    || shasum -a 256 2>/dev/null | awk '{print $1}' \
+    || { openssl dgst -sha256 2>/dev/null | awk '{print $NF}'; }
+}
+
+# ===========================================================================
+# Security validation helpers
+# ===========================================================================
+
+# Validate systemd service name (alphanumeric, hyphen, underscore, dot only)
+# Usage: is_valid_service_name "$svc" || { log "WARN" "Invalid service name"; continue; }
+# Pattern allows: a-z A-Z 0-9 . _ -
+# Rejects: shell metacharacters, spaces, command substitution, path traversal
+is_valid_service_name() {
+    [[ "$1" =~ ^[a-zA-Z0-9._-]+$ ]]
+}
+
+# Validate hostname for TCP port checks
+# Allows: alphanumeric, hyphen, dot (for FQDNs), underscore (for service names)
+# Rejects: shell metacharacters, command substitution, path traversal patterns
+is_valid_hostname() {
+    [[ "$1" =~ ^[a-zA-Z0-9._-]+$ ]]
+}
+
+# Validate file path for drift detection and integrity checks
+# Prevents: path traversal (..), shell expansion (* ?), and command substitution
+# Optionally validates against allowed prefixes for defense-in-depth
+# Usage: is_safe_path "$filepath" || { log "WARN" "Unsafe path"; continue; }
+is_safe_path() {
+    local filepath="$1"
+    # Reject paths with directory traversal
+    [[ "$filepath" == *".."* ]] && return 1
+    # Reject paths with shell glob characters
+    [[ "$filepath" == *"*"* ]] && return 1
+    [[ "$filepath" == *"?"* ]] && return 1
+    # Reject paths that look like command substitution
+    [[ "$filepath" == *'$'* ]] && return 1
+    [[ "$filepath" == *'`'* ]] && return 1
+    # Path is safe
+    return 0
+}
+
+# Validate path is within allowed directories (optional additional check)
+# Usage: is_path_in_allowed_dirs "$filepath" "/etc /opt /var" || return 1
+is_path_in_allowed_dirs() {
+    local filepath="$1"
+    local allowed_dirs="$2"
+    for prefix in $allowed_dirs; do
+        [[ "$filepath" == "$prefix"* ]] && return 0
+    done
+    return 1
+}
+
+# Strict email validation (RFC 5322 simplified)
+# Usage: is_valid_email "$email" || { log "WARN" "Invalid email"; return 1; }
+# Pattern: local@domain where both parts are non-empty and domain has a TLD
+is_valid_email() {
+    local email="$1"
+    [[ "$email" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]
+}
+
+# Check if an IP address is internal/reserved (for SSRF protection)
+# Returns 0 (true) if IP is internal, 1 (false) if external
+# Usage: is_internal_ip "$host" && { log "WARN" "Internal IP blocked"; continue; }
+is_internal_ip() {
+    local host="$1"
+    # Check for private/reserved IPv4 ranges
+    [[ "$host" =~ ^127\. ]] && return 0                    # Loopback
+    [[ "$host" =~ ^10\. ]] && return 0                    # Private Class A
+    [[ "$host" =~ ^172\.(1[6-9]|2[0-9]|3[01])\. ]] && return 0   # Private Class B
+    [[ "$host" =~ ^192\.168\. ]] && return 0             # Private Class C
+    [[ "$host" =~ ^169\.254\. ]] && return 0             # Link-local
+    [[ "$host" =~ ^0\.0\.0\.0 ]] && return 0              # Default route
+    [[ "$host" == "localhost" ]] && return 0               # Localhost name
+    # Check for IPv6 loopback/link-local
+    [[ "$host" =~ ^::1$ ]] && return 0                     # IPv6 loopback
+    [[ "$host" =~ ^fc00: ]] && return 0                  # IPv6 ULA
+    [[ "$host" =~ ^fe80: ]] && return 0                  # IPv6 link-local
+    # Not an internal IP
+    return 1
 }
 
 # ===========================================================================

@@ -74,16 +74,16 @@ check_myfeature() {
   - `pm2_engine` — PM2 engine availability
   - `pm2_<name>` — PM2 process (name sanitized)
   - `nvme_health` — NVMe drive health
-  - `site_<md5>` — Site monitoring (URL MD5 hash, first 12 chars)
-  - `port_<md5>` — TCP port check (host:port MD5 hash, first 12 chars)
+  - `site_<hash>` — Site monitoring (URL SHA-256 hash, first 12 chars)
+  - `port_<hash>` — TCP port check (host:port SHA-256 hash, first 12 chars)
   - `cpu_temp` — CPU temperature
   - `dns` — DNS resolution
   - `gpu_<idx>` — GPU stats (from nvidia-smi, e.g., `gpu_0`, `gpu_1`)
   - `battery` / `ups` — UPS/battery status
   - `net_<iface>` — Network bandwidth (interface sanitized, e.g., `net_eth0`, `net_ens160`)
-  - `log_<md5>` — Log pattern matches (file+pattern MD5 hash)
-  - `integrity_<md5>` — File integrity (filepath MD5 hash)
-  - `drift_<md5>` — Configuration drift detection (filepath MD5 hash)
+  - `log_<hash>` — Log pattern matches (file+pattern SHA-256 hash)
+  - `integrity_<hash>` — File integrity (filepath SHA-256 hash)
+  - `drift_<hash>` — Configuration drift detection (filepath SHA-256 hash)
   - `cron_<name>` — Cron job heartbeat (job name sanitized)
   - `fleet_<label>` — Fleet server heartbeat (server label sanitized)
   - `predict_*` — Predictive exhaustion (prefixed version of parent key, e.g., `predict_disk_root`)
@@ -182,11 +182,46 @@ The following helper functions provide cross-platform compatibility (GNU Linux a
 
 Note: BSD `stat` returns permissions without leading zeros; `portable_stat perms` pads to 3 digits for consistent formatting across GNU Linux and BSD/macOS.
 
-**portable_md5** — Returns MD5 hash using available tool:
+**portable_sha256** — Returns SHA-256 hash using available tool:
 ```bash
-echo "text" | portable_md5
+echo "text" | portable_sha256
 ```
-Uses GNU `md5sum`, BSD `md5 -q`, or `cksum` as fallback.
+Uses GNU `sha256sum`, BSD `shasum`, or `openssl` as fallback. Replaces the older MD5-based hashing for state key generation.
+
+**is_valid_number** — Validates positive integers (thresholds, counts):
+```bash
+is_valid_number "$value" || log "ERROR" "Not a number"
+```
+
+**is_valid_service_name** — SECURITY: Validates systemd service names:
+```bash
+is_valid_service_name "$svc" || { log "WARN" "Invalid service name"; continue; }
+```
+Pattern: `^[a-zA-Z0-9._-]+$` — rejects shell metacharacters, spaces, command substitution.
+
+**is_valid_hostname** — SECURITY: Validates hostnames for TCP checks:
+```bash
+is_valid_hostname "$host" || { log "WARN" "Invalid hostname"; continue; }
+```
+Pattern: `^[a-zA-Z0-9._-]+$` — rejects shell metacharacters.
+
+**is_safe_path** — SECURITY: Validates file paths for drift/integrity checks:
+```bash
+is_safe_path "$filepath" || { log "WARN" "Unsafe path"; continue; }
+```
+Rejects: `..` (traversal), `*` `?` (glob), `$` `` ` `` (command substitution).
+
+**is_valid_email** — SECURITY: Strict email validation (RFC 5322 simplified):
+```bash
+is_valid_email "$email" || { log "WARN" "Invalid email"; return 1; }
+```
+Pattern: `^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`
+
+**is_internal_ip** — SECURITY: SSRF protection for site monitoring:
+```bash
+is_internal_ip "$host" && { log "WARN" "Internal IP blocked"; continue; }
+```
+Returns true for: 127.x.x.x, 10.x.x.x, 172.16-31.x.x, 192.168.x.x, 169.254.x.x, ::1, fc00:, fe80:
 
 ## Configuration
 

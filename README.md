@@ -135,17 +135,17 @@ Telemon sends alerts through up to three channels simultaneously:
 | Failed Systemd | `check_failed_systemd_services` | `ENABLE_FAILED_SYSTEMD_SERVICES` | `true` | `systemctl` | `systemd_failed` | Binary: any failed units |
 | Docker | `check_docker_containers` | `ENABLE_DOCKER_CONTAINERS` | `false` | `docker` | `container_<name>` | Binary: running/healthy or not |
 | PM2 | `check_pm2_processes` | `ENABLE_PM2_PROCESSES` | `false` | `pm2`, `python3` | `pm2_<name>` | Binary: online or not |
-| Sites | `check_sites` | `ENABLE_SITE_MONITOR` | `false` | `curl`, `openssl` | `site_<md5>` | Per-site: status, response time, SSL expiry |
+| Sites | `check_sites` | `ENABLE_SITE_MONITOR` | `false` | `curl`, `openssl` | `site_<hash>` | Per-site: status, response time, SSL expiry |
 | NVMe | `check_nvme_health` | `ENABLE_NVME_CHECK` | `false` | `smartctl` | `nvme_health` | Critical warning byte, endurance 80/95%, temp |
-| TCP Ports | `check_tcp_ports` | `ENABLE_TCP_PORT_CHECK` | `false` | `/dev/tcp` | `port_<md5>` | Binary: reachable or not |
+| TCP Ports | `check_tcp_ports` | `ENABLE_TCP_PORT_CHECK` | `false` | `/dev/tcp` | `port_<hash>` | Binary: reachable or not |
 | CPU Temp | `check_cpu_temp` | `ENABLE_TEMP_CHECK` | `false` | `sensors` | `cpu_temp` | `TEMP_THRESHOLD_WARN=75`, `_CRIT=90` (°C) |
 | DNS | `check_dns` | `ENABLE_DNS_CHECK` | `false` | `dig`/`nslookup`/`host` | `dns` | Binary: resolves or not |
 | GPU | `check_gpu` | `ENABLE_GPU_CHECK` | `false` | `nvidia-smi` or `intel_gpu_top` | `gpu_<idx>` / `gpu_intel` | NVIDIA: `GPU_TEMP_THRESHOLD_WARN=80` (°C). Intel: `GPU_INTEL_UTIL_THRESHOLD_WARN=80` (%), `GPU_INTEL_TEMP_THRESHOLD_WARN=80` (°C) |
 | UPS/Battery | `check_ups` | `ENABLE_UPS_CHECK` | `false` | `upower`/`apcaccess` | `ups` | `UPS_THRESHOLD_WARN=30`, `_CRIT=10` (%, inverted) |
 | Network BW | `check_network_bandwidth` | `ENABLE_NETWORK_CHECK` | `false` | `/proc/net/dev` | `net_<iface>` | `NETWORK_THRESHOLD_WARN=800`, `_CRIT=950` (Mbit/s) |
-| Log Patterns | `check_log_patterns` | `ENABLE_LOG_CHECK` | `false` | `tail`, `grep` | `log_<md5>` | Binary: patterns found or not |
-| File Integrity | `check_file_integrity` | `ENABLE_INTEGRITY_CHECK` | `false` | `sha256sum` | `integrity_<md5>` | Binary: checksum changed or not |
-| Config Drift | `check_drift_detection` | `ENABLE_DRIFT_DETECTION` | `false` | `diff`, `stat` | `drift_<md5>` | Rich diff, metadata, user attribution |
+| Log Patterns | `check_log_patterns` | `ENABLE_LOG_CHECK` | `false` | `tail`, `grep` | `log_<hash>` | Binary: patterns found or not |
+| File Integrity | `check_file_integrity` | `ENABLE_INTEGRITY_CHECK` | `false` | `sha256sum` | `integrity_<hash>` | Binary: checksum changed or not |
+| Config Drift | `check_drift_detection` | `ENABLE_DRIFT_DETECTION` | `false` | `diff`, `stat` | `drift_<hash>` | Rich diff, metadata, user attribution |
 | Cron Jobs | `check_cron_jobs` | `ENABLE_CRON_CHECK` | `false` | `stat` | `cron_<name>` | `max_age_minutes` per job |
 | Fleet | `check_fleet_heartbeats` | `ENABLE_FLEET_CHECK` | `false` | heartbeat files | `fleet_<label>` | `FLEET_STALE_THRESHOLD_MIN=15` |
 | Predictive | `check_prediction` | `ENABLE_PREDICTIVE_ALERTS` | `false` | awk | `predict_*` | `PREDICT_HORIZON_HOURS=24` (hours to exhaustion) |

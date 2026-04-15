@@ -1468,6 +1468,18 @@ check_sites() {
         # Skip if no URL
         [[ -z "$url" ]] && continue
         
+        # SECURITY: SSRF protection — block internal/reserved IP addresses
+        # Extract host from URL for validation
+        local host_for_validation="${url#*://}"
+        host_for_validation="${host_for_validation%%/*}"
+        host_for_validation="${host_for_validation%%:*}"
+        
+        # Skip SSRF check for common public domains (optimization)
+        if is_internal_ip "$host_for_validation"; then
+            log "WARN" "check_sites: internal/reserved IP '${host_for_validation}' blocked in URL '${url}' — skipping (SSRF protection)"
+            continue
+        fi
+        
         # Default parameters
         local expected_status="${SITE_EXPECTED_STATUS:-200}"
         local max_response_ms="${SITE_MAX_RESPONSE_MS:-10000}"
@@ -1517,7 +1529,7 @@ check_sites() {
         
         # Hash-based key for state file (avoids collisions from regex sanitization)
         # Use awk to extract hash portably (GNU md5sum: "hash  file", BSD md5: "hash")
-        local key="site_$(printf '%s' "$url" | portable_md5 | cut -c1-12)"
+        local key="site_$(printf '%s' "$url" | portable_sha256 | cut -c1-12)"
         
         local state="OK"
         local detail=""
@@ -1639,16 +1651,28 @@ check_tcp_ports() {
         port="${port// /}"
         [[ -z "$host" || -z "$port" ]] && continue
 
+        # SECURITY: Validate hostname to prevent command injection via /dev/tcp
+        if ! is_valid_hostname "$host"; then
+            log "WARN" "check_tcp_ports: invalid host '${host}' in entry '${entry}' — skipping (only a-z, 0-9, ., _, - allowed)"
+            continue
+        fi
+
         # Validate port is numeric to prevent injection
         if ! [[ "$port" =~ ^[0-9]+$ ]]; then
             log "WARN" "check_tcp_ports: invalid port '${port}' in entry '${entry}' — skipping"
+            continue
+        fi
+        
+        # Validate port is in valid range (1-65535)
+        if [[ "$port" -lt 1 || "$port" -gt 65535 ]]; then
+            log "WARN" "check_tcp_ports: port '${port}' out of range (1-65535) in entry '${entry}' — skipping"
             continue
         fi
 
         local safe_host
         safe_host=$(html_escape "$host")
         # Hash-based key to avoid collisions from sanitization (e.g., host-1 vs host.1)
-        local key="port_$(printf '%s' "${entry}" | portable_md5 | cut -c1-12)"
+        local key="port_$(printf '%s' "${entry}" | portable_sha256 | cut -c1-12)"
         local state="OK"
         local detail="TCP port <code>${safe_host}:${port}</code> is reachable"
 
@@ -2117,7 +2141,7 @@ check_log_patterns() {
         logname=$(basename "$logfile")
         local safe_logname
         safe_logname=$(html_escape "$logname")
-        local key="log_$(printf '%s' "$logfile" | portable_md5 | cut -c1-12)"
+        local key="log_$(printf '%s' "$logfile" | portable_sha256 | cut -c1-12)"
 
         local state="OK"
         local detail="Log <code>${safe_logname}</code>: no matching patterns"
@@ -2154,6 +2178,12 @@ check_file_integrity() {
     # Compute current checksums and save
     local new_checksums=""
     for filepath in $watch_files; do
+        # SECURITY: Validate path to prevent directory traversal and file inclusion attacks
+        if ! is_safe_path "$filepath"; then
+            log "WARN" "Integrity check: unsafe path '${filepath}' — skipping (contains .., *, ?, or $)"
+            continue
+        fi
+        
         [[ -f "$filepath" ]] || continue
 
         local current_sum
@@ -2162,7 +2192,7 @@ check_file_integrity() {
 
         new_checksums+="${filepath}=${current_sum}"$'\n'
 
-        local key="integrity_$(printf '%s' "$filepath" | portable_md5 | cut -c1-12)"
+        local key="integrity_$(printf '%s' "$filepath" | portable_sha256 | cut -c1-12)"
         local fname
         fname=$(basename "$filepath")
 
@@ -2233,7 +2263,7 @@ build_drift_detail() {
 
     # Content diff (only if checksum changed)
     if [[ "$prev_sum" != "$current_sum" ]]; then
-        local baseline_file="${baseline_dir}/$(printf '%s' "$filepath" | portable_md5 | cut -c1-12)"
+        local baseline_file="${baseline_dir}/$(printf '%s' "$filepath" | portable_sha256 | cut -c1-12)"
 
         # Check if this is a sensitive file
         local is_sensitive=false
@@ -2350,6 +2380,12 @@ check_drift_detection() {
 
     local new_meta=""
     for filepath in $watch_files; do
+        # SECURITY: Validate path to prevent directory traversal and file inclusion attacks
+        if ! is_safe_path "$filepath"; then
+            log "WARN" "Drift detection: unsafe path '${filepath}' — skipping (contains .., *, ?, or $)"
+            continue
+        fi
+        
         [[ -f "$filepath" ]] || continue
 
         # Gather current metadata
@@ -2368,7 +2404,7 @@ check_drift_detection() {
         new_meta+="${filepath}=${current_meta}"$'\n'
 
         # Compute state key
-        local key="drift_$(printf '%s' "$filepath" | portable_md5 | cut -c1-12)"
+        local key="drift_$(printf '%s' "$filepath" | portable_sha256 | cut -c1-12)"
         local fname
         fname=$(basename "$filepath")
         local safe_fname
@@ -2408,7 +2444,7 @@ check_drift_detection() {
         fi
 
         # Update baseline copy (for diff on next run)
-        local baseline_file="${baseline_dir}/$(printf '%s' "$filepath" | portable_md5 | cut -c1-12)"
+        local baseline_file="${baseline_dir}/$(printf '%s' "$filepath" | portable_sha256 | cut -c1-12)"
         cp -f "$filepath" "$baseline_file" 2>/dev/null || true
         chmod 600 "$baseline_file" 2>/dev/null || true
     done
@@ -2608,12 +2644,20 @@ auto_remediate() {
     [[ -z "$restart_services" ]] && return
 
     for svc in $restart_services; do
+        # SECURITY: Validate service name to prevent command injection
+        # Only allow alphanumeric, hyphen, underscore, and dot characters
+        if ! is_valid_service_name "$svc"; then
+            log "WARN" "Auto-remediation: invalid service name '${svc}' — skipping (only a-z, 0-9, ., _, - allowed)"
+            continue
+        fi
+        
         local key="proc_$(sanitize_state_key "$svc")"
         local svc_state="${CURR_STATE[$key]:-OK}"
 
         if [[ "$svc_state" == "CRITICAL" ]]; then
             log "INFO" "Auto-remediation: attempting restart of ${svc}"
-            if run_with_timeout "$CHECK_TIMEOUT" systemctl restart "$svc" 2>/dev/null; then
+            # SECURITY: Use -- to prevent option injection; validated service name above
+            if run_with_timeout "$CHECK_TIMEOUT" systemctl restart -- "$svc" 2>/dev/null; then
                 log "INFO" "Auto-remediation: ${svc} restart succeeded"
                 # Update the detail to note remediation was attempted
                 STATE_DETAIL["$key"]="${STATE_DETAIL[$key]:-} (auto-restart <b>attempted</b>)"
@@ -3991,9 +4035,10 @@ send_email() {
     local email_to="${EMAIL_TO:-}"
     [[ -z "$email_to" ]] && return 0
 
-    # Basic email format validation - require at least one char before and after @
-    if [[ ! "$email_to" =~ ^[^@]+@[^@]+$ ]]; then
-        log "WARN" "send_email: EMAIL_TO '${email_to}' does not appear to be a valid email address"
+    # SECURITY: Strict email validation (RFC 5322 simplified)
+    # Requires non-empty local and domain parts with valid TLD
+    if ! is_valid_email "$email_to"; then
+        log "WARN" "send_email: EMAIL_TO '${email_to}' failed validation — skipping"
         return 1
     fi
 
@@ -4017,11 +4062,13 @@ send_email() {
     local hostname
     hostname=$(hostname)
     local email_from="${EMAIL_FROM:-telemon@${hostname}}"
-    # Validate EMAIL_FROM contains @
-    if [[ ! "$email_from" == *"@"* ]]; then
-        log "WARN" "send_email: EMAIL_FROM '${email_from}' does not appear to be a valid email address — skipping"
-        return 1
+    
+    # SECURITY: Validate EMAIL_FROM with same strict validation
+    if ! is_valid_email "$email_from"; then
+        log "WARN" "send_email: EMAIL_FROM '${email_from}' failed validation — using default"
+        email_from="telemon@${hostname}"
     fi
+    
     # Sanitize email headers: strip newlines, carriage returns, tabs, and null bytes
     email_from=$(printf '%s' "$email_from" | tr -d '\n\r\t\0')
     email_to=$(printf '%s' "$email_to" | tr -d '\n\r\t\0')

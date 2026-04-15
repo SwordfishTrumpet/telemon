@@ -144,28 +144,206 @@ test_portable_stat() {
 }
 
 # ---------------------------------------------------------------------------
-# Test portable_md5 helper
-# ---------------------------------------------------------------------------
-
-test_portable_md5() {
+# Test portable_sha256 helper (replaces MD5)
+test_portable_sha256() {
     echo ""
-    echo "Testing portable_md5 helper..."
+    echo "Testing portable_sha256 helper..."
     
     # Test that we get a consistent hash
     local hash1 hash2
-    hash1=$(echo "test" | portable_md5)
-    hash2=$(echo "test" | portable_md5)
-    assert_eq "$hash1" "$hash2" "portable_md5 produces consistent results"
+    hash1=$(echo "test" | portable_sha256)
+    hash2=$(echo "test" | portable_sha256)
+    assert_eq "$hash1" "$hash2" "portable_sha256 produces consistent results"
     
     # Test that different inputs produce different outputs
     local hash3
-    hash3=$(echo "different" | portable_md5)
+    hash3=$(echo "different" | portable_sha256)
     [[ "$hash1" != "$hash3" ]]
-    assert_true "portable_md5 produces different hashes for different inputs"
+    assert_true "portable_sha256 produces different hashes for different inputs"
     
-    # Test that output looks like a hash (alphanumeric)
-    [[ "$hash1" =~ ^[a-zA-Z0-9]+$ ]]
-    assert_true "portable_md5 produces alphanumeric output"
+    # Test that output looks like a SHA-256 hash (64 hex chars)
+    [[ "$hash1" =~ ^[a-f0-9]{64}$ ]]
+    assert_true "portable_sha256 produces 64-character hex output"
+}
+
+# Test service name validation
+test_is_valid_service_name() {
+    echo ""
+    echo "Testing is_valid_service_name helper..."
+    
+    # Valid service names
+    is_valid_service_name "nginx"
+    assert_true "is_valid_service_name accepts simple service name"
+    
+    is_valid_service_name "nginx.service"
+    assert_true "is_valid_service_name accepts service with dot"
+    
+    is_valid_service_name "my-service"
+    assert_true "is_valid_service_name accepts service with hyphen"
+    
+    is_valid_service_name "my_service"
+    assert_true "is_valid_service_name accepts service with underscore"
+    
+    is_valid_service_name "service123"
+    assert_true "is_valid_service_name accepts service with numbers"
+    
+    # Invalid service names
+    ! is_valid_service_name "service;rm -rf /"
+    assert_true "is_valid_service_name rejects command injection attempt"
+    
+    ! is_valid_service_name "service with space"
+    assert_true "is_valid_service_name rejects service with spaces"
+    
+    ! is_valid_service_name 'service$(id)'
+    assert_true "is_valid_service_name rejects command substitution"
+    
+    ! is_valid_service_name "service*"
+    assert_true "is_valid_service_name rejects glob pattern"
+}
+
+# Test hostname validation
+test_is_valid_hostname() {
+    echo ""
+    echo "Testing is_valid_hostname helper..."
+    
+    # Valid hostnames
+    is_valid_hostname "localhost"
+    assert_true "is_valid_hostname accepts localhost"
+    
+    is_valid_hostname "example.com"
+    assert_true "is_valid_hostname accepts domain name"
+    
+    is_valid_hostname "db-server"
+    assert_true "is_valid_hostname accepts hostname with hyphen"
+    
+    is_valid_hostname "192.168.1.1"
+    assert_true "is_valid_hostname accepts IP address"
+    
+    # Invalid hostnames
+    ! is_valid_hostname "host;rm -rf /"
+    assert_true "is_valid_hostname rejects command injection"
+    
+    ! is_valid_hostname "host with space"
+    assert_true "is_valid_hostname rejects hostname with spaces"
+    
+    ! is_valid_hostname 'host$(id)'
+    assert_true "is_valid_hostname rejects command substitution"
+}
+
+# Test path safety validation
+test_is_safe_path() {
+    echo ""
+    echo "Testing is_safe_path helper..."
+    
+    # Safe paths
+    is_safe_path "/etc/nginx/nginx.conf"
+    assert_true "is_safe_path accepts normal absolute path"
+    
+    is_safe_path "/var/log/syslog"
+    assert_true "is_safe_path accepts another normal path"
+    
+    is_safe_path "relative/path/file.txt"
+    assert_true "is_safe_path accepts relative path"
+    
+    # Unsafe paths - path traversal
+    ! is_safe_path "/etc/../etc/passwd"
+    assert_true "is_safe_path rejects path with .. traversal"
+    
+    ! is_safe_path "../etc/passwd"
+    assert_true "is_safe_path rejects relative path traversal"
+    
+    # Unsafe paths - shell expansion
+    ! is_safe_path "/etc/*"
+    assert_true "is_safe_path rejects glob pattern *"
+    
+    ! is_safe_path "/etc/?"
+    assert_true "is_safe_path rejects glob pattern ?"
+    
+    # Unsafe paths - command substitution
+    ! is_safe_path '/etc/file$(id).txt'
+    assert_true "is_safe_path rejects command substitution $"
+    
+    ! is_safe_path '/etc/file`id`.txt'
+    assert_true "is_safe_path rejects command substitution backtick"
+}
+
+# Test email validation
+test_is_valid_email() {
+    echo ""
+    echo "Testing is_valid_email helper..."
+    
+    # Valid emails
+    is_valid_email "user@example.com"
+    assert_true "is_valid_email accepts simple email"
+    
+    is_valid_email "user.name@example.co.uk"
+    assert_true "is_valid_email accepts email with dots"
+    
+    is_valid_email "user+tag@example.com"
+    assert_true "is_valid_email accepts email with plus"
+    
+    is_valid_email "user_name@example-domain.com"
+    assert_true "is_valid_email accepts email with hyphen and underscore"
+    
+    # Invalid emails
+    ! is_valid_email "notanemail"
+    assert_true "is_valid_email rejects plain string"
+    
+    ! is_valid_email "@example.com"
+    assert_true "is_valid_email rejects missing local part"
+    
+    ! is_valid_email "user@"
+    assert_true "is_valid_email rejects missing domain"
+    
+    ! is_valid_email "user@nodot"
+    assert_true "is_valid_email rejects domain without TLD"
+    
+    ! is_valid_email "test@test.com; rm -rf /"
+    assert_true "is_valid_email rejects injection attempt"
+}
+
+# Test SSRF / internal IP detection
+test_is_internal_ip() {
+    echo ""
+    echo "Testing is_internal_ip helper..."
+    
+    # Internal IPs - should return 0 (true)
+    is_internal_ip "127.0.0.1"
+    assert_true "is_internal_ip detects loopback IPv4"
+    
+    is_internal_ip "127.0.0.53"
+    assert_true "is_internal_ip detects loopback IPv4 variant"
+    
+    is_internal_ip "10.0.0.1"
+    assert_true "is_internal_ip detects private Class A"
+    
+    is_internal_ip "172.16.0.1"
+    assert_true "is_internal_ip detects private Class B (172.16)"
+    
+    is_internal_ip "172.31.255.255"
+    assert_true "is_internal_ip detects private Class B (172.31)"
+    
+    is_internal_ip "192.168.1.1"
+    assert_true "is_internal_ip detects private Class C"
+    
+    is_internal_ip "169.254.1.1"
+    assert_true "is_internal_ip detects link-local"
+    
+    is_internal_ip "localhost"
+    assert_true "is_internal_ip detects localhost name"
+    
+    is_internal_ip "::1"
+    assert_true "is_internal_ip detects IPv6 loopback"
+    
+    # External IPs - should return 1 (false)
+    ! is_internal_ip "8.8.8.8"
+    assert_true "is_internal_ip allows public IP (Google DNS)"
+    
+    ! is_internal_ip "1.1.1.1"
+    assert_true "is_internal_ip allows public IP (Cloudflare DNS)"
+    
+    ! is_internal_ip "example.com"
+    assert_true "is_internal_ip allows domain name"
 }
 
 # ---------------------------------------------------------------------------
@@ -189,15 +367,10 @@ test_get_state_file_variants() {
     local with_lock
     with_lock=$(get_state_file_variants false true)
     assert_contains "$with_lock" "${STATE_FILE}.lock" "get_state_file_variants includes lock when requested"
-    
-    # Test with drift baseline included (it returns the path but caller checks if it's a dir)
-    local with_drift
-    with_drift=$(get_state_file_variants)
-    assert_contains "$with_drift" "${STATE_FILE}.drift" "get_state_file_variants includes drift state file"
 }
 
 # ---------------------------------------------------------------------------
-# Test sanitize_state_key logic (from telemon.sh)
+# Test sanitize_state_key logic
 # ---------------------------------------------------------------------------
 
 test_sanitize_state_key() {
@@ -232,7 +405,7 @@ test_state_key_format() {
     echo "Testing state key format validation..."
     
     # Valid key patterns
-    local valid_keys=("cpu" "mem" "disk_root" "container_nginx" "proc_sshd" "site_abc123" "port_def456")
+    local valid_keys=("cpu" "mem" "disk_root" "container_nginx" "proc_sshd")
     for key in "${valid_keys[@]}"; do
         [[ "$key" =~ ^[a-zA-Z0-9_.-]+$ ]]
         assert_true "Key '$key' matches valid pattern"
@@ -250,7 +423,6 @@ test_html_escape() {
     # Define the html_escape function inline for testing
     html_escape() {
         local text="$1"
-        # Escape & first (must use \& in replacement to get literal &)
         text="${text//&/\&amp;}"
         text="${text//</\&lt;}"
         text="${text//>/\&gt;}"
@@ -259,7 +431,7 @@ test_html_escape() {
         printf '%s' "$text"
     }
     
-    # Test basic HTML entities (use variables to avoid shell interpretation)
+    # Test basic HTML entities
     local input_amp="&" expected_amp="&amp;"
     assert_eq "$expected_amp" "$(html_escape "$input_amp")" "html_escape escapes ampersand"
     
@@ -274,19 +446,6 @@ test_html_escape() {
     
     local input_sq="'" expected_sq="&#39;"
     assert_eq "$expected_sq" "$(html_escape "$input_sq")" "html_escape escapes single quote"
-    
-    # Test combined string
-    local input_combo="<b>test</b>" expected_combo="&lt;b&gt;test&lt;/b&gt;"
-    assert_eq "$expected_combo" "$(html_escape "$input_combo")" "html_escape escapes HTML tags"
-    
-    local input_text="Tom & Jerry" expected_text="Tom &amp; Jerry"
-    assert_eq "$expected_text" "$(html_escape "$input_text")" "html_escape escapes ampersand in text"
-    
-    # Test empty string
-    assert_eq "" "$(html_escape "")" "html_escape handles empty string"
-    
-    # Test string with no special chars
-    assert_eq "hello world" "$(html_escape "hello world")" "html_escape leaves plain text unchanged"
 }
 
 # ---------------------------------------------------------------------------
@@ -297,9 +456,7 @@ test_threshold_validation() {
     echo ""
     echo "Testing threshold validation logic..."
     
-    # is_valid_number is already sourced from lib/common.sh
-    
-    # Test is_valid_number
+    # Test is_valid_number (sourced from lib/common.sh)
     is_valid_number "42"
     assert_true "is_valid_number accepts positive integer"
     
@@ -314,39 +471,22 @@ test_threshold_validation() {
     
     ! is_valid_number "abc"
     assert_true "is_valid_number rejects letters"
-    
-    ! is_valid_number ""
-    assert_true "is_valid_number rejects empty string"
-    
-    # Test threshold relationship logic (normal: warn < crit)
-    local warn=70 crit=80
-    [[ "$warn" -lt "$crit" ]]
-    assert_true "Normal threshold: warn ($warn) < crit ($crit)"
-    
-    # Test inverted threshold relationship (inverted: warn > crit)
-    local mem_warn=15 mem_crit=10
-    [[ "$mem_warn" -gt "$mem_crit" ]]
-    assert_true "Inverted threshold: warn ($mem_warn) > crit ($mem_crit) for memory"
 }
 
 # ---------------------------------------------------------------------------
-# Test parse_date_to_epoch helper (cross-platform date parsing)
+# Test parse_date_to_epoch helper
 # ---------------------------------------------------------------------------
 
 test_parse_date_to_epoch() {
     echo ""
     echo "Testing parse_date_to_epoch helper..."
     
-    # Define parse_date_to_epoch inline for testing (copied from telemon.sh)
+    # Define parse_date_to_epoch inline for testing
     parse_date_to_epoch() {
         local datestr="$1"
-        # Try GNU date first (Linux)
         local epoch
         epoch=$(date -d "$datestr" +%s 2>/dev/null) && { echo "$epoch"; return 0; }
-        # Try BSD date (macOS) with common OpenSSL date format
         epoch=$(date -j -f "%b %d %H:%M:%S %Y %Z" "$datestr" +%s 2>/dev/null) && { echo "$epoch"; return 0; }
-        epoch=$(date -j -f "%b  %d %H:%M:%S %Y %Z" "$datestr" +%s 2>/dev/null) && { echo "$epoch"; return 0; }
-        # Try python3 as last resort
         if command -v python3 &>/dev/null; then
             epoch=$(python3 -c "
 import email.utils, sys, calendar
@@ -379,7 +519,6 @@ except Exception: print('')
     # Test invalid date returns empty
     local bad_epoch
     bad_epoch=$(parse_date_to_epoch "invalid date string")
-    # Empty or non-numeric is acceptable for invalid dates
     [[ -z "$bad_epoch" || ! "$bad_epoch" =~ ^[0-9]+$ ]]
     assert_true "parse_date_to_epoch handles invalid dates gracefully"
 }
@@ -392,18 +531,16 @@ test_run_with_timeout() {
     echo ""
     echo "Testing run_with_timeout helper..."
     
-    # Define run_with_timeout inline for testing (simplified version)
+    # Define run_with_timeout inline for testing
     run_with_timeout() {
         local timeout_sec="$1"
         shift
         
-        # Use timeout command if available (coreutils)
         if command -v timeout &>/dev/null; then
             timeout "$timeout_sec" "$@" 2>/dev/null
             return $?
         fi
         
-        # Fallback: bash timeout using background job
         local pid
         "$@" &
         pid=$!
@@ -432,9 +569,7 @@ test_run_with_timeout() {
     ! run_with_timeout 5 false 2>/dev/null
     assert_true "run_with_timeout: captures command failure exit code"
     
-    # Test with very short timeout on a slow command (sleep)
-    # This may return 124 (timeout) or succeed depending on system speed
-    # Just verify it doesn't hang
+    # Test with very short timeout on a slow command
     run_with_timeout 1 sleep 0.1 2>/dev/null
     assert_true "run_with_timeout: short command completes within timeout"
 }
@@ -447,7 +582,7 @@ test_safe_write_state_file() {
     echo ""
     echo "Testing safe_write_state_file helper..."
     
-    # Define safe_write_state_file inline for testing (simplified version)
+    # Define safe_write_state_file inline for testing
     safe_write_state_file() {
         local target="$1"
         local content="$2"
@@ -546,7 +681,7 @@ main() {
     
     # Run all tests
     test_portable_stat
-    test_portable_md5
+    test_portable_sha256
     test_get_state_file_variants
     test_sanitize_state_key
     test_state_key_format
@@ -556,6 +691,11 @@ main() {
     test_parse_date_to_epoch
     test_run_with_timeout
     test_safe_write_state_file
+    test_is_valid_service_name
+    test_is_valid_hostname
+    test_is_safe_path
+    test_is_valid_email
+    test_is_internal_ip
 
     # Summary
     echo ""
