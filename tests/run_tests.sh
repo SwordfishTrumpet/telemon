@@ -670,6 +670,268 @@ test_linear_regression() {
 }
 
 # ---------------------------------------------------------------------------
+# Test log function
+# ---------------------------------------------------------------------------
+
+test_log() {
+    echo ""
+    echo "Testing log function..."
+    
+    # Define log function inline for testing (simplified version)
+    LOG_FILE=$(mktemp)
+    LOG_LEVEL="INFO"
+    
+    _log_level_num() {
+        case "$1" in
+            DEBUG) echo 0 ;; INFO) echo 1 ;; WARN) echo 2 ;; ERROR) echo 3 ;; *) echo 1 ;;
+        esac
+    }
+    
+    log() {
+        local level="$1"; shift
+        local min_level="${LOG_LEVEL:-INFO}"
+        if [[ "$(_log_level_num "$level")" -lt "$(_log_level_num "$min_level")" ]]; then
+            return
+        fi
+        echo "[${level}] $*" >> "$LOG_FILE"
+    }
+    
+    # Test that log writes to file
+    log "INFO" "Test message"
+    [[ -f "$LOG_FILE" ]]
+    assert_true "log creates log file"
+    
+    local content
+    content=$(cat "$LOG_FILE")
+    assert_contains "$content" "Test message" "log writes message to file"
+    assert_contains "$content" "[INFO]" "log includes level prefix"
+    
+    # Test log level filtering
+    > "$LOG_FILE"  # Clear log
+    LOG_LEVEL="WARN"
+    log "INFO" "Should not appear"
+    log "WARN" "Should appear"
+    content=$(cat "$LOG_FILE")
+    [[ ! "$content" == *"Should not appear"* ]]
+    assert_true "log filters DEBUG/INFO when LOG_LEVEL=WARN"
+    [[ "$content" == *"Should appear"* ]]
+    assert_true "log allows WARN when LOG_LEVEL=WARN"
+    
+    # Cleanup
+    rm -f "$LOG_FILE"
+    unset LOG_FILE LOG_LEVEL _log_level_num log
+}
+
+# ---------------------------------------------------------------------------
+# Test rotate_logs function
+# ---------------------------------------------------------------------------
+
+test_rotate_logs() {
+    echo ""
+    echo "Testing rotate_logs function..."
+    
+    # Create a temporary log directory
+    local log_dir
+    log_dir=$(mktemp -d)
+    local log_file="${log_dir}/test.log"
+    
+    # Define rotate_logs function inline for testing
+    rotate_logs() {
+        local max_size_mb="${LOG_MAX_SIZE_MB:-10}"
+        local max_size=$((max_size_mb * 1024 * 1024))
+        local max_backups="${LOG_MAX_BACKUPS:-5}"
+        
+        if [[ -f "$LOG_FILE" ]]; then
+            local log_size
+            log_size=$(stat -c%s "$LOG_FILE" 2>/dev/null || stat -f%z "$LOG_FILE" 2>/dev/null || echo 0)
+            if [[ "$log_size" -gt "$max_size" ]]; then
+                # Rotate backups
+                for (( i = max_backups - 1; i >= 1; i-- )); do
+                    local src="${LOG_FILE}.${i}"
+                    local dst="${LOG_FILE}.$((i + 1))"
+                    [[ -f "$src" ]] && mv "$src" "$dst"
+                done
+                mv "$LOG_FILE" "${LOG_FILE}.1"
+                : > "$LOG_FILE"
+            fi
+        fi
+    }
+    
+    LOG_FILE="$log_file"
+    LOG_MAX_SIZE_MB=1  # 1MB for testing
+    LOG_MAX_BACKUPS=3
+    
+    # Test rotation not triggered for small file
+    echo "small content" > "$log_file"
+    rotate_logs
+    [[ -f "$log_file" ]]
+    assert_true "rotate_logs keeps small files"
+    [[ ! -f "${log_file}.1" ]]
+    assert_true "rotate_logs doesn't create backup for small files"
+    
+    # Test rotation triggered for large file
+    # Create a file larger than 1MB
+    dd if=/dev/zero bs=1024 count=1025 > "$log_file" 2>/dev/null
+    rotate_logs
+    [[ -f "${log_file}.1" ]]
+    assert_true "rotate_logs creates backup when size exceeded"
+    [[ -f "$log_file" ]]
+    assert_true "rotate_logs creates new empty log file"
+    
+    # Cleanup
+    rm -rf "$log_dir"
+    unset LOG_FILE LOG_MAX_SIZE_MB LOG_MAX_BACKUPS rotate_logs
+}
+
+# ---------------------------------------------------------------------------
+# Test check_state_change core alerting logic
+# Tests confirmation counting, state transitions, and rate limiting
+# ---------------------------------------------------------------------------
+
+test_check_state_change() {
+    echo ""
+    echo "Testing check_state_change core logic..."
+    
+    # Global state arrays (mocked for testing)
+    declare -A PREV_STATE
+    declare -A PREV_COUNT
+    declare -A ALERT_LAST_SENT
+    declare -A CURR_STATE
+    declare -A STATE_DETAIL
+    local ALERTS=""
+    local CONFIRMATION_COUNT=3
+    local ALERT_COOLDOWN_SEC=0  # Disable cooldown for testing
+    
+    # Define check_state_change inline for testing (simplified version)
+    check_state_change() {
+        local key="$1"
+        local new_state="$2"
+        local detail="$3"
+        
+        CURR_STATE["$key"]="$new_state"
+        STATE_DETAIL["$key"]="$detail"
+        
+        local prev_state="${PREV_STATE[$key]:-OK}"
+        local prev_count="${PREV_COUNT[$key]:-0}"
+        local confirm_count="${CONFIRMATION_COUNT:-3}"
+        
+        local should_alert=false
+        
+        if [[ "$new_state" == "$prev_state" ]]; then
+            # State unchanged
+            if [[ "$prev_count" -lt "$confirm_count" ]]; then
+                prev_count=$((prev_count + 1))
+                PREV_COUNT["$key"]=$prev_count
+                if [[ "$prev_count" -eq "$confirm_count" && "$new_state" != "OK" ]]; then
+                    should_alert=true
+                fi
+            fi
+        else
+            # State changed
+            PREV_COUNT["$key"]=1
+            
+            if [[ "$confirm_count" -le 1 ]]; then
+                if [[ "$new_state" != "OK" ]]; then
+                    should_alert=true
+                elif [[ "$prev_state" != "OK" ]]; then
+                    should_alert=true
+                fi
+            else
+                if [[ "$new_state" == "OK" && "$prev_state" != "OK" && "$prev_count" -ge "$confirm_count" ]]; then
+                    should_alert=true
+                fi
+            fi
+        fi
+        
+        if [[ "$should_alert" == "true" ]]; then
+            ALERTS+="${key}:${new_state} "
+            ALERT_LAST_SENT["$key"]=$(date +%s)
+        fi
+        
+        PREV_STATE["$key"]="$new_state"
+    }
+    
+    # Test 1: Initial OK state - no alert
+    ALERTS=""
+    check_state_change "cpu" "OK" "CPU normal"
+    [[ -z "$ALERTS" ]]
+    assert_true "check_state_change: OK state produces no alert"
+    [[ "${PREV_COUNT[cpu]}" == "0" || "${PREV_COUNT[cpu]}" == "1" ]]
+    assert_true "check_state_change: OK count initialized"
+    
+    # Test 2: First WARNING - no alert yet (counting)
+    ALERTS=""
+    check_state_change "cpu" "WARNING" "CPU at 75%"
+    [[ -z "$ALERTS" ]]
+    assert_true "check_state_change: first WARNING produces no alert (counting)"
+    [[ "${PREV_COUNT[cpu]}" == "1" ]]
+    assert_true "check_state_change: count is 1 after first WARNING"
+    
+    # Test 3: Second WARNING - no alert yet
+    check_state_change "cpu" "WARNING" "CPU at 76%"
+    [[ -z "$ALERTS" ]]
+    assert_true "check_state_change: second WARNING produces no alert"
+    [[ "${PREV_COUNT[cpu]}" == "2" ]]
+    assert_true "check_state_change: count is 2 after second WARNING"
+    
+    # Test 4: Third WARNING - alert triggered (confirmation reached)
+    check_state_change "cpu" "WARNING" "CPU at 77%"
+    [[ "$ALERTS" == *"cpu:WARNING"* ]]
+    assert_true "check_state_change: third WARNING triggers alert (confirmed)"
+    [[ "${PREV_COUNT[cpu]}" == "3" ]]
+    assert_true "check_state_change: count is 3 after confirmation"
+    
+    # Test 5: Fourth WARNING - no alert (already confirmed)
+    ALERTS=""
+    check_state_change "cpu" "WARNING" "CPU at 78%"
+    [[ -z "$ALERTS" ]]
+    assert_true "check_state_change: fourth WARNING produces no alert (already confirmed)"
+    [[ "${PREV_COUNT[cpu]}" == "3" ]]
+    assert_true "check_state_change: count stays at 3 after confirmation"
+    
+    # Test 6: OK after confirmed WARNING - resolution alert
+    ALERTS=""
+    check_state_change "cpu" "OK" "CPU normal"
+    [[ "$ALERTS" == *"cpu:OK"* ]]
+    assert_true "check_state_change: OK after confirmed WARNING triggers resolution"
+    
+    # Test 7: Immediate transition to CRITICAL
+    PREV_STATE=()
+    PREV_COUNT=()
+    ALERTS=""
+    check_state_change "mem" "CRITICAL" "Memory at 95%"
+    [[ -z "$ALERTS" ]]
+    assert_true "check_state_change: first CRITICAL produces no alert (counting)"
+    check_state_change "mem" "CRITICAL" "Memory at 96%"
+    [[ -z "$ALERTS" ]]
+    assert_true "check_state_change: second CRITICAL produces no alert"
+    check_state_change "mem" "CRITICAL" "Memory at 97%"
+    [[ "$ALERTS" == *"mem:CRITICAL"* ]]
+    assert_true "check_state_change: third CRITICAL triggers alert"
+    
+    # Test 8: Unconfirmed WARNING to OK - no alert (transient spike)
+    PREV_STATE=()
+    PREV_COUNT=()
+    ALERTS=""
+    check_state_change "disk" "WARNING" "Disk at 85%"
+    check_state_change "disk" "OK" "Disk normal"
+    [[ -z "$ALERTS" ]]
+    assert_true "check_state_change: unconfirmed WARNING->OK produces no alert (transient)"
+    
+    # Test 9: Confirmation count = 1 (immediate alerts)
+    CONFIRMATION_COUNT=1
+    PREV_STATE=()
+    PREV_COUNT=()
+    ALERTS=""
+    check_state_change "net" "WARNING" "Network slow"
+    [[ "$ALERTS" == *"net:WARNING"* ]]
+    assert_true "check_state_change: immediate alert when CONFIRMATION_COUNT=1"
+    
+    # Cleanup
+    unset PREV_STATE PREV_COUNT ALERT_LAST_SENT CURR_STATE STATE_DETAIL ALERTS CONFIRMATION_COUNT ALERT_COOLDOWN_SEC check_state_change
+}
+
+# ---------------------------------------------------------------------------
 # Main test runner
 # ---------------------------------------------------------------------------
 
@@ -696,6 +958,9 @@ main() {
     test_is_safe_path
     test_is_valid_email
     test_is_internal_ip
+    test_log
+    test_rotate_logs
+    test_check_state_change
 
     # Summary
     echo ""

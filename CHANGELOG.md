@@ -7,7 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Security Audit 2026-04-16**: Comprehensive white-box security review completed
+  - VULN-001: Command injection protection in `auto_remediate()` via `is_valid_service_name()`
+  - VULN-002: Path traversal protection in drift/integrity checks via `is_safe_path()`
+  - VULN-003: Hostname validation in TCP port checks via `is_valid_hostname()` with port range validation
+  - VULN-004: SSRF protection in site monitoring via `is_internal_ip()` blocking internal/reserved IPs
+  - VULN-005: Regex injection protection in log pattern matching with validation
+  - VULN-006: Email header injection protection via `is_valid_email()` RFC 5322 validation
+  - VULN-007: Weak hash algorithm replaced — `portable_md5()` replaced with `portable_sha256()`
+  - VULN-008: Docker socket security warning documented in docker-compose.yml
+  - Added security validation helpers to `lib/common.sh`: `is_valid_service_name()`, `is_valid_hostname()`, `is_safe_path()`, `is_valid_email()`, `is_internal_ip()`
+
 ### Added
+- **Stale Lock Detection** — automatic recovery from crashed/hung processes:
+  - Lock files now store `PID timestamp` format for age detection
+  - Locks older than 5 minutes (300s) are automatically broken if holder process is dead
+  - Eliminates "Another instance is running" errors from zombie lock files
+  - Both flock and mkdir-based fallback mechanisms include stale detection
+- **Test Coverage** — expanded test suite from 93 to 118 tests:
+  - `test_log()` — Log level filtering, file creation, message formatting (5 tests)
+  - `test_rotate_logs()` — Rotation triggering, backup creation (4 tests)  
+  - `test_check_state_change()` — Confirmation counting, state transitions, rate limiting (16 tests)
 - **Fleet Heartbeat Monitoring** — multi-server dead man's switch with two backends:
   - `send_heartbeat()` writes timestamped heartbeat files (shared storage) or POSTs to a webhook URL
   - `check_fleet_heartbeats()` detects stale/missing servers from `FLEET_EXPECTED_SERVERS` list

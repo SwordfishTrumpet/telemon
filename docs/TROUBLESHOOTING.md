@@ -184,16 +184,31 @@ ps aux | grep telemon.sh
 
 # Check lock file
 ls -la /tmp/telemon_sys_alert_state.lock
+
+# Check lock age (if file exists)
+cat /tmp/telemon_sys_alert_state.lock
 ```
 
-**Solution:**
+**Automatic Recovery:**
+Telemon now includes automatic stale lock detection. If a lock is older than 5 minutes (300 seconds) and the holding process is no longer running, Telemon will automatically break the stale lock and continue. You'll see a log message like:
+```
+[WARN] Stale lock detected (PID 12345 not running, age 360s) - breaking lock
+```
+
+**Manual Solution (if automatic detection fails):**
 ```bash
 # Remove stale lock
 rm /tmp/telemon_sys_alert_state.lock
+rm -rf /tmp/telemon_sys_alert_state.lock.d
 
 # If process is stuck, kill it
 kill -9 <PID>
 ```
+
+**Prevention:**
+- Ensure Telemon runs with appropriate timeout values
+- Check that the system has sufficient resources (CPU, memory)
+- Review logs for any checks that may be hanging
 
 ### 8. First Run Issues
 

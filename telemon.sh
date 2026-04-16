@@ -66,15 +66,49 @@ chmod 600 "$LOG_FILE" 2>/dev/null || true
 # ---------------------------------------------------------------------------
 # Lock file to prevent overlapping runs
 # Uses flock (from util-linux) if available, falls back to PID file
+# Includes stale lock detection based on timestamp
 # ---------------------------------------------------------------------------
 LOCK_FILE="${STATE_FILE:-/tmp/telemon_sys_alert_state}.lock"
+LOCK_TIMEOUT_SEC=300  # Consider locks older than 5 minutes as stale
 
 acquire_lock() {
     # Try flock first (most reliable)
     if command -v flock &>/dev/null; then
+        # Write our PID and timestamp to lock file for stale detection
+        # Do this before trying flock so other processes can check age
+        echo "$$ $(date +%s)" > "$LOCK_FILE" 2>/dev/null || true
+        
         # Open file descriptor for lock file
         exec 200>"$LOCK_FILE"
         if ! flock -n 200 2>/dev/null; then
+            # Check if the existing lock is stale (holder crashed)
+            local lock_info
+            lock_info=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
+            if [[ -n "$lock_info" ]]; then
+                local old_pid old_epoch current_epoch lock_age
+                old_pid=$(echo "$lock_info" | awk '{print $1}')
+                old_epoch=$(echo "$lock_info" | awk '{print $2}')
+                current_epoch=$(date +%s)
+                # Validate that we have numeric values before calculating
+                if [[ "$old_pid" =~ ^[0-9]+$ && "$old_epoch" =~ ^[0-9]+$ ]]; then
+                    lock_age=$((current_epoch - old_epoch))
+                    if [[ $lock_age -gt $LOCK_TIMEOUT_SEC ]]; then
+                        # Lock is stale - check if process is actually dead
+                        if ! kill -0 "$old_pid" 2>/dev/null; then
+                            echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] Stale lock detected (PID $old_pid not running, age ${lock_age}s) - breaking lock" >&2
+                            flock -u 200 2>/dev/null || true
+                            exec 200>&- 2>/dev/null || true
+                            rm -f "$LOCK_FILE"
+                            # Re-try once
+                            echo "$$ $(date +%s)" > "$LOCK_FILE" 2>/dev/null || true
+                            exec 200>"$LOCK_FILE"
+                            if flock -n 200 2>/dev/null; then
+                                return 0
+                            fi
+                        fi
+                    fi
+                fi
+            fi
             echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] Another instance is running - exiting" >&2
             exit 0
         fi
@@ -84,21 +118,38 @@ acquire_lock() {
     # Fallback: atomic mkdir-based lock (avoids TOCTOU race with PID file)
     local lock_dir="${LOCK_FILE}.d"
     if mkdir "$lock_dir" 2>/dev/null; then
-        # We acquired the lock — write our PID for staleness detection
-        echo "$$" > "${lock_dir}/pid"
+        # We acquired the lock — write our PID and timestamp
+        echo "$$ $(date +%s)" > "${lock_dir}/pid"
         return 0
     fi
-    # Lock dir exists — check if holder is still alive
-    local old_pid
-    old_pid=$(cat "${lock_dir}/pid" 2>/dev/null) || old_pid=""
-    if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
-        echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] Another instance (PID $old_pid) is running - exiting" >&2
-        exit 0
+    # Lock dir exists — check if holder is still alive and lock age
+    local old_pid old_epoch
+    old_pid=$(cat "${lock_dir}/pid" 2>/dev/null | awk '{print $1}') || old_pid=""
+    old_epoch=$(cat "${lock_dir}/pid" 2>/dev/null | awk '{print $2}') || old_epoch=""
+    
+    if [[ -n "$old_pid" && -n "$old_epoch" ]]; then
+        if [[ "$old_pid" =~ ^[0-9]+$ && "$old_epoch" =~ ^[0-9]+$ ]]; then
+            local current_epoch lock_age
+            current_epoch=$(date +%s)
+            lock_age=$((current_epoch - old_epoch))
+            if [[ $lock_age -gt $LOCK_TIMEOUT_SEC ]] && ! kill -0 "$old_pid" 2>/dev/null; then
+                echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] Stale lock detected (PID $old_pid not running, age ${lock_age}s) - breaking lock" >&2
+                rm -rf "$lock_dir"
+                if mkdir "$lock_dir" 2>/dev/null; then
+                    echo "$$ $(date +%s)" > "${lock_dir}/pid"
+                    return 0
+                fi
+            fi
+        fi
+        if kill -0 "$old_pid" 2>/dev/null; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] Another instance (PID $old_pid) is running - exiting" >&2
+            exit 0
+        fi
     fi
     # Stale lock — remove and re-acquire atomically
     rm -rf "$lock_dir"
     if mkdir "$lock_dir" 2>/dev/null; then
-        echo "$$" > "${lock_dir}/pid"
+        echo "$$ $(date +%s)" > "${lock_dir}/pid"
         return 0
     fi
     # Lost the race to another instance that just started

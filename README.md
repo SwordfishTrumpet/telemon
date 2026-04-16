@@ -112,7 +112,7 @@ Telemon sends alerts through up to three channels simultaneously:
 - **Email Safety** — Header injection prevention in email alerts (newlines, carriage returns, tabs, and null bytes stripped)
 
 ### Reliability
-- **Lock File** — Prevents overlapping runs via `flock` (atomic) with PID file fallback
+- **Lock File** — Prevents overlapping runs via `flock` (atomic) with PID file fallback; includes automatic stale lock detection (breaks locks older than 5 minutes if holder process is dead)
 - **Command Timeouts** — All external commands wrapped with configurable timeout (default 30s)
 - **Self-Healing Logs** — Automatic rotation (configurable via `LOG_MAX_SIZE_MB` and `LOG_MAX_BACKUPS`, defaults: 10MB, 5 backups)
 - **State Persistence** — Tracks state across reboots, survives cron/systemd restarts
