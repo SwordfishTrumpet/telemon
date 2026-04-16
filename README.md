@@ -1199,9 +1199,6 @@ bash telemon.sh --digest
 bash telemon.sh --generate-status-page
 bash telemon.sh --generate-status-page /var/www/html/status.html
 
-# Run the test suite (273 tests for all core functions)
-bash tests/run_tests.sh
-
 # Show help
 bash telemon.sh --help
 ```
@@ -1345,8 +1342,6 @@ telemon/
 ├── install.sh              # Setup (cron, permissions, dependencies)
 ├── uninstall.sh            # Clean removal (--full for everything)
 ├── update.sh               # Update with backup and rollback
-├── tests/
-│   └── run_tests.sh        # Test suite (273 tests for core functions)
 ├── .env.example            # Configuration template (all options documented)
 ├── .env                    # Your config (gitignored, chmod 600)
 ├── telemon-logrotate.conf  # Logrotate configuration
