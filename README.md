@@ -588,7 +588,7 @@ fi
 
 ### Database Health Checks
 
-Monitor MySQL/MariaDB, PostgreSQL, and Redis connectivity and replication lag:
+Monitor MySQL/MariaDB, PostgreSQL, Redis, and SQLite3 connectivity and health:
 
 ```bash
 # Enable database checks
@@ -613,17 +613,23 @@ DB_REDIS_HOST="localhost"
 DB_REDIS_PORT="6379"
 DB_REDIS_PASS=""                  # Leave empty if no password
 DB_REDIS_TIMEOUT_SEC=5            # Shorter timeout for Redis (usually fast)
+
+# SQLite3
+DB_SQLITE_PATHS="/var/lib/app/data.db /opt/plex/db.sqlite"
+DB_SQLITE_SIZE_THRESHOLD_WARN=500   # MB (0 = disabled)
+DB_SQLITE_SIZE_THRESHOLD_CRIT=1000  # MB (0 = disabled)
 ```
 
 **Requirements:**
 - MySQL: `mysql` or `mariadb` client package
 - PostgreSQL: `psql` client package
 - Redis: `redis-cli` client package
+- SQLite3: `sqlite3` client package
 
 **Alerts:**
-- **CRITICAL**: Connection failure, authentication error, or replication lag > 5 minutes
-- **WARNING**: Replication lag > 1 minute (for MySQL/PostgreSQL replica)
-- **State Keys**: `mysql_<host>`, `postgres_<host>`, `redis_<host>_<port>`
+- **CRITICAL**: Connection failure, authentication error, replication lag > 5 minutes, or database corruption (SQLite3)
+- **WARNING**: Replication lag > 1 minute (for MySQL/PostgreSQL replica) or size threshold exceeded (SQLite3)
+- **State Keys**: `mysql_<host>`, `postgres_<host>`, `redis_<host>_<port>`, `sqlite_<hash>`
 
 ### DNS Record Monitoring
 
@@ -1193,6 +1199,9 @@ bash telemon.sh --digest
 bash telemon.sh --generate-status-page
 bash telemon.sh --generate-status-page /var/www/html/status.html
 
+# Run the test suite (273 tests for all core functions)
+bash tests/run_tests.sh
+
 # Show help
 bash telemon.sh --help
 ```
@@ -1302,6 +1311,7 @@ The Docker setup mounts host `/proc` for system metrics and optionally the Docke
 | mysql / mariadb | MySQL/MariaDB health checks |
 | psql | PostgreSQL health checks |
 | redis-cli | Redis health checks |
+| sqlite3 | SQLite3 database checks |
 | sha256sum | File integrity monitoring |
 | sendmail / msmtp | Email alerts |
 | flock (util-linux) | Atomic file locking (falls back to PID file) |
@@ -1326,7 +1336,7 @@ Telemon reads from Linux-specific interfaces: `/proc/loadavg`, `/proc/meminfo`, 
 
 ```
 telemon/
-├── telemon.sh              # Main monitoring script (~3500 lines)
+├── telemon.sh              # Main monitoring script (~5700 lines)
 ├── telemon-admin.sh        # Admin CLI (backup, restore, status, validate, logs)
 ├── checks.d/               # Plugin directory (optional custom checks)
 │   └── example-plugin.sh   # Example plugin showing output format
@@ -1335,6 +1345,8 @@ telemon/
 ├── install.sh              # Setup (cron, permissions, dependencies)
 ├── uninstall.sh            # Clean removal (--full for everything)
 ├── update.sh               # Update with backup and rollback
+├── tests/
+│   └── run_tests.sh        # Test suite (273 tests for core functions)
 ├── .env.example            # Configuration template (all options documented)
 ├── .env                    # Your config (gitignored, chmod 600)
 ├── telemon-logrotate.conf  # Logrotate configuration
