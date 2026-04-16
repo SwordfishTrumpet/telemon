@@ -932,6 +932,93 @@ test_check_state_change() {
 }
 
 # ---------------------------------------------------------------------------
+# Test validation helper functions
+# ---------------------------------------------------------------------------
+
+test_require_file() {
+    echo ""
+    echo "Testing require_file helper..."
+    
+    # Create a temp file for testing
+    local tmpfile
+    tmpfile=$(mktemp)
+    echo "test content" > "$tmpfile"
+    
+    # Test with existing file
+    require_file "$tmpfile" "test file"
+    assert_true "require_file accepts existing readable file"
+    
+    # Test with nonexistent file (should return 1)
+    ! require_file "/nonexistent/file/12345" "missing file" 2>/dev/null
+    assert_true "require_file rejects nonexistent file"
+    
+    # Test with unsafe path
+    ! require_file "/etc/../etc/passwd" "unsafe file" 2>/dev/null
+    assert_true "require_file rejects unsafe path with .."
+    
+    # Cleanup
+    rm -f "$tmpfile"
+}
+
+test_require_command() {
+    echo ""
+    echo "Testing require_command helper..."
+    
+    # Test with existing command (bash should always exist)
+    require_command "bash"
+    assert_true "require_command accepts existing command"
+    
+    # Test with nonexistent command
+    ! require_command "nonexistent_command_xyz" 2>/dev/null
+    assert_true "require_command rejects nonexistent command"
+}
+
+test_validate_numeric() {
+    echo ""
+    echo "Testing validate_numeric helper..."
+    
+    # Test valid number
+    validate_numeric "42" "test value"
+    assert_true "validate_numeric accepts valid positive integer"
+    
+    # Test zero
+    validate_numeric "0" "test value"
+    assert_true "validate_numeric accepts zero"
+    
+    # Test with min constraint
+    validate_numeric "10" "test value" 5
+    assert_true "validate_numeric accepts value >= min"
+    
+    # Test with min constraint (fail)
+    ! validate_numeric "3" "test value" 5 2>/dev/null
+    assert_true "validate_numeric rejects value < min"
+    
+    # Test with max constraint
+    validate_numeric "5" "test value" "" 10
+    assert_true "validate_numeric accepts value <= max"
+    
+    # Test with max constraint (fail)
+    ! validate_numeric "15" "test value" "" 10 2>/dev/null
+    assert_true "validate_numeric rejects value > max"
+    
+    # Test with min and max
+    validate_numeric "7" "test value" 5 10
+    assert_true "validate_numeric accepts value within range"
+    
+    # Test invalid (non-numeric)
+    ! validate_numeric "abc" "test value" 2>/dev/null
+    assert_true "validate_numeric rejects non-numeric value"
+    
+    # Test negative
+    ! validate_numeric "-5" "test value" 2>/dev/null
+    assert_true "validate_numeric rejects negative number"
+    
+    # Test decimal
+    ! validate_numeric "3.14" "test value" 2>/dev/null
+    assert_true "validate_numeric rejects decimal"
+}
+
+# ---------------------------------------------------------------------------
 # Main test runner
 # ---------------------------------------------------------------------------
 
@@ -961,6 +1048,9 @@ main() {
     test_log
     test_rotate_logs
     test_check_state_change
+    test_require_file
+    test_require_command
+    test_validate_numeric
 
     # Summary
     echo ""

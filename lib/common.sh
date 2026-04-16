@@ -200,6 +200,77 @@ is_internal_ip() {
 }
 
 # ===========================================================================
+# Validation helper functions — reduce boilerplate in check functions
+# ===========================================================================
+
+# Require a file to exist, be readable, and pass safety checks
+# Usage: require_file "$filepath" "description" || return
+# Returns: 0 if file exists and is safe, 1 otherwise (logs warning)
+require_file() {
+    local filepath="$1"
+    local description="${2:-file}"
+    
+    if ! is_safe_path "$filepath"; then
+        log "WARN" "require_file: unsafe path '${filepath}' for ${description} — skipping"
+        return 1
+    fi
+    
+    if [[ ! -f "$filepath" ]]; then
+        log "WARN" "require_file: ${description} '${filepath}' not found — skipping"
+        return 1
+    fi
+    
+    if [[ ! -r "$filepath" ]]; then
+        log "WARN" "require_file: ${description} '${filepath}' not readable — skipping"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Require a command to be available
+# Usage: require_command "docker" || return
+# Returns: 0 if command exists, 1 otherwise (logs warning)
+require_command() {
+    local cmd="$1"
+    local description="${2:-$cmd}"
+    
+    if ! command -v "$cmd" &>/dev/null; then
+        log "DEBUG" "require_command: ${description} not found — skipping"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Validate a numeric value is a positive integer within optional range
+# Usage: validate_numeric "$value" "description" [min] [max]
+# Returns: 0 if valid, 1 otherwise (logs warning)
+validate_numeric() {
+    local value="$1"
+    local description="$2"
+    local min="${3:-}"
+    local max="${4:-}"
+    
+    if ! is_valid_number "$value"; then
+        log "WARN" "validate_numeric: ${description} '${value}' is not a valid positive integer"
+        return 1
+    fi
+    
+    if [[ -n "$min" ]] && [[ "$value" -lt "$min" ]]; then
+        log "WARN" "validate_numeric: ${description} ${value} is below minimum ${min}"
+        return 1
+    fi
+    
+    if [[ -n "$max" ]] && [[ "$value" -gt "$max" ]]; then
+        log "WARN" "validate_numeric: ${description} ${value} exceeds maximum ${max}"
+        return 1
+    fi
+    
+    return 0
+}
+
+# ===========================================================================
 # Validation helper — check if value is a valid positive integer
 # Intentionally rejects floats; all Telemon thresholds are integers by design
 # Usage: is_valid_number "$value" || log "ERROR" "Not a number"

@@ -804,6 +804,64 @@ check_prediction() {
 }
 
 # ===========================================================================
+# Generic threshold checking helper
+# Reduces ~200 lines of duplicated code across check functions
+# Usage: check_threshold <key> <value> <warn> <crit> <inverted> <ok_detail> <warn_detail> <crit_detail>
+#   key: state key for check_state_change
+#   value: current numeric value to check
+#   warn: warning threshold
+#   crit: critical threshold
+#   inverted: "true" for inverted metrics (lower = worse, e.g., memory free %)
+#   ok_detail: detail message when OK
+#   warn_detail: detail message when WARNING (optional, defaults to crit_detail)
+#   crit_detail: detail message when CRITICAL (optional, defaults to warn_detail)
+# Returns: sets global THRESHOLD_STATE and THRESHOLD_DETAIL variables
+# ===========================================================================
+check_threshold() {
+    local key="$1"
+    local value="$2"
+    local warn="$3"
+    local crit="$4"
+    local inverted="${5:-false}"
+    local ok_detail="$6"
+    local warn_detail="${7:-}"
+    local crit_detail="${8:-}"
+    
+    # Default warn_detail and crit_detail if not provided
+    [[ -z "$warn_detail" ]] && warn_detail="$crit_detail"
+    [[ -z "$crit_detail" ]] && crit_detail="$warn_detail"
+    
+    local state="OK"
+    local detail="$ok_detail"
+    
+    if [[ "$inverted" == "true" ]]; then
+        # Inverted metrics: lower value = worse (e.g., available memory %)
+        if (( value <= crit )); then
+            state="CRITICAL"
+            detail="$crit_detail"
+        elif (( value <= warn )); then
+            state="WARNING"
+            detail="$warn_detail"
+        fi
+    else
+        # Standard metrics: higher value = worse (e.g., CPU load %)
+        if (( value >= crit )); then
+            state="CRITICAL"
+            detail="$crit_detail"
+        elif (( value >= warn )); then
+            state="WARNING"
+            detail="$warn_detail"
+        fi
+    fi
+    
+    check_state_change "$key" "$state" "$detail"
+    
+    # Set global variables for caller to check
+    THRESHOLD_STATE="$state"
+    THRESHOLD_DETAIL="$detail"
+}
+
+# ===========================================================================
 check_cpu() {
     [[ -f /proc/loadavg ]] || { log "WARN" "check_cpu: /proc/loadavg not found — skipping"; return; }
     
