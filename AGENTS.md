@@ -128,7 +128,9 @@ dispatch_alert()      → send_telegram() + send_webhook() + send_email()  (no r
 ### Lock File
 - Uses `flock` (util-linux) if available for reliable mutual exclusion
 - Falls back to PID file mechanism on systems without flock
+- **Stale Lock Detection**: Automatically breaks locks older than 5 minutes if the holding process is no longer running
 - Prevents overlapping runs when checks take longer than cron interval
+- Lock file contains `PID timestamp` for stale detection
 
 ### Heartbeat File Format
 - Tab-separated single line: `label\ttimestamp\tstatus\tcheck_count\twarn_count\tcrit_count\tuptime_sec`
@@ -223,6 +225,24 @@ is_internal_ip "$host" && { log "WARN" "Internal IP blocked"; continue; }
 ```
 Returns true for: 127.x.x.x, 10.x.x.x, 172.16-31.x.x, 192.168.x.x, 169.254.x.x, ::1, fc00:, fe80:
 
+**require_file** — Validation helper: check file exists, is readable, and is safe:
+```bash
+require_file "$filepath" "description" || return
+```
+Combines `is_safe_path()` check with existence and readability verification.
+
+**require_command** — Validation helper: check command is available:
+```bash
+require_command "docker" || return
+```
+Returns 0 if command exists, logs DEBUG and returns 1 otherwise.
+
+**validate_numeric** — Validation helper: check value is valid integer in range:
+```bash
+validate_numeric "$value" "description" [min] [max] || return
+```
+Validates positive integers with optional min/max bounds. Rejects floats and negatives.
+
 ## Configuration
 
 All configuration lives in `.env`. Key principles:
@@ -240,6 +260,37 @@ All configuration lives in `.env`. Key principles:
 - `validate_thresholds()` calls `check_threshold_pair()` for all core thresholds at startup
 - Extended check thresholds only validated when their `ENABLE_*` flag is `true`
 - Validation logs errors/warnings but does NOT exit — thresholds have safe defaults
+
+### Generic Threshold Checking Helper
+The `check_threshold()` helper in `telemon.sh` reduces ~200 lines of duplicated code across check functions:
+
+```bash
+# Usage: check_threshold <key> <value> <warn> <crit> <inverted> <ok_detail> [warn_detail] [crit_detail]
+check_threshold "cpu" "$load_pct" \
+    "${CPU_THRESHOLD_WARN:-70}" \
+    "${CPU_THRESHOLD_CRIT:-80}" \
+    "false" \
+    "CPU load ${load_1m} (${load_pct}% of ${cores} cores)" \
+    "CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_WARN}%)" \
+    "CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_CRIT}%)"
+```
+
+**Parameters:**
+- `key` — State tracking key (e.g., "cpu", "swap")
+- `value` — Current numeric value to check
+- `warn` — Warning threshold
+- `crit` — Critical threshold
+- `inverted` — "true" if lower value = worse (e.g., memory free %)
+- `ok_detail` — Detail message when OK
+- `warn_detail` — Detail message when WARNING (optional, defaults to crit_detail)
+- `crit_detail` — Detail message when CRITICAL (optional, defaults to warn_detail)
+
+**Features:**
+- Validates all numeric inputs (defaults to safe values if invalid)
+- Automatically handles state determination (OK/WARNING/CRITICAL)
+- Calls `check_state_change()` with appropriate details
+- Sets global `THRESHOLD_STATE` and `THRESHOLD_DETAIL` for post-check actions
+- Supports both standard (higher=worse) and inverted (lower=worse) metrics
 
 ## Enabled Checks (all toggleable)
 
@@ -270,6 +321,9 @@ All configuration lives in `.env`. Key principles:
 | Cron Jobs | `check_cron_jobs` | `ENABLE_CRON_CHECK` | stat |
 | Fleet Heartbeats | `check_fleet_heartbeats` | `ENABLE_FLEET_CHECK` | heartbeat files |
 | Predictive Exhaustion | `check_prediction` | `ENABLE_PREDICTIVE_ALERTS` | awk (built-in) |
+| SQLite3 | `check_databases`¹ | `ENABLE_DATABASE_CHECKS` + `DB_SQLITE_PATHS` | sqlite3 |
+
+¹ Part of `check_databases()` function alongside MySQL, PostgreSQL, Redis checks.
 
 ## Alert Features
 
@@ -302,7 +356,31 @@ bash telemon.sh --test        # Validate + send test Telegram message
 bash telemon.sh --digest      # Send health digest summary
 bash telemon.sh --help        # Show usage and available flags
 bash -n telemon.sh            # Syntax check (no execution)
+bash tests/run_tests.sh       # Run full test suite
 ```
+
+### Test Coverage
+
+The test suite (`tests/run_tests.sh`) covers:
+
+| Category | Functions | Count |
+|----------|-----------|-------|
+| **Portable Helpers** | `portable_stat`, `portable_sha256` | 9 tests |
+| **Security Validators** | `is_valid_service_name`, `is_valid_hostname`, `is_safe_path`, `is_valid_email`, `is_internal_ip` | 39 tests |
+| **State Management** | `get_state_file_variants`, `sanitize_state_key`, `safe_write_state_file` | 10 tests |
+| **Utilities** | `html_escape`, `parse_date_to_epoch`, `run_with_timeout` | 10 tests |
+| **Core Logic** | `is_valid_number`, `linear_regression`, `check_state_change` | 13 tests |
+| **Logging** | `log`, `rotate_logs` | 9 tests |
+| **Validation Helpers** | `require_file`, `require_command`, `validate_numeric` | 12 tests |
+| **Threshold Helper** | `check_threshold` | 8 tests |
+| **Plugin System** | `check_plugins` | 8 tests |
+| **Database Checks** | `check_databases` (MySQL, PostgreSQL, Redis, SQLite3) | 23 tests |
+| **Security** | Database password handling | 7 tests |
+| **Predictive** | `record_trend`, `linear_regression`, `check_prediction` | 9 tests |
+| **Fleet** | Heartbeat file format, stale detection | 12 tests |
+| **Maintenance** | `is_in_maintenance_window` schedule parsing | 7 tests |
+| **Auto-Remediation** | Service validation, state detection | 14 tests |
+| **Total** | | **273 tests** |
 
 ## File Conventions
 - Script: `set -euo pipefail`, `umask 077`

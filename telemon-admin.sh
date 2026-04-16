@@ -669,6 +669,264 @@ cmd_fleet_status() {
 }
 
 # ---------------------------------------------------------------------------
+# Discover command — Auto-discovery of services and containers
+# ---------------------------------------------------------------------------
+cmd_discover() {
+    echo "Telemon Auto-Discovery"
+    echo "======================"
+    echo ""
+    echo "Scanning for services and generating suggested .env configuration..."
+    echo ""
+    
+    local suggestions=""
+    local has_docker=false
+    local has_pm2=false
+    local has_nginx=false
+    local has_apache=false
+    local has_mysql=false
+    local has_postgres=false
+    local has_redis=false
+    local has_sqlite=false
+    local has_systemd_services=false
+    local has_plex=false
+    
+    # Check for Docker containers
+    if command -v docker &>/dev/null; then
+        local containers
+        containers=$(docker ps --format '{{.Names}}' 2>/dev/null | sort)
+        if [[ -n "$containers" ]]; then
+            has_docker=true
+            suggestions+="# Docker containers detected"
+            suggestions+=$'\n'
+            suggestions+="ENABLE_DOCKER_CONTAINERS=true"
+            suggestions+=$'\n'
+            suggestions+="CRITICAL_CONTAINERS=\"${containers//$'\n'/ }\""
+            suggestions+=$'\n\n'
+            echo -e "${GREEN}✓${NC} Docker containers found:"
+            echo "$containers" | sed 's/^/  - /'
+            echo ""
+        fi
+    fi
+    
+    # Check for PM2 processes
+    if command -v pm2 &>/dev/null; then
+        local pm2_procs
+        pm2_procs=$(pm2 jlist 2>/dev/null | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    names = [p.get('name', '') for p in data if p.get('name')]
+    print(' '.join(names))
+except Exception:
+    pass
+" 2>/dev/null)
+        if [[ -n "$pm2_procs" ]]; then
+            has_pm2=true
+            suggestions+="# PM2 processes detected"
+            suggestions+=$'\n'
+            suggestions+="ENABLE_PM2_PROCESSES=true"
+            suggestions+=$'\n'
+            suggestions+="CRITICAL_PM2_PROCESSES=\"${pm2_procs}\""
+            suggestions+=$'\n\n'
+            echo -e "${GREEN}✓${NC} PM2 processes found:"
+            for proc in $pm2_procs; do
+                echo "  - $proc"
+            done
+            echo ""
+        fi
+    fi
+    
+    # Check for listening ports
+    if command -v ss &>/dev/null; then
+        local listening_ports
+        listening_ports=$(ss -tlnp 2>/dev/null | awk 'NR>1 && /LISTEN/ {
+            port = $4
+            gsub(/.*:/, "", port)
+            proc = $0
+            gsub(/.*users:/, "", proc)
+            gsub(/\\)/, "", proc)
+            if (proc != $0) print port, proc
+        }' | sort -u -k1,1n | head -20)
+        if [[ -n "$listening_ports" ]]; then
+            suggestions+="# TCP ports detected (manual review recommended)"
+            suggestions+=$'\n'
+            suggestions+="# Sample ports from ss -tlnp:"
+            suggestions+=$'\n'
+            suggestions+="# (Uncomment and customize as needed)"
+            suggestions+=$'\n'
+            suggestions+="# ENABLE_TCP_PORT_CHECK=true"
+            suggestions+=$'\n'
+            suggestions+="# CRITICAL_PORTS=\"localhost:22 localhost:80\""
+            suggestions+=$'\n\n'
+            echo -e "${GREEN}✓${NC} Listening ports detected:"
+            echo "  Port | Process"
+            echo "$listening_ports" | while read -r port proc; do
+                printf "  %-5s | %s\n" "$port" "$proc"
+            done
+            echo ""
+        fi
+    fi
+    
+    # Check for web servers
+    if command -v nginx &>/dev/null || systemctl is-active nginx &>/dev/null 2>&1; then
+        has_nginx=true
+        echo -e "${GREEN}✓${NC} Nginx detected"
+    fi
+    if command -v apache2 &>/dev/null || systemctl is-active apache2 &>/dev/null 2>&1 || systemctl is-active httpd &>/dev/null 2>&1; then
+        has_apache=true
+        echo -e "${GREEN}✓${NC} Apache detected"
+    fi
+    
+    if [[ "$has_nginx" == "true" || "$has_apache" == "true" ]]; then
+        if [[ "$has_nginx" == "true" ]]; then
+            echo -e "${GREEN}✓${NC} Nginx detected"
+        fi
+        if [[ "$has_apache" == "true" ]]; then
+            echo -e "${GREEN}✓${NC} Apache detected"
+        fi
+    fi
+    
+    # Check for databases
+    if command -v mysql &>/dev/null || command -v mariadb &>/dev/null; then
+        has_mysql=true
+        echo -e "${GREEN}✓${NC} MySQL/MariaDB client detected"
+        suggestions+="# MySQL client detected - configure if MySQL runs locally"
+        suggestions+=$'\n'
+        suggestions+="# DB_MYSQL_HOST=\"localhost\""
+        suggestions+=$'\n'
+        suggestions+="# DB_MYSQL_PORT=\"3306\""
+        suggestions+=$'\n'
+        suggestions+="# DB_MYSQL_USER=\"telemon\""
+        suggestions+=$'\n'
+        suggestions+="# DB_MYSQL_PASS=\"\""
+        suggestions+=$'\n\n'
+    fi
+    
+    if command -v psql &>/dev/null; then
+        has_postgres=true
+        echo -e "${GREEN}✓${NC} PostgreSQL client (psql) detected"
+        suggestions+="# PostgreSQL client detected - configure if PostgreSQL runs locally"
+        suggestions+=$'\n'
+        suggestions+="# DB_POSTGRES_HOST=\"localhost\""
+        suggestions+=$'\n'
+        suggestions+="# DB_POSTGRES_PORT=\"5432\""
+        suggestions+=$'\n'
+        suggestions+="# DB_POSTGRES_USER=\"telemon\""
+        suggestions+=$'\n'
+        suggestions+="# DB_POSTGRES_PASS=\"\""
+        suggestions+=$'\n\n'
+    fi
+    
+    if command -v redis-cli &>/dev/null; then
+        has_redis=true
+        echo -e "${GREEN}✓${NC} Redis client (redis-cli) detected"
+        suggestions+="# Redis client detected - configure if Redis runs locally"
+        suggestions+=$'\n'
+        suggestions+="# DB_REDIS_HOST=\"localhost\""
+        suggestions+=$'\n'
+        suggestions+="# DB_REDIS_PORT=\"6379\""
+        suggestions+=$'\n'
+        suggestions+="# DB_REDIS_PASS=\"\""
+        suggestions+=$'\n\n'
+    fi
+
+    # Check for SQLite3 (commonly used by Plex and other applications)
+    # Check for SQLite3 (just note availability, don't search filesystem)
+    local has_sqlite=false
+    if command -v sqlite3 &>/dev/null; then
+        has_sqlite=true
+        echo -e "${GREEN}✓${NC} SQLite3 available"
+        suggestions+="# SQLite3 detected — uncomment to monitor databases"
+        suggestions+=$'\n'
+        suggestions+="# ENABLE_DATABASE_CHECKS=true"
+        suggestions+=$'\n'
+        suggestions+="# DB_SQLITE_PATHS=\"/path/to/database.db\""
+        suggestions+=$'\n'
+        suggestions+="# DB_SQLITE_SIZE_THRESHOLD_WARN=500"
+        suggestions+=$'\n'
+        suggestions+="# DB_SQLITE_SIZE_THRESHOLD_CRIT=1000"
+        suggestions+=$'\n\n'
+    fi
+    
+    if [[ "$has_mysql" == "true" || "$has_postgres" == "true" || "$has_redis" == "true" || "$has_sqlite" == "true" ]]; then
+        suggestions+="# Enable database checks"
+        suggestions+=$'\n'
+        suggestions+="ENABLE_DATABASE_CHECKS=true"
+        suggestions+=$'\n\n'
+    fi
+
+    # Suggest site monitoring for local services (web servers, containers with web ports)
+    local has_local_web=false
+    if [[ "$has_nginx" == "true" || "$has_apache" == "true" ]]; then
+        has_local_web=true
+    fi
+    # Check for common container web ports
+    if [[ -n "$containers" ]]; then
+        local web_ports
+        web_ports=$(ss -tlnp 2>/dev/null | grep -E ':(80|8080|32400|3000|5000|8000|9000)' || true)
+        if [[ -n "$web_ports" ]]; then
+            has_local_web=true
+        fi
+    fi
+    
+    if [[ "$has_local_web" == "true" ]]; then
+        suggestions+="# Local web services detected"
+        suggestions+=$'\n'
+        suggestions+="# For localhost monitoring, set: SITE_ALLOW_INTERNAL=true"
+        suggestions+=$'\n'
+        suggestions+="ENABLE_SITE_MONITOR=true"
+        suggestions+=$'\n'
+        suggestions+="# CRITICAL_SITES=\"http://localhost:8080|max_response_ms=5000\""
+        suggestions+=$'\n\n'
+    fi
+    
+    # Check for systemd services
+    if command -v systemctl &>/dev/null; then
+        local active_services
+        active_services=$(systemctl list-units --type=service --state=running --no-legend --plain 2>/dev/null | awk '{print $1}' | grep -E '^(ssh|cron|nginx|apache|mysql|postgres|redis)' || true)
+        if [[ -n "$active_services" ]]; then
+            has_systemd_services=true
+            suggestions+="# Systemd services detected"
+            suggestions+=$'\n'
+            suggestions+="ENABLE_FAILED_SYSTEMD_SERVICES=true"
+            suggestions+=$'\n'
+            suggestions+="CRITICAL_SYSTEM_PROCESSES=\"sshd cron\""
+            suggestions+=$'\n\n'
+            echo -e "${GREEN}✓${NC} Active systemd services:"
+            echo "$active_services" | sed 's/^/  - /'
+            echo ""
+        fi
+    fi
+    
+    # Output suggestions
+    echo ""
+    echo "==============================================="
+    echo "Suggested Configuration"
+    echo "==============================================="
+    echo ""
+    echo "Add the following to your .env file:"
+    echo ""
+    echo "# ============================================="
+    echo "# Auto-discovered settings (review before use)"
+    echo "# ============================================="
+    echo ""
+    if [[ -n "$suggestions" ]]; then
+        echo "$suggestions"
+    else
+        echo "# No services auto-detected."
+        echo "# Consider manually configuring checks for your environment."
+    fi
+    echo ""
+    echo "==============================================="
+    echo ""
+    echo "Usage:"
+    echo "  1. Copy the suggested lines above to your .env file"
+    echo "  2. Review and adjust values as needed"
+    echo "  3. Run: bash telemon.sh --validate"
+    echo "  4. Run: bash telemon.sh --test"
+}
+
+# ---------------------------------------------------------------------------
 # Digest command (proxy to telemon.sh --digest)
 # ---------------------------------------------------------------------------
 cmd_digest() {
@@ -709,11 +967,13 @@ Commands:
   validate          Validate configuration files
   
   digest            Send a health digest summary
-  
+   
   logs [lines]      View recent logs (default: 50 lines)
-  
+   
   fleet-status      Show fleet heartbeat overview table
-  
+   
+  discover          Auto-discover services and suggest .env configuration
+   
   help              Show this help message
 
 Examples:
@@ -726,6 +986,7 @@ Examples:
   bash telemon-admin.sh digest
   bash telemon-admin.sh logs 100
   bash telemon-admin.sh fleet-status
+  bash telemon-admin.sh discover
 
 EOF
 }
@@ -763,6 +1024,9 @@ main() {
             ;;
         fleet-status)
             cmd_fleet_status
+            ;;
+        discover)
+            cmd_discover
             ;;
         help|--help|-h)
             cmd_help

@@ -2674,9 +2674,10 @@ check_network_bandwidth() {
     fi
 
     # Convert to Mbit/s (rate is in bytes/sec, * 8 / 1000000)
+    # Use higher precision awk to avoid integer division artifacts
     local rx_mbps tx_mbps
-    rx_mbps=$(awk -v rate="$rx_rate" 'BEGIN {printf "%.1f", rate * 8 / 1000000}')
-    tx_mbps=$(awk -v rate="$tx_rate" 'BEGIN {printf "%.1f", rate * 8 / 1000000}')
+    rx_mbps=$(awk -v rb="$rx_bytes" -v prb="$prev_rx" -v intv="$interval" 'BEGIN {printf "%.2f", ((rb - prb) / intv) * 8 / 1000000}')
+    tx_mbps=$(awk -v tb="$tx_bytes" -v ptb="$prev_tx" -v intv="$interval" 'BEGIN {printf "%.2f", ((tb - ptb) / intv) * 8 / 1000000}')
 
     local warn="${NETWORK_THRESHOLD_WARN:-800}"    # Mbit/s
     local crit="${NETWORK_THRESHOLD_CRIT:-950}"    # Mbit/s

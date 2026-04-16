@@ -8,6 +8,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- **Database Password Security** — fixed credential exposure in process listings:
+  - MySQL/MariaDB: Password now passed via `MYSQL_PWD` environment variable instead of `--password` flag
+  - PostgreSQL: Password now passed via `PGPASSWORD` environment variable instead of connection string
+  - Redis: Password now passed via `REDISCLI_AUTH` environment variable instead of `-a` flag
+  - Prevents password exposure via `ps aux` during brief command execution windows
+
+### Fixed
+- **PING_TARGET Validation** — added strict input validation to prevent command injection via ping target
+- **check_threshold() Numeric Validation** — added input validation to reject non-numeric values and provide safe defaults
+- **Documentation** — corrected `check_threshold()` documentation in AGENTS.md with complete parameter reference
+
+### Changed
+- **DRY Refactoring** — migrated remaining check functions to use `check_threshold()` helper:
+  - `check_cpu()` — now uses `check_threshold()` with `THRESHOLD_STATE` for top process capture
+  - `check_swap()` — migrated from manual threshold logic to `check_threshold()`
+  - `check_zombies()` — migrated from manual threshold logic to `check_threshold()`
+  - `check_iowait()` — migrated from manual threshold logic to `check_threshold()`
+  - Eliminated ~60 lines of duplicated threshold checking code
+- **Test Coverage** — expanded test suite from 207 to 219 tests:
+  - Added `test_check_threshold_helper()` — 8 tests for threshold helper validation
+  - Added `test_security_database_passwords()` — 4 tests for credential security
+
+### Security
 - **Security Audit 2026-04-16**: Comprehensive white-box security review completed
   - VULN-001: Command injection protection in `auto_remediate()` via `is_valid_service_name()`
   - VULN-002: Path traversal protection in drift/integrity checks via `is_safe_path()`
