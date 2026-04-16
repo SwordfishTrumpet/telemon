@@ -44,6 +44,12 @@ Telemon watches your Linux server — CPU, memory, disk, containers, services, p
 - **Configuration Drift Detection** — Rich change tracking with unified diffs, metadata changes (size, permissions, owner), and user attribution. Filters comment-only changes, redacts sensitive files.
 - **Cron Job Heartbeats** — Detect stale cron jobs via heartbeat file age tracking
 
+### DNS Record Monitoring
+- **Record Type Validation** — Verify A, AAAA, MX, TXT, CNAME, NS, SOA, PTR, SRV, CAA records
+- **Value Matching** — Compare resolved values against expected values (supports wildcards)
+- **Multiple Nameservers** — Optionally use specific DNS server for queries
+- **Security Focused** — Validates domains, checks DMARC/SPF records for email security
+
 ### Predictive Resource Exhaustion
 - **Trend Tracking** — Records metric snapshots across runs in a compact trend file
 - **Linear Regression** — Calculates growth rate from historical datapoints using least-squares regression (pure awk)
@@ -62,6 +68,18 @@ Telemon watches your Linux server — CPU, memory, disk, containers, services, p
 
 ### Hardware Monitoring
 - **NVMe / SMART Health** — Critical warning byte, endurance wear (warn 80%, crit 95%), temperature, and media errors via `smartctl`
+
+### Plugin System
+- **Directory-Based Plugins** — Place executable scripts in `checks.d/` to extend Telemon without modifying core code
+- **Simple Output Format** — Plugins output `STATE|KEY|DETAIL` for automatic integration
+- **Security-First** — Plugins run with timeout, symlinks skipped, output validated before processing
+- **Zero Dependencies** — Pure Bash plugins work; any language that outputs text works
+
+### Database Health Checks
+- **MySQL/MariaDB** — Connection check and replication lag monitoring
+- **PostgreSQL** — Connection check and streaming replication lag monitoring  
+- **Redis** — Connection check, authentication validation, master/replica status
+- **Configurable Timeouts** — Per-database timeout settings to prevent hanging
 
 ### Alert Channels
 
@@ -88,6 +106,7 @@ Telemon sends alerts through up to three channels simultaneously:
 - **Retry Queue** — Failed Telegram alerts are queued to disk and retried next cycle
 - **Top Process Capture** — Includes top N CPU/memory consuming processes in alerts when under stress
 - **Alert Escalation** — Separate webhook for alerts that remain unresolved after N minutes
+- **Enhanced Audit Logging** — Structured JSON audit logs for compliance and security analysis (state changes, alerts, escalations)
 
 ### Auto-Remediation
 - **Automatic Service Restart** — `AUTO_RESTART_SERVICES` lists systemd services to auto-restart on detected failure
@@ -100,6 +119,7 @@ Telemon sends alerts through up to three channels simultaneously:
 ### Exports & Integrations
 - **Prometheus** — Writes metrics to textfile for `node_exporter --collector.textfile` — no HTTP server needed. See [Prometheus Metrics](#prometheus-metrics).
 - **JSON Status** — Writes current state to JSON file after each run; serve with nginx/caddy for a status API. See [JSON Status Format](#json-status-format).
+- **Static Status Page** — Generates a self-contained HTML dashboard with `telemon.sh --generate-status-page`. No web server required — can be served via nginx/caddy or uploaded to static hosting. See [Static HTML Status Page](#static-html-status-page).
 - **Health Digest** — `telemon.sh --digest` sends a full health summary even when everything is OK (schedule daily/weekly via cron)
 
 ### Security
@@ -140,6 +160,7 @@ Telemon sends alerts through up to three channels simultaneously:
 | TCP Ports | `check_tcp_ports` | `ENABLE_TCP_PORT_CHECK` | `false` | `/dev/tcp` | `port_<hash>` | Binary: reachable or not |
 | CPU Temp | `check_cpu_temp` | `ENABLE_TEMP_CHECK` | `false` | `sensors` | `cpu_temp` | `TEMP_THRESHOLD_WARN=75`, `_CRIT=90` (°C) |
 | DNS | `check_dns` | `ENABLE_DNS_CHECK` | `false` | `dig`/`nslookup`/`host` | `dns` | Binary: resolves or not |
+| DNS Records | `check_dns_records` | `ENABLE_DNS_RECORD_CHECK` | `false` | `dig` | `dnsrecord_<domain>_<type>` | Binary: matches expected value |
 | GPU | `check_gpu` | `ENABLE_GPU_CHECK` | `false` | `nvidia-smi` or `intel_gpu_top` | `gpu_<idx>` / `gpu_intel` | NVIDIA: `GPU_TEMP_THRESHOLD_WARN=80` (°C). Intel: `GPU_INTEL_UTIL_THRESHOLD_WARN=80` (%), `GPU_INTEL_TEMP_THRESHOLD_WARN=80` (°C) |
 | UPS/Battery | `check_ups` | `ENABLE_UPS_CHECK` | `false` | `upower`/`apcaccess` | `ups` | `UPS_THRESHOLD_WARN=30`, `_CRIT=10` (%, inverted) |
 | Network BW | `check_network_bandwidth` | `ENABLE_NETWORK_CHECK` | `false` | `/proc/net/dev` | `net_<iface>` | `NETWORK_THRESHOLD_WARN=800`, `_CRIT=950` (Mbit/s) |
@@ -149,6 +170,8 @@ Telemon sends alerts through up to three channels simultaneously:
 | Cron Jobs | `check_cron_jobs` | `ENABLE_CRON_CHECK` | `false` | `stat` | `cron_<name>` | `max_age_minutes` per job |
 | Fleet | `check_fleet_heartbeats` | `ENABLE_FLEET_CHECK` | `false` | heartbeat files | `fleet_<label>` | `FLEET_STALE_THRESHOLD_MIN=15` |
 | Predictive | `check_prediction` | `ENABLE_PREDICTIVE_ALERTS` | `false` | awk | `predict_*` | `PREDICT_HORIZON_HOURS=24` (hours to exhaustion) |
+| Plugins | `check_plugins` | `ENABLE_PLUGINS` | `false` | executable scripts in `checks.d/` | `<plugin_key>` | Binary: OK/WARNING/CRITICAL |
+| Database | `check_databases` | `ENABLE_DATABASE_CHECKS` | `false` | `mysql`/`psql`/`redis-cli`/`sqlite3` | `mysql_<host>`, `postgres_<host>`, `redis_<host>_<port>`, `sqlite_<hash>` | Binary: connected or not |
 
 </details>
 
@@ -156,9 +179,39 @@ Telemon sends alerts through up to three channels simultaneously:
 - **Cron** — Default: every 5 minutes via crontab
 - **Systemd Timer** — Alternative scheduler with journal integration
 - **Docker** — Alpine-based container with compose support and host `/proc` mounting
-- **One-Command Install** — `bash install.sh` handles dependencies, permissions, cron, logrotate, and test message
+- **One-Line Install** — `curl | bash` installer downloads, configures, and sets up Telemon in one step
+- **Local Install** — `bash install.sh` handles dependencies, permissions, cron, logrotate, and test message
 
-## Quick Start
+## One-Line Install (Easiest)
+
+Install Telemon with a single command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SwordfishTrumpet/telemon/main/install.sh | bash
+```
+
+Or install to a custom directory:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SwordfishTrumpet/telemon/main/install.sh | bash -s -- /opt/telemon
+```
+
+### What the Installer Does
+
+1. **Downloads** the latest Telemon files from GitHub
+2. **Configures** your Telegram credentials interactively
+3. **Sets up** optional monitoring (Docker, PM2, websites)
+4. **Installs** a cron job (runs every 5 minutes)
+5. **Validates** the configuration and sends a test alert
+
+### Requirements for One-Line Install
+
+- Linux server with `curl`, `bash`, and `awk`
+- Your Telegram bot token and chat ID (the installer will prompt you)
+
+---
+
+## Quick Start (Manual Install)
 
 ### Prerequisites
 
@@ -225,6 +278,7 @@ ENABLE_NVME_CHECK=false
 ENABLE_TCP_PORT_CHECK=false
 ENABLE_TEMP_CHECK=false
 ENABLE_DNS_CHECK=false
+ENABLE_DNS_RECORD_CHECK=false      # Validate specific DNS records
 ENABLE_GPU_CHECK=false
 ENABLE_UPS_CHECK=false
 ENABLE_NETWORK_CHECK=false
@@ -242,6 +296,9 @@ ENABLE_PREDICTIVE_ALERTS=false
 # Exports (default: false)
 ENABLE_PROMETHEUS_EXPORT=false
 ENABLE_JSON_STATUS=false
+
+# Audit logging (default: false)
+ENABLE_AUDIT_LOGGING=false
 ```
 
 ### Thresholds
@@ -475,6 +532,170 @@ server_label  timestamp  status  check_count  warn_count  crit_count  uptime_sec
 | **Webhook** (Healthchecks.io, UptimeRobot) | External dead-man's-switch; no fleet directory needed |
 
 > **Note:** Webhook mode only pings an external URL — it does not write files. Fleet monitoring (`ENABLE_FLEET_CHECK`) requires file mode on the sender nodes.
+
+### Plugin System
+
+Enable the plugin system to run custom checks from executable scripts in the `checks.d/` directory:
+
+```bash
+# Enable plugin system
+ENABLE_PLUGINS=true
+
+# Optional: custom plugin directory (default: ./checks.d)
+# CHECKS_DIR="/opt/telemon/custom-checks"
+```
+
+**Plugin Output Format:**
+
+Plugins must output a single line in the format: `STATE|KEY|DETAIL`
+
+```
+OK|my_custom_check|Everything is working
+WARNING|my_custom_check|Resource at 85% threshold
+CRITICAL|my_custom_check|Service not responding
+```
+
+| Field | Description | Valid Values |
+|-------|-------------|--------------|
+| `STATE` | Check result | `OK`, `WARNING`, `CRITICAL` |
+| `KEY` | State tracking key | Alphanumeric, underscore, hyphen, dot |
+| `DETAIL` | Human-readable message | Any text (HTML-escaped by Telemon) |
+
+**Example Plugin:**
+
+```bash
+#!/usr/bin/env bash
+# checks.d/custom-disk-check.sh
+
+USAGE=$(df /data 2>/dev/null | awk 'NR==2 {print $5}' | tr -d '%')
+
+if [[ -z "$USAGE" ]]; then
+    echo "CRITICAL|data_disk|Mount /data not found"
+elif [[ "$USAGE" -ge 90 ]]; then
+    echo "CRITICAL|data_disk|Disk /data at ${USAGE}%"
+elif [[ "$USAGE" -ge 80 ]]; then
+    echo "WARNING|data_disk|Disk /data at ${USAGE}%"
+else
+    echo "OK|data_disk|Disk /data at ${USAGE}%"
+fi
+```
+
+**Security Notes:**
+- Plugins run with the same permissions as telemon.sh
+- Plugins are subject to `CHECK_TIMEOUT` (default: 30s)
+- Symlinks in `checks.d/` are skipped (security)
+- Invalid output (bad state or key format) is rejected with a warning
+
+### Database Health Checks
+
+Monitor MySQL/MariaDB, PostgreSQL, and Redis connectivity and replication lag:
+
+```bash
+# Enable database checks
+ENABLE_DATABASE_CHECKS=true
+
+# MySQL/MariaDB
+DB_MYSQL_HOST="localhost"
+DB_MYSQL_PORT="3306"
+DB_MYSQL_USER="telemon"
+DB_MYSQL_PASS="secret"
+DB_MYSQL_NAME="mysql"           # Database to connect to
+
+# PostgreSQL
+DB_POSTGRES_HOST="localhost"
+DB_POSTGRES_PORT="5432"
+DB_POSTGRES_USER="telemon"
+DB_POSTGRES_PASS="secret"
+DB_POSTGRES_NAME="postgres"       # Database to connect to
+
+# Redis
+DB_REDIS_HOST="localhost"
+DB_REDIS_PORT="6379"
+DB_REDIS_PASS=""                  # Leave empty if no password
+DB_REDIS_TIMEOUT_SEC=5            # Shorter timeout for Redis (usually fast)
+```
+
+**Requirements:**
+- MySQL: `mysql` or `mariadb` client package
+- PostgreSQL: `psql` client package
+- Redis: `redis-cli` client package
+
+**Alerts:**
+- **CRITICAL**: Connection failure, authentication error, or replication lag > 5 minutes
+- **WARNING**: Replication lag > 1 minute (for MySQL/PostgreSQL replica)
+- **State Keys**: `mysql_<host>`, `postgres_<host>`, `redis_<host>_<port>`
+
+### DNS Record Monitoring
+
+Validate specific DNS records (A, AAAA, MX, TXT, CNAME, NS, SOA, PTR, SRV, CAA) against expected values:
+
+```bash
+# Enable DNS record monitoring
+ENABLE_DNS_RECORD_CHECK=true
+
+# DNS records to validate (comma-separated)
+# Format: domain:record_type:expected_value
+# Use * as wildcard to check only resolution (not specific value)
+# Use * suffix for partial matching (e.g., v=DMARC1*)
+DNS_CHECK_RECORDS="example.com:A:93.184.216.34,_dmarc.example.com:TXT:v=DMARC1*,example.com:MX:*"
+
+# Optional: specify nameserver to use (empty = use system default)
+DNS_CHECK_NAMESERVER=""
+```
+
+**Common Use Cases:**
+- **Email Security**: Monitor DMARC (`_dmarc.example.com:TXT:v=DMARC1*`), SPF, and DKIM records
+- **DNS Validation**: Ensure A/AAAA records match expected IPs
+- **MX Monitoring**: Verify mail servers are correctly configured
+- **CAA Records**: Monitor certificate authority authorization
+
+**Alert Conditions:**
+- **CRITICAL**: Record not found, value mismatch, or resolution failure
+- **OK**: Record exists and matches expected value
+- **State Keys**: `dnsrecord_<domain>_<type>`
+
+**Requirements:** `dig` command (install `bind-utils` or `dnsutils`)
+
+### Enhanced Audit Logging
+
+Structured JSON audit logs for compliance, security analysis, and troubleshooting:
+
+```bash
+# Enable audit logging
+ENABLE_AUDIT_LOGGING=true
+
+# Audit log file path
+AUDIT_LOG_FILE="/var/log/telemon_audit.log"
+
+# Events to log: all, or comma-separated list
+# Options: all, alert, state_change, check_run, escalation
+AUDIT_EVENTS="all"
+```
+
+**JSON Log Format:**
+```json
+{
+  "timestamp": "2026-04-16T12:00:00+0000",
+  "hostname": "web-prod-01",
+  "server_label": "web-prod-01",
+  "event_type": "state_change",
+  "details": "Key: cpu, State: CRITICAL, Previous: OK"
+}
+```
+
+**Logged Events:**
+- **state_change**: When a check transitions between OK/WARNING/CRITICAL
+- **alert**: When an alert is dispatched (or queued for retry)
+- **escalation**: When an unresolved alert triggers escalation
+- **check_run**: When each monitoring cycle completes
+
+**Use Cases:**
+- Compliance audits (PCI-DSS, SOC 2)
+- Security incident investigation
+- Alert history analysis
+- Troubleshooting notification delivery issues
+
+**Log Rotation:** Audit logs are not automatically rotated. Use `logrotate` or similar for production deployments.
 
 ### Paths
 
@@ -815,6 +1036,75 @@ location /status {
 }
 ```
 
+### Static HTML Status Page
+
+Generate a self-contained HTML status page with `--generate-status-page`:
+
+```bash
+# Generate status page to default location (STATUS_PAGE_FILE)
+bash telemon.sh --generate-status-page
+
+# Generate to specific path
+bash telemon.sh --generate-status-page /var/www/html/status.html
+```
+
+**Features:**
+- **Visual dashboard** — Color-coded status indicators (🔴 Critical / 🟡 Warning / 🟢 OK)
+- **Summary cards** — Quick overview of check counts by status
+- **Filterable table** — Click filters to show only Critical, Warning, OK, or all checks
+- **Responsive design** — Works on desktop and mobile
+- **Auto-refresh** — Optional meta-refresh (configure with `STATUS_PAGE_AUTO_REFRESH` and `STATUS_PAGE_REFRESH_SEC`)
+- **Self-contained** — No external dependencies, single HTML file
+
+**Configuration:**
+
+```bash
+# Output file path
+STATUS_PAGE_FILE="/opt/telemon/status.html"
+
+# Enable auto-refresh (browser will reload page every 60 seconds)
+STATUS_PAGE_AUTO_REFRESH=true
+STATUS_PAGE_REFRESH_SEC=60
+```
+
+**nginx example:**
+
+```nginx
+server {
+    listen 80;
+    root /var/www/html;
+    
+    location /status {
+        alias /opt/telemon/status.html;
+    }
+}
+```
+
+**Cron schedule** (generate status page every 5 minutes):
+
+```bash
+*/5 * * * * /opt/telemon/telemon.sh --generate-status-page >> /var/log/telemon_cron.log 2>&1
+```
+
+**GitHub Pages workflow** (auto-publish status):
+
+```yaml
+# .github/workflows/status.yml
+name: Update Status Page
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+jobs:
+  update:
+    runs-on: self-hosted
+    steps:
+      - run: telemon.sh --generate-status-page /docs/status.html
+      - uses: actions/upload-artifact@v3
+        with:
+          name: status
+          path: docs/status.html
+```
+
 ### First-Run Bootstrap
 
 On first run (no state file), Telemon sends a single bootstrap message summarizing all check results with immediate alerts (confirmation temporarily set to 1). Subsequent runs use the configured confirmation count.
@@ -899,6 +1189,10 @@ bash telemon.sh --test
 # Send health digest summary (even if everything is OK)
 bash telemon.sh --digest
 
+# Generate static HTML status page
+bash telemon.sh --generate-status-page
+bash telemon.sh --generate-status-page /var/www/html/status.html
+
 # Show help
 bash telemon.sh --help
 ```
@@ -916,9 +1210,15 @@ bash telemon-admin.sh digest          # Send health digest summary
 bash telemon-admin.sh fleet-status    # Show fleet overview (heartbeat ages, statuses)
 bash telemon-admin.sh logs            # View last 50 log lines
 bash telemon-admin.sh logs 100        # View last 100 log lines
+bash telemon-admin.sh discover        # Auto-discover services and suggest config
 ```
 
-### Update & Uninstall
+### Auto-Discovery
+
+Quickly generate a `.env` configuration based on what's running on your server:
+
+```bash
+bash telemon-admin.sh discover
 
 ```bash
 bash update.sh           # Update to latest version (with backup)
@@ -998,6 +1298,10 @@ The Docker setup mounts host `/proc` for system metrics and optionally the Docke
 | nvidia-smi / intel_gpu_top | GPU monitoring (NVIDIA or Intel) |
 | upower / apcaccess | UPS/battery monitoring |
 | dig / nslookup / host | DNS resolution checks |
+| dig (bind-utils) | DNS record validation |
+| mysql / mariadb | MySQL/MariaDB health checks |
+| psql | PostgreSQL health checks |
+| redis-cli | Redis health checks |
 | sha256sum | File integrity monitoring |
 | sendmail / msmtp | Email alerts |
 | flock (util-linux) | Atomic file locking (falls back to PID file) |
@@ -1024,6 +1328,8 @@ Telemon reads from Linux-specific interfaces: `/proc/loadavg`, `/proc/meminfo`, 
 telemon/
 ├── telemon.sh              # Main monitoring script (~3500 lines)
 ├── telemon-admin.sh        # Admin CLI (backup, restore, status, validate, logs)
+├── checks.d/               # Plugin directory (optional custom checks)
+│   └── example-plugin.sh   # Example plugin showing output format
 ├── lib/
 │   └── common.sh           # Shared helpers for auxiliary scripts
 ├── install.sh              # Setup (cron, permissions, dependencies)
@@ -1070,6 +1376,10 @@ See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for detailed troubleshoot
 | GPU checks failing (Intel) | `intel_gpu_top` requires `CAP_PERFMON` capability or root. Try: `sudo setcap cap_perfmon=ep $(which intel_gpu_top)` |
 | Fleet check not working | Verify `FLEET_HEARTBEAT_DIR` exists and is readable |
 | No heartbeat files | Check `ENABLE_HEARTBEAT=true` and `HEARTBEAT_MODE=file` on sender |
+| Database checks failing | Check client tools installed (mysql/psql/redis-cli) |
+| Plugin not running | Ensure plugin is executable (`chmod +x checks.d/my-plugin.sh`) |
+| Plugin output rejected | Verify format: `OK|my_key|Detail message` |
+| Need quick config | `bash telemon-admin.sh discover` to scan and suggest settings |
 | Need to update | `bash update.sh` |
 
 **Common diagnostics:**

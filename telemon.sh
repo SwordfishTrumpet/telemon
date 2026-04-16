@@ -190,7 +190,73 @@ log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') [${level}] $*" | tee -a "$LOG_FILE"
 }
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# AUDIT LOGGING: Structured JSON audit logs for security and compliance
+# Logs events like state changes, alerts, escalations in JSON format
+# ===========================================================================
+_audit_level_num() {
+    case "$1" in
+        all) echo 0 ;;
+        alert|state_change|check_run|escalation) echo 1 ;;
+        *) echo 0 ;;
+    esac
+}
+
+_should_audit_event() {
+    local event_type="$1"
+    local audit_events="${AUDIT_EVENTS:-all}"
+
+    # Check if this event type should be logged
+    if [[ "$audit_events" == "all" ]]; then
+        return 0
+    fi
+
+    # Check if event type is in the comma-separated list
+    local IFS=',' event
+    for event in $audit_events; do
+        [[ "$(echo "$event" | tr '[:upper:]' '[:lower:]')" == "$(echo "$event_type" | tr '[:upper:]' '[:lower:]')" ]] && return 0
+    done
+
+    return 1
+}
+
+audit_log() {
+    [[ "${ENABLE_AUDIT_LOGGING:-false}" != "true" ]] && return 0
+
+    local event_type="$1"
+    local details="$2"
+
+    # Check if this event type should be logged
+    _should_audit_event "$event_type" || return 0
+
+    local audit_file="${AUDIT_LOG_FILE:-/var/log/telemon_audit.log}"
+    local timestamp
+    timestamp=$(date '+%Y-%m-%dT%H:%M:%S%z')
+    local hostname
+    hostname="$(hostname)"
+    local server_label="${SERVER_LABEL:-$hostname}"
+
+    # Build JSON entry
+    # Escape special characters in details
+    local escaped_details
+    escaped_details=$(echo "$details" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g' | tr '\n' ' ')
+
+    local json_entry
+    json_entry="{\"timestamp\":\"${timestamp}\",\"hostname\":\"${hostname}\",\"server_label\":\"${server_label}\",\"event_type\":\"${event_type}\",\"details\":\"${escaped_details}\"}"
+
+    # Ensure audit log directory exists and has proper permissions
+    local audit_dir
+    audit_dir="$(dirname "$audit_file")"
+    [[ -d "$audit_dir" ]] || mkdir -p "$audit_dir" 2>/dev/null || true
+
+    # Write to audit log (append mode with error handling)
+    if ! echo "$json_entry" >> "$audit_file" 2>/dev/null; then
+        # If we can't write to audit log, log to main log as fallback
+        log "WARN" "Failed to write to audit log: ${audit_file}"
+    fi
+}
+
+# ===========================================================================
 # Log rotation (self-rotation when logrotate not available)
 # Rotates when log exceeds 10MB, keeps 5 backups
 # ---------------------------------------------------------------------------
@@ -574,6 +640,9 @@ check_state_change() {
             ALERTS+="${emoji} <b>${key}</b>: ${detail}%0A%0A"
             ALERT_LAST_SENT["$key"]="$now_epoch"
             log "INFO" "State change confirmed for ${key}: ${prev_state} -> ${new_state} (count: ${PREV_COUNT[$key]})"
+            
+            # Audit log the state change
+            audit_log "state_change" "Key: ${key}, State: ${new_state}, Previous: ${prev_state}"
         fi
     fi
 }
@@ -827,6 +896,20 @@ check_threshold() {
     local warn_detail="${7:-}"
     local crit_detail="${8:-}"
     
+    # Validate numeric inputs
+    if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+        log "WARN" "check_threshold: value '${value}' is not numeric for key '${key}'"
+        value=0
+    fi
+    if ! [[ "$warn" =~ ^[0-9]+$ ]]; then
+        log "WARN" "check_threshold: warn threshold '${warn}' is not numeric for key '${key}'"
+        warn=100
+    fi
+    if ! [[ "$crit" =~ ^[0-9]+$ ]]; then
+        log "WARN" "check_threshold: crit threshold '${crit}' is not numeric for key '${key}'"
+        crit=100
+    fi
+    
     # Default warn_detail and crit_detail if not provided
     [[ -z "$warn_detail" ]] && warn_detail="$crit_detail"
     [[ -z "$crit_detail" ]] && crit_detail="$warn_detail"
@@ -887,21 +970,17 @@ check_cpu() {
         return
     fi
 
-    local state="OK"
-    local detail="CPU load ${load_1m} (${load_pct}% of ${cores} cores)"
-
-    if (( load_pct >= CPU_THRESHOLD_CRIT )); then
-        state="CRITICAL"
-        detail="CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_CRIT}%)"
-    elif (( load_pct >= CPU_THRESHOLD_WARN )); then
-        state="WARNING"
-        detail="CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_WARN}%)"
-    fi
-
-    check_state_change "cpu" "$state" "$detail"
+    # Use check_threshold helper for consistent threshold handling
+    check_threshold "cpu" "$load_pct" \
+        "${CPU_THRESHOLD_WARN:-70}" \
+        "${CPU_THRESHOLD_CRIT:-80}" \
+        "false" \
+        "CPU load ${load_1m} (${load_pct}% of ${cores} cores)" \
+        "CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_WARN}%)" \
+        "CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_CRIT}%)"
     
     # Capture top processes if CPU is under stress
-    if [[ "$state" == "WARNING" || "$state" == "CRITICAL" ]]; then
+    if [[ "${THRESHOLD_STATE:-OK}" == "WARNING" || "${THRESHOLD_STATE:-OK}" == "CRITICAL" ]]; then
         TOP_PROCESSES_INFO=$(get_top_processes "${TOP_PROCESS_COUNT:-5}")
     fi
 }
@@ -938,18 +1017,14 @@ check_memory() {
     local total_mb=$(( total_kb / 1024 ))
     local avail_mb=$(( available_kb / 1024 ))
 
-    local state="OK"
-    local detail="Memory: ${avail_mb}MB available of ${total_mb}MB (${avail_pct}% free)"
-
-    if (( avail_pct <= MEM_THRESHOLD_CRIT )); then
-        state="CRITICAL"
-        detail="Memory: only <b>${avail_mb}MB</b> available of ${total_mb}MB (<b>${avail_pct}%</b> free, threshold: ${MEM_THRESHOLD_CRIT}%)"
-    elif (( avail_pct <= MEM_THRESHOLD_WARN )); then
-        state="WARNING"
-        detail="Memory: only <b>${avail_mb}MB</b> available of ${total_mb}MB (<b>${avail_pct}%</b> free, threshold: ${MEM_THRESHOLD_WARN}%)"
-    fi
-
-    check_state_change "mem" "$state" "$detail"
+    # Use check_threshold helper for consistent threshold handling (inverted metric: lower = worse)
+    check_threshold "mem" "$avail_pct" \
+        "${MEM_THRESHOLD_WARN:-15}" \
+        "${MEM_THRESHOLD_CRIT:-10}" \
+        "true" \
+        "Memory: ${avail_mb}MB available of ${total_mb}MB (${avail_pct}% free)" \
+        "Memory: only <b>${avail_mb}MB</b> available of ${total_mb}MB (<b>${avail_pct}%</b> free, threshold: ${MEM_THRESHOLD_WARN}%)" \
+        "Memory: only <b>${avail_mb}MB</b> available of ${total_mb}MB (<b>${avail_pct}%</b> free, threshold: ${MEM_THRESHOLD_CRIT}%)"
     
     # Predictive: track memory usage trend (usage = 100 - available%)
     local mem_usage_pct=$(( 100 - avail_pct ))
@@ -957,7 +1032,7 @@ check_memory() {
     check_prediction "predict_memory" "Memory" "$mem_usage_pct"
 
     # Capture top processes if memory is under stress
-    if [[ "$state" == "WARNING" || "$state" == "CRITICAL" ]]; then
+    if [[ "${THRESHOLD_STATE:-OK}" == "WARNING" || "${THRESHOLD_STATE:-OK}" == "CRITICAL" ]]; then
         TOP_PROCESSES_INFO=$(get_top_processes "${TOP_PROCESS_COUNT:-5}")
     fi
 }
@@ -1042,6 +1117,16 @@ check_internet() {
         log "WARN" "check_internet: PING_TARGET is empty — skipping"
         return
     fi
+    # SECURITY: Validate target is a valid hostname/IP (prevent command injection)
+    if ! is_valid_hostname "$target"; then
+        log "WARN" "check_internet: PING_TARGET '${target}' contains invalid characters — skipping"
+        return
+    fi
+    # Additional validation: reject shell metacharacters
+    if [[ "$target" == *"$"* || "$target" == *";"* ]]; then
+        log "WARN" "check_internet: PING_TARGET '${target}' contains unsafe characters — skipping"
+        return
+    fi
     if ! [[ "${PING_FAIL_THRESHOLD}" =~ ^[0-9]+$ ]]; then
         log "WARN" "check_internet: PING_FAIL_THRESHOLD '${PING_FAIL_THRESHOLD}' is not numeric — skipping"
         return
@@ -1108,18 +1193,16 @@ check_swap() {
             local swap_total_mb=$(( swap_total / 1024 ))
             local swap_used_mb=$(( swap_used / 1024 ))
             
-            local state="OK"
-            local detail="Swap: ${swap_used_mb}MB used of ${swap_total_mb}MB (${swap_pct}%)"
+            # Use check_threshold helper for consistent threshold handling
+            check_threshold "swap" "$swap_pct" \
+                "${SWAP_THRESHOLD_WARN:-50}" \
+                "${SWAP_THRESHOLD_CRIT:-80}" \
+                "false" \
+                "Swap: ${swap_used_mb}MB used of ${swap_total_mb}MB (${swap_pct}%)" \
+                "Swap: <b>${swap_used_mb}MB</b> used of ${swap_total_mb}MB (<b>${swap_pct}%</b>, threshold: ${SWAP_THRESHOLD_WARN}%)" \
+                "Swap: <b>${swap_used_mb}MB</b> used of ${swap_total_mb}MB (<b>${swap_pct}%</b>, threshold: ${SWAP_THRESHOLD_CRIT}%)"
             
-            if (( swap_pct >= SWAP_THRESHOLD_CRIT )); then
-                state="CRITICAL"
-                detail="Swap: <b>${swap_used_mb}MB</b> used of ${swap_total_mb}MB (<b>${swap_pct}%</b>, threshold: ${SWAP_THRESHOLD_CRIT}%)"
-            elif (( swap_pct >= SWAP_THRESHOLD_WARN )); then
-                state="WARNING"
-                detail="Swap: <b>${swap_used_mb}MB</b> used of ${swap_total_mb}MB (<b>${swap_pct}%</b>, threshold: ${SWAP_THRESHOLD_WARN}%)"
-            fi
-            
-            check_state_change "swap" "$state" "$detail"
+            # Predictive: track swap usage trend (state change already handled by check_threshold)
 
             # Predictive: track swap usage trend
             record_trend "predict_swap" "$swap_pct"
@@ -1193,18 +1276,15 @@ check_iowait() {
         iowait_pct=$(( (diowait * 100) / dtotal ))
     fi
     
-    local state="OK"
-    local detail="I/O Wait: ${iowait_pct}% of CPU time"
-    
-    if (( iowait_pct >= IOWAIT_THRESHOLD_CRIT )); then
-        state="CRITICAL"
-        detail="I/O Wait: <b>${iowait_pct}%</b> of CPU time waiting for disk (threshold: ${IOWAIT_THRESHOLD_CRIT}%)"
-    elif (( iowait_pct >= IOWAIT_THRESHOLD_WARN )); then
-        state="WARNING"
-        detail="I/O Wait: <b>${iowait_pct}%</b> of CPU time waiting for disk (threshold: ${IOWAIT_THRESHOLD_WARN}%)"
-    fi
-    
-    check_state_change "iowait" "$state" "$detail"
+    # Use check_threshold helper for consistent threshold handling
+    check_threshold "iowait" "$iowait_pct" \
+        "${IOWAIT_THRESHOLD_WARN:-30}" \
+        "${IOWAIT_THRESHOLD_CRIT:-50}" \
+        "false" \
+        "I/O Wait: ${iowait_pct}% of CPU time" \
+        "I/O Wait: <b>${iowait_pct}%</b> of CPU time waiting for disk (threshold: ${IOWAIT_THRESHOLD_WARN}%)" \
+        "I/O Wait: <b>${iowait_pct}%</b> of CPU time waiting for disk (threshold: ${IOWAIT_THRESHOLD_CRIT}%)"
+    # check_threshold already calls check_state_change
 }
 
 # ===========================================================================
@@ -1218,18 +1298,15 @@ check_zombies() {
         return
     fi
     
-    local state="OK"
-    local detail="Zombie processes: ${zombie_count}"
-    
-    if (( zombie_count >= ZOMBIE_THRESHOLD_CRIT )); then
-        state="CRITICAL"
-        detail="Zombie processes: <b>${zombie_count}</b> (threshold: ${ZOMBIE_THRESHOLD_CRIT})"
-    elif (( zombie_count >= ZOMBIE_THRESHOLD_WARN )); then
-        state="WARNING"
-        detail="Zombie processes: <b>${zombie_count}</b> (threshold: ${ZOMBIE_THRESHOLD_WARN})"
-    fi
-    
-    check_state_change "zombies" "$state" "$detail"
+    # Use check_threshold helper for consistent threshold handling
+    check_threshold "zombies" "$zombie_count" \
+        "${ZOMBIE_THRESHOLD_WARN:-5}" \
+        "${ZOMBIE_THRESHOLD_CRIT:-20}" \
+        "false" \
+        "Zombie processes: ${zombie_count}" \
+        "Zombie processes: <b>${zombie_count}</b> (threshold: ${ZOMBIE_THRESHOLD_WARN})" \
+        "Zombie processes: <b>${zombie_count}</b> (threshold: ${ZOMBIE_THRESHOLD_CRIT})"
+    # check_threshold already calls check_state_change
 }
 
 # ===========================================================================
@@ -1583,10 +1660,12 @@ check_sites() {
         host_for_validation="${host_for_validation%%/*}"
         host_for_validation="${host_for_validation%%:*}"
         
-        # Skip SSRF check for common public domains (optimization)
-        if is_internal_ip "$host_for_validation"; then
-            log "WARN" "check_sites: internal/reserved IP '${host_for_validation}' blocked in URL '${url}' — skipping (SSRF protection)"
-            continue
+        # Skip SSRF check if explicitly allowed (for monitoring local services like Plex)
+        if [[ "${SITE_ALLOW_INTERNAL:-false}" != "true" ]]; then
+            if is_internal_ip "$host_for_validation"; then
+                log "WARN" "check_sites: internal/reserved IP '${host_for_validation}' blocked in URL '${url}' — skipping (SSRF protection). Set SITE_ALLOW_INTERNAL=true to allow."
+                continue
+            fi
         fi
         
         # Default parameters
@@ -1796,7 +1875,7 @@ check_tcp_ports() {
 
 # ===========================================================================
 # CHECK: CPU Temperature (via lm-sensors)
-# Parses `sensors` output for package/core temps
+# Parses sensors output for package/core temps
 # ===========================================================================
 check_cpu_temp() {
     if ! command -v sensors &>/dev/null; then
@@ -1817,21 +1896,15 @@ check_cpu_temp() {
 
     # Truncate to integer
     local temp_int="${temp%%.*}"
-    local warn="${TEMP_THRESHOLD_WARN:-75}"
-    local crit="${TEMP_THRESHOLD_CRIT:-90}"
 
-    local state="OK"
-    local detail="CPU temperature: ${temp}°C"
-
-    if (( temp_int >= crit )); then
-        state="CRITICAL"
-        detail="CPU temperature: <b>${temp}°C</b> (threshold: ${crit}°C)"
-    elif (( temp_int >= warn )); then
-        state="WARNING"
-        detail="CPU temperature: <b>${temp}°C</b> (threshold: ${warn}°C)"
-    fi
-
-    check_state_change "cpu_temp" "$state" "$detail"
+    # Use check_threshold helper for consistent threshold handling
+    check_threshold "cpu_temp" "$temp_int" \
+        "${TEMP_THRESHOLD_WARN:-75}" \
+        "${TEMP_THRESHOLD_CRIT:-90}" \
+        "false" \
+        "CPU temperature: ${temp}°C" \
+        "CPU temperature: <b>${temp}°C</b> (threshold: ${TEMP_THRESHOLD_WARN}°C)" \
+        "CPU temperature: <b>${temp}°C</b> (threshold: ${TEMP_THRESHOLD_CRIT}°C)"
 }
 
 # ===========================================================================
@@ -2044,6 +2117,157 @@ check_gpu_intel() {
 }
 
 # ===========================================================================
+# CHECK: DNS Record Monitoring - Validate specific DNS records
+# Validates A, AAAA, MX, TXT, CNAME, NS, SOA records against expected values
+# Supports wildcard (*) to check only resolution (not specific value)
+# ===========================================================================
+check_dns_records() {
+    local records="${DNS_CHECK_RECORDS:-}"
+    [[ -z "$records" ]] && return
+
+    # Check for dig command (required for proper record lookups)
+    if ! command -v dig &>/dev/null; then
+        log "DEBUG" "DNS record check: dig not available — skipping"
+        return
+    fi
+
+    local nameserver="${DNS_CHECK_NAMESERVER:-}"
+    local dig_opts="+short +time=3"
+    [[ -n "$nameserver" ]] && dig_opts="@${nameserver} ${dig_opts}"
+
+    # Parse comma-separated records
+    local IFS=',' record_count=0
+    for record in $records; do
+        record_count=$((record_count + 1))
+
+        # Parse record format: domain:record_type:expected_value
+        local domain record_type expected_value
+        domain="${record%%:*}"
+        local rest="${record#*:}"
+        record_type="${rest%%:*}"
+        expected_value="${rest#*:}"
+
+        # Validate inputs
+        if [[ -z "$domain" || -z "$record_type" || -z "$expected_value" ]]; then
+            log "WARN" "DNS record check: invalid record format '${record}' (expected domain:type:value)"
+            continue
+        fi
+
+        # Validate domain format (basic security check)
+        if ! is_valid_hostname "$domain"; then
+            log "WARN" "DNS record check: invalid domain '${domain}'"
+            continue
+        fi
+
+        # Normalize record type to uppercase
+        record_type=$(echo "$record_type" | tr '[:lower:]' '[:upper:]')
+
+        local state="OK"
+        local detail=""
+        local key="dnsrecord_${domain}_${record_type}"
+        key=$(sanitize_state_key "$key")
+
+        # Query DNS based on record type
+        local resolved_values=""
+        local query_result=""
+
+        case "$record_type" in
+            A)
+                query_result=$(run_with_timeout 10 dig ${dig_opts} "$domain" A 2>/dev/null | grep -E '^[0-9.]+$' || true)
+                ;;
+            AAAA)
+                query_result=$(run_with_timeout 10 dig ${dig_opts} "$domain" AAAA 2>/dev/null | grep -E '^[0-9a-fA-F:]+$' || true)
+                ;;
+            MX)
+                query_result=$(run_with_timeout 10 dig ${dig_opts} "$domain" MX 2>/dev/null | grep -E '^[0-9]+\s' || true)
+                # Extract just the MX server names, ignore priorities
+                query_result=$(echo "$query_result" | sed 's/^[0-9]\+\s\+//' || true)
+                ;;
+            TXT)
+                query_result=$(run_with_timeout 10 dig ${dig_opts} "$domain" TXT 2>/dev/null | grep '^"' || true)
+                # Remove quotes for comparison
+                query_result=$(echo "$query_result" | tr -d '"')
+                ;;
+            CNAME)
+                query_result=$(run_with_timeout 10 dig ${dig_opts} "$domain" CNAME 2>/dev/null | grep -E '^[a-zA-Z0-9._-]+\.?$' || true)
+                ;;
+            NS)
+                query_result=$(run_with_timeout 10 dig ${dig_opts} "$domain" NS 2>/dev/null | grep -E '^[a-zA-Z0-9._-]+\.?$' || true)
+                ;;
+            SOA)
+                query_result=$(run_with_timeout 10 dig ${dig_opts} "$domain" SOA 2>/dev/null | grep -E '^[a-zA-Z0-9._-]+\.' || true)
+                ;;
+            PTR)
+                query_result=$(run_with_timeout 10 dig ${dig_opts} -x "$domain" 2>/dev/null | grep -E '^[a-zA-Z0-9._-]+\.?$' || true)
+                ;;
+            SRV)
+                query_result=$(run_with_timeout 10 dig ${dig_opts} "$domain" SRV 2>/dev/null | grep -E '^[0-9]+\s' || true)
+                ;;
+            CAA)
+                query_result=$(run_with_timeout 10 dig ${dig_opts} "$domain" CAA 2>/dev/null | grep -E '^[0-9]+\s' || true)
+                ;;
+            *)
+                log "WARN" "DNS record check: unsupported record type '${record_type}'"
+                continue
+                ;;
+        esac
+
+        # Trim trailing dots for comparison
+        query_result=$(echo "$query_result" | sed 's/\.$//' 2>/dev/null || echo "$query_result")
+
+        # Check results
+        if [[ -z "$query_result" ]]; then
+            state="CRITICAL"
+            if [[ "$expected_value" == "*" ]]; then
+                detail="DNS ${record_type} record for <code>$(html_escape "$domain")</code> <b>not resolvable</b>"
+            else
+                detail="DNS ${record_type} record for <code>$(html_escape "$domain")</code> <b>not found</b> (expected: $(html_escape "$expected_value"))"
+            fi
+        else
+            # If expected value is wildcard (*), any result is OK
+            if [[ "$expected_value" == "*" ]]; then
+                local first_result
+                first_result=$(echo "$query_result" | head -1)
+                detail="DNS ${record_type} for <code>$(html_escape "$domain")</code>: $(html_escape "$first_result")"
+            else
+                # Check if expected value is in the results
+                local found=false
+                local value_line
+                while IFS= read -r value_line; do
+                    [[ -z "$value_line" ]] && continue
+                    # Normalize: trim whitespace and trailing dots
+                    value_line=$(echo "$value_line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/\.$//')
+                    expected_value=$(echo "$expected_value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/\.$//')
+
+                    # Support wildcard matching at the start (e.g., v=DMARC1*)
+                    if [[ "$expected_value" == *\* ]]; then
+                        local prefix="${expected_value%\*}"
+                        if [[ "$value_line" == "$prefix"* ]]; then
+                            found=true
+                            break
+                        fi
+                    elif [[ "$value_line" == "$expected_value" ]]; then
+                        found=true
+                        break
+                    fi
+                done <<< "$query_result"
+
+                if [[ "$found" == "true" ]]; then
+                    detail="DNS ${record_type} for <code>$(html_escape "$domain")</code>: $(html_escape "$expected_value")"
+                else
+                    state="CRITICAL"
+                    local actual_values
+                    actual_values=$(echo "$query_result" | tr '\n' ',' | sed 's/,$//;s/,/, /g')
+                    detail="DNS ${record_type} for <code>$(html_escape "$domain")</code> <b>MISMATCH</b>%0AExpected: $(html_escape "$expected_value")%0AGot: $(html_escape "$actual_values")"
+                fi
+            fi
+        fi
+
+        check_state_change "$key" "$state" "$detail"
+    done
+}
+
+# ===========================================================================
 # CHECK: Battery / UPS Status (upower or apcaccess)
 # ===========================================================================
 check_ups() {
@@ -2060,19 +2284,14 @@ check_ups() {
             bat_state_str=$(echo "$bat_info" | awk '/state:/ {print $2}')
 
             if [[ -n "$bat_pct" ]]; then
-                local state="OK"
-                local detail="Battery: ${bat_pct}% (${bat_state_str})"
-                local warn="${UPS_THRESHOLD_WARN:-30}"
-                local crit="${UPS_THRESHOLD_CRIT:-10}"
-
-                if (( bat_pct <= crit )); then
-                    state="CRITICAL"
-                    detail="Battery: <b>${bat_pct}%</b> (${bat_state_str}, threshold: ${crit}%)"
-                elif (( bat_pct <= warn )); then
-                    state="WARNING"
-                    detail="Battery: <b>${bat_pct}%</b> (${bat_state_str}, threshold: ${warn}%)"
-                fi
-                check_state_change "battery" "$state" "$detail"
+                # Use check_threshold helper for consistent threshold handling (inverted: lower = worse)
+                check_threshold "battery" "$bat_pct" \
+                    "${UPS_THRESHOLD_WARN:-30}" \
+                    "${UPS_THRESHOLD_CRIT:-10}" \
+                    "true" \
+                    "Battery: ${bat_pct}% (${bat_state_str})" \
+                    "Battery: <b>${bat_pct}%</b> (${bat_state_str}, threshold: ${UPS_THRESHOLD_WARN}%)" \
+                    "Battery: <b>${bat_pct}%</b> (${bat_state_str}, threshold: ${UPS_THRESHOLD_CRIT}%)"
                 return
             fi
         fi
@@ -2092,24 +2311,302 @@ check_ups() {
         apc_status=$(echo "$apc_out" | awk -F: '/^STATUS/ {gsub(/^ +| +$/, "", $2); print $2}')
 
         if [[ -n "$bcharge" ]]; then
-            local state="OK"
-            local detail="UPS: ${bcharge}% charge (${apc_status})"
-            local warn="${UPS_THRESHOLD_WARN:-30}"
-            local crit="${UPS_THRESHOLD_CRIT:-10}"
-
-            if (( bcharge <= crit )); then
-                state="CRITICAL"
-                detail="UPS: <b>${bcharge}%</b> charge (${apc_status}, threshold: ${crit}%)"
-            elif (( bcharge <= warn )); then
-                state="WARNING"
-                detail="UPS: <b>${bcharge}%</b> charge (${apc_status}, threshold: ${warn}%)"
-            fi
-            check_state_change "ups" "$state" "$detail"
+            # Use check_threshold helper for consistent threshold handling (inverted: lower = worse)
+            check_threshold "ups" "$bcharge" \
+                "${UPS_THRESHOLD_WARN:-30}" \
+                "${UPS_THRESHOLD_CRIT:-10}" \
+                "true" \
+                "UPS: ${bcharge}% charge (${apc_status})" \
+                "UPS: <b>${bcharge}%</b> charge (${apc_status}, threshold: ${UPS_THRESHOLD_WARN}%)" \
+                "UPS: <b>${bcharge}%</b> charge (${apc_status}, threshold: ${UPS_THRESHOLD_CRIT}%)"
             return
         fi
     fi
 
     # No battery/UPS tool found — silently skip
+}
+
+# ===========================================================================
+# CHECK: Database Health (MySQL, PostgreSQL, Redis)
+# Monitors database connectivity and basic health metrics
+# ===========================================================================
+check_databases() {
+    [[ "${ENABLE_DATABASE_CHECKS:-false}" == "true" ]] || return
+    
+    local check_timeout="${DB_CHECK_TIMEOUT:-${CHECK_TIMEOUT:-30}}"
+    
+    # MySQL/MariaDB Check
+    if [[ -n "${DB_MYSQL_HOST:-}" ]]; then
+        local mysql_state="OK"
+        local mysql_detail=""
+        
+        if ! command -v mysql &>/dev/null; then
+            log "DEBUG" "Database check: mysql client not found — skipping MySQL check"
+        else
+            local mysql_port="${DB_MYSQL_PORT:-3306}"
+            local mysql_user="${DB_MYSQL_USER:-}"
+            local mysql_pass="${DB_MYSQL_PASS:-}"
+            local mysql_name="${DB_MYSQL_NAME:-mysql}"
+            local mysql_host="${DB_MYSQL_HOST}"
+            
+            # SECURITY: Pass password via environment variable, not command line
+            # Command-line args are visible in 'ps aux' on some systems
+            local mysql_opts="--host=${mysql_host} --port=${mysql_port} --user=${mysql_user}"
+            mysql_opts="${mysql_opts} --connect-timeout=${check_timeout}"
+            
+            # Test connection with a simple query - password via env var
+            local mysql_result
+            mysql_result=$(run_with_timeout "$check_timeout" bash -c '
+                export MYSQL_PWD="$1"
+                shift
+                mysql "$@" -e "SELECT 1"
+            ' _ "$mysql_pass" ${mysql_opts} "$mysql_name" 2>&1)
+            local mysql_exit=$?
+            
+            if [[ $mysql_exit -ne 0 ]]; then
+                mysql_state="CRITICAL"
+                # Sanitize error message (remove password from output)
+                local safe_error
+                safe_error=$(echo "$mysql_result" | sed 's/--password=[^[:space:]]*/--password=***/g' | head -1)
+                mysql_detail="MySQL <b>${mysql_host}:${mysql_port}</b> connection failed: $(html_escape "$safe_error")"
+            else
+                # Check replication lag if applicable
+                local repl_lag
+                repl_lag=$(run_with_timeout "$check_timeout" mysql ${mysql_opts} -e "SHOW SLAVE STATUS\G" 2>/dev/null | awk '/Seconds_Behind_Master:/ {print $2}')
+                if [[ -n "$repl_lag" && "$repl_lag" != "NULL" ]]; then
+                    if [[ "$repl_lag" =~ ^[0-9]+$ ]]; then
+                        if [[ "$repl_lag" -gt 300 ]]; then
+                            mysql_state="CRITICAL"
+                            mysql_detail="MySQL <b>${mysql_host}:${mysql_port}</b> replication lag: <b>${repl_lag}s</b> (>5 min)"
+                        elif [[ "$repl_lag" -gt 60 ]]; then
+                            mysql_state="WARNING"
+                            mysql_detail="MySQL <b>${mysql_host}:${mysql_port}</b> replication lag: <b>${repl_lag}s</b> (>1 min)"
+                        else
+                            mysql_detail="MySQL <b>${mysql_host}:${mysql_port}</b> connected, replication lag: ${repl_lag}s"
+                        fi
+                    else
+                        mysql_detail="MySQL <b>${mysql_host}:${mysql_port}</b> connected"
+                    fi
+                else
+                    mysql_detail="MySQL <b>${mysql_host}:${mysql_port}</b> connected"
+                fi
+            fi
+            
+            check_state_change "mysql_${mysql_host//[^a-zA-Z0-9]/_}" "$mysql_state" "$mysql_detail"
+        fi
+    fi
+    
+    # PostgreSQL Check
+    if [[ -n "${DB_POSTGRES_HOST:-}" ]]; then
+        local pg_state="OK"
+        local pg_detail=""
+        
+        if ! command -v psql &>/dev/null; then
+            log "DEBUG" "Database check: psql client not found — skipping PostgreSQL check"
+        else
+            local pg_port="${DB_POSTGRES_PORT:-5432}"
+            local pg_user="${DB_POSTGRES_USER:-}"
+            local pg_pass="${DB_POSTGRES_PASS:-}"
+            local pg_name="${DB_POSTGRES_NAME:-postgres}"
+            local pg_host="${DB_POSTGRES_HOST}"
+            
+            # SECURITY: Pass password via environment variable, not connection string
+            # Connection strings may be visible in process listings
+            local pg_opts="host=${pg_host} port=${pg_port} user=${pg_user} dbname=${pg_name} connect_timeout=${check_timeout}"
+            
+            # Test connection - password via env var
+            local pg_result
+            pg_result=$(run_with_timeout "$check_timeout" bash -c '
+                export PGPASSWORD="$1"
+                shift
+                psql "$@" -c "SELECT 1"
+            ' _ "$pg_pass" "${pg_opts}" 2>&1)
+            local pg_exit=$?
+            
+            if [[ $pg_exit -ne 0 ]]; then
+                pg_state="CRITICAL"
+                # Sanitize error message
+                local safe_error
+                safe_error=$(echo "$pg_result" | sed 's/password=[^[:space:]]*/password=***/g' | head -1)
+                pg_detail="PostgreSQL <b>${pg_host}:${pg_port}</b> connection failed: $(html_escape "$safe_error")"
+            else
+                # Check replication lag if applicable
+                local repl_lag
+                repl_lag=$(run_with_timeout "$check_timeout" bash -c '
+                    export PGPASSWORD="$1"
+                    shift
+                    psql "$@" -c "SELECT CASE WHEN pg_is_in_recovery() THEN EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp())) ELSE 0 END AS lag;"
+                ' _ "$pg_pass" "${pg_opts}" 2>/dev/null | tail -1 | tr -d ' ')
+                if [[ -n "$repl_lag" && "$repl_lag" != "0" && "$repl_lag" =~ ^[0-9.]+$ ]]; then
+                    local repl_lag_int="${repl_lag%.*}"
+                    if [[ "$repl_lag_int" -gt 300 ]]; then
+                        pg_state="CRITICAL"
+                        pg_detail="PostgreSQL <b>${pg_host}:${pg_port}</b> replication lag: <b>${repl_lag_int}s</b> (>5 min)"
+                    elif [[ "$repl_lag_int" -gt 60 ]]; then
+                        pg_state="WARNING"
+                        pg_detail="PostgreSQL <b>${pg_host}:${pg_port}</b> replication lag: <b>${repl_lag_int}s</b> (>1 min)"
+                    else
+                        pg_detail="PostgreSQL <b>${pg_host}:${pg_port}</b> connected, replication lag: ${repl_lag_int}s"
+                    fi
+                else
+                    pg_detail="PostgreSQL <b>${pg_host}:${pg_port}</b> connected"
+                fi
+            fi
+            
+            check_state_change "postgres_${pg_host//[^a-zA-Z0-9]/_}" "$pg_state" "$pg_detail"
+        fi
+    fi
+    
+    # Redis Check
+    if [[ -n "${DB_REDIS_HOST:-}" ]]; then
+        local redis_state="OK"
+        local redis_detail=""
+        
+        if ! command -v redis-cli &>/dev/null; then
+            log "DEBUG" "Database check: redis-cli not found — skipping Redis check"
+        else
+            local redis_port="${DB_REDIS_PORT:-6379}"
+            local redis_pass="${DB_REDIS_PASS:-}"
+            local redis_host="${DB_REDIS_HOST}"
+            local redis_timeout="${DB_REDIS_TIMEOUT_SEC:-5}"
+            
+            # Build redis-cli command - SECURITY: pass password via env var
+            local redis_opts="-h ${redis_host} -p ${redis_port} --raw"
+            # Use REDISCLI_AUTH env var instead of -a flag (visible in ps)
+            
+            # Test connection with PING - password via env var
+            local redis_result
+            redis_result=$(run_with_timeout "$redis_timeout" bash -c '
+                export REDISCLI_AUTH="$1"
+                shift
+                redis-cli "$@" PING
+            ' _ "$redis_pass" ${redis_opts} 2>&1)
+            local redis_exit=$?
+            
+            # Check for password authentication error
+            if [[ "$redis_result" == *"NOAUTH"* ]] || [[ "$redis_result" == *"authentication"* ]]; then
+                redis_state="CRITICAL"
+                redis_detail="Redis <b>${redis_host}:${redis_port}</b> authentication failed (invalid password)"
+            elif [[ $redis_exit -ne 0 ]] || [[ "$redis_result" != "PONG" ]]; then
+                redis_state="CRITICAL"
+                redis_detail="Redis <b>${redis_host}:${redis_port}</b> not responding (expected PONG, got: $(html_escape "${redis_result:-no response}"))"
+            else
+                # Get additional info
+                local redis_info
+                redis_info=$(run_with_timeout "$redis_timeout" bash -c '
+                    export REDISCLI_AUTH="$1"
+                    shift
+                    redis-cli "$@" INFO replication
+                ' _ "$redis_pass" ${redis_opts} 2>/dev/null | grep -E "^(role|master_link_status|connected_slaves):" || true)
+                if [[ -n "$redis_info" ]]; then
+                    local role="${redis_info%%$'\n'*}"
+                    role="${role#role:}"
+                    if [[ "$role" == "slave" ]]; then
+                        local link_status=$(echo "$redis_info" | grep "master_link_status:" | cut -d: -f2 | tr -d '\r')
+                        if [[ "$link_status" == "down" ]]; then
+                            redis_state="CRITICAL"
+                            redis_detail="Redis <b>${redis_host}:${redis_port}</b> replica: master link DOWN"
+                        else
+                            redis_detail="Redis <b>${redis_host}:${redis_port}</b> replica: connected to master"
+                        fi
+                    elif [[ "$role" == "master" ]]; then
+                        local slaves=$(echo "$redis_info" | grep "connected_slaves:" | cut -d: -f2 | tr -d '\r')
+                        redis_detail="Redis <b>${redis_host}:${redis_port}</b> master: ${slaves} connected replica(s)"
+                    else
+                        redis_detail="Redis <b>${redis_host}:${redis_port}</b> connected (standalone)"
+                    fi
+                else
+                    redis_detail="Redis <b>${redis_host}:${redis_port}</b> connected"
+                fi
+            fi
+            
+            check_state_change "redis_${redis_host//[^a-zA-Z0-9]/_}_${redis_port}" "$redis_state" "$redis_detail"
+        fi
+    fi
+
+    # SQLite3 Check
+    if [[ -n "${DB_SQLITE_PATHS:-}" ]]; then
+        if ! command -v sqlite3 &>/dev/null; then
+            log "DEBUG" "Database check: sqlite3 not found — skipping SQLite check"
+        else
+            for db_path in $DB_SQLITE_PATHS; do
+                # SECURITY: Validate path to prevent directory traversal
+                if ! is_safe_path "$db_path"; then
+                    log "WARN" "SQLite check: unsafe path '${db_path}' — skipping (contains .., *, ?, or $)"
+                    continue
+                fi
+
+                # Generate state key from path hash (consistent with integrity/drift patterns)
+                local sqlite_key="sqlite_$(printf '%s' "$db_path" | portable_sha256 | cut -c1-12)"
+                local sqlite_state="OK"
+                local sqlite_detail=""
+                local safe_db_name
+                safe_db_name=$(basename "$db_path")
+                safe_db_name=$(html_escape "$safe_db_name")
+
+                # Check file exists and is readable
+                if [[ ! -f "$db_path" ]]; then
+                    sqlite_state="CRITICAL"
+                    sqlite_detail="SQLite DB <code>${safe_db_name}</code> not found: ${db_path}"
+                    check_state_change "$sqlite_key" "$sqlite_state" "$sqlite_detail"
+                    continue
+                fi
+
+                if [[ ! -r "$db_path" ]]; then
+                    sqlite_state="CRITICAL"
+                    sqlite_detail="SQLite DB <code>${safe_db_name}</code> not readable: ${db_path}"
+                    check_state_change "$sqlite_key" "$sqlite_state" "$sqlite_detail"
+                    continue
+                fi
+
+                # Check DB file size (if thresholds configured)
+                local db_size_bytes
+                db_size_bytes=$(portable_stat size "$db_path")
+                local db_size_mb=$(( db_size_bytes / 1024 / 1024 ))
+                local size_warn_mb="${DB_SQLITE_SIZE_THRESHOLD_WARN:-0}"
+                local size_crit_mb="${DB_SQLITE_SIZE_THRESHOLD_CRIT:-0}"
+
+                # Run integrity check (PRAGMA quick_check is fast; full PRAGMA integrity_check can be slow on large DBs)
+                local integrity_result
+                integrity_result=$(run_with_timeout "$check_timeout" sqlite3 "$db_path" "PRAGMA quick_check;" 2>&1)
+                local integrity_exit=$?
+
+                if [[ $integrity_exit -ne 0 ]]; then
+                    sqlite_state="CRITICAL"
+                    local safe_error
+                    safe_error=$(html_escape "$integrity_result")
+                    sqlite_detail="SQLite DB <code>${safe_db_name}</code> check failed: ${safe_error}"
+                elif [[ "$integrity_result" != "ok" ]]; then
+                    sqlite_state="CRITICAL"
+                    local safe_result
+                    safe_result=$(html_escape "$integrity_result")
+                    sqlite_detail="SQLite DB <code>${safe_db_name}</code> corruption detected: ${safe_result}"
+                elif [[ "$size_crit_mb" -gt 0 && "$db_size_mb" -ge "$size_crit_mb" ]]; then
+                    sqlite_state="CRITICAL"
+                    sqlite_detail="SQLite DB <code>${safe_db_name}</code> size <b>${db_size_mb}MB</b> exceeds critical threshold (${size_crit_mb}MB)"
+                elif [[ "$size_warn_mb" -gt 0 && "$db_size_mb" -ge "$size_warn_mb" ]]; then
+                    sqlite_state="WARNING"
+                    sqlite_detail="SQLite DB <code>${safe_db_name}</code> size <b>${db_size_mb}MB</b> exceeds warning threshold (${size_warn_mb}MB)"
+                else
+                    sqlite_detail="SQLite DB <code>${safe_db_name}</code> OK (${db_size_mb}MB)"
+                fi
+
+                # Check for WAL file (indicates uncommitted transactions or ongoing write activity)
+                local wal_path="${db_path}-wal"
+                if [[ -f "$wal_path" ]]; then
+                    local wal_size_bytes
+                    wal_size_bytes=$(portable_stat size "$wal_path" 2>/dev/null || echo "0")
+                    local wal_size_mb=$(( wal_size_bytes / 1024 / 1024 ))
+                    if [[ "$wal_size_mb" -gt 100 ]]; then
+                        # Large WAL file may indicate checkpointing issues
+                        sqlite_detail+=" <i>(large WAL: ${wal_size_mb}MB)</i>"
+                    fi
+                fi
+
+                check_state_change "$sqlite_key" "$sqlite_state" "$sqlite_detail"
+            done
+        fi
+    fi
 }
 
 # ===========================================================================
@@ -2609,6 +3106,89 @@ check_cron_jobs() {
 }
 
 # ===========================================================================
+# CHECK: Plugin System (/checks.d/)
+# Sources and executes all executable scripts in the checks.d directory.
+# Each plugin outputs STATE|KEY|DETAIL format for integration with Telemon.
+# ===========================================================================
+check_plugins() {
+    local plugin_dir="${CHECKS_DIR:-${SCRIPT_DIR}/checks.d}"
+    
+    # Skip if directory doesn't exist or isn't readable
+    if [[ ! -d "$plugin_dir" ]]; then
+        log "DEBUG" "Plugin check: directory ${plugin_dir} not found — skipping"
+        return
+    fi
+    
+    if [[ ! -r "$plugin_dir" ]]; then
+        log "WARN" "Plugin check: directory ${plugin_dir} not readable — skipping"
+        return
+    fi
+    
+    # Iterate through all executable files in the directory
+    local plugin_count=0
+    for plugin in "$plugin_dir"/*; do
+        [[ -f "$plugin" ]] || continue
+        [[ -x "$plugin" ]] || continue
+        [[ -L "$plugin" ]] && continue  # Skip symlinks (security)
+        
+        plugin_count=$((plugin_count + 1))
+        local plugin_name
+        plugin_name=$(basename "$plugin")
+        local safe_plugin_name
+        safe_plugin_name=$(html_escape "$plugin_name")
+        
+        # Run the plugin with timeout
+        local plugin_output
+        plugin_output=$(run_with_timeout "$CHECK_TIMEOUT" "$plugin" 2>/dev/null) || plugin_output=""
+        
+        if [[ -z "$plugin_output" ]]; then
+            log "WARN" "Plugin ${safe_plugin_name} returned no output"
+            continue
+        fi
+        
+        # Parse plugin output: STATE|KEY|DETAIL
+        # State must be OK, WARNING, or CRITICAL
+        local plugin_state="${plugin_output%%|*}"
+        local rest="${plugin_output#*|}"
+        local plugin_key="${rest%%|*}"
+        local plugin_detail="${rest#*|}"
+        
+        # Validate state
+        case "$plugin_state" in
+            OK|WARNING|CRITICAL)
+                # Valid state
+                ;;
+            *)
+                log "WARN" "Plugin ${safe_plugin_name} returned invalid state: ${plugin_state}"
+                continue
+                ;;
+        esac
+        
+        # Validate key (alphanumeric, underscore, hyphen, dot only)
+        if [[ ! "$plugin_key" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
+            log "WARN" "Plugin ${safe_plugin_name} returned invalid key: ${plugin_key}"
+            continue
+        fi
+        
+        # Use plugin key or generate one from plugin name
+        local key="${plugin_key:-plugin_${safe_plugin_name}}"
+        
+        # HTML-escape detail
+        local safe_detail
+        safe_detail=$(html_escape "$plugin_detail")
+        
+        # Report state change
+        check_state_change "$key" "$plugin_state" "$safe_detail"
+    done
+    
+    if [[ "$plugin_count" -eq 0 ]]; then
+        log "DEBUG" "Plugin check: no executable plugins found in ${plugin_dir}"
+    else
+        log "DEBUG" "Plugin check: executed ${plugin_count} plugin(s)"
+    fi
+}
+
+# ===========================================================================
 # Fleet Heartbeat Monitor
 # Scans heartbeat directory for stale/missing sibling servers
 # ===========================================================================
@@ -2734,14 +3314,17 @@ run_all_checks() {
     [[ "${ENABLE_TCP_PORT_CHECK:-false}" == "true" ]] && check_tcp_ports
     [[ "${ENABLE_TEMP_CHECK:-false}" == "true" ]] && check_cpu_temp
     [[ "${ENABLE_DNS_CHECK:-false}" == "true" ]] && check_dns
+    [[ "${ENABLE_DNS_RECORD_CHECK:-false}" == "true" ]] && check_dns_records
     [[ "${ENABLE_GPU_CHECK:-false}" == "true" ]] && check_gpu
     [[ "${ENABLE_UPS_CHECK:-false}" == "true" ]] && check_ups
+    [[ "${ENABLE_DATABASE_CHECKS:-false}" == "true" ]] && check_databases
     [[ "${ENABLE_NETWORK_CHECK:-false}" == "true" ]] && check_network_bandwidth
     [[ "${ENABLE_LOG_CHECK:-false}" == "true" ]] && check_log_patterns
     [[ "${ENABLE_INTEGRITY_CHECK:-false}" == "true" ]] && check_file_integrity
     [[ "${ENABLE_DRIFT_DETECTION:-false}" == "true" ]] && check_drift_detection
     [[ "${ENABLE_CRON_CHECK:-false}" == "true" ]] && check_cron_jobs
     [[ "${ENABLE_FLEET_CHECK:-false}" == "true" ]] && check_fleet_heartbeats
+    [[ "${ENABLE_PLUGINS:-false}" == "true" ]] && check_plugins
 }
 
 # ===========================================================================
@@ -2880,6 +3463,445 @@ print(json.dumps(data, indent=2))
 }
 
 # ===========================================================================
+# Static HTML Status Page Generator
+# Generates a self-contained HTML status page from current state
+# Can be served via nginx/caddy or committed to GitHub Pages
+# ===========================================================================
+generate_status_page() {
+    local output_file="${1:-${STATUS_PAGE_FILE:-${SCRIPT_DIR}/status.html}}"
+    local state_file="${STATE_FILE:-/tmp/telemon_sys_alert_state}"
+    local detail_file="${state_file}.detail"
+
+    # Create temp file for atomic write
+    local tmp_file
+    tmp_file=$(mktemp "${output_file}.XXXXXX") || { log "ERROR" "Failed to create temp file for status page"; return 1; }
+
+    # Load current state into associative arrays if not already loaded
+    if [[ ${#CURR_STATE[@]} -eq 0 ]] && [[ -f "$state_file" ]]; then
+        load_state
+    fi
+
+    # Build summary counts
+    local crit_count=0 warn_count=0 ok_count=0 total=0
+    for key in "${!CURR_STATE[@]}"; do
+        total=$((total + 1))
+        case "${CURR_STATE[$key]}" in
+            CRITICAL) crit_count=$((crit_count + 1)) ;;
+            WARNING)  warn_count=$((warn_count + 1)) ;;
+            OK)       ok_count=$((ok_count + 1)) ;;
+        esac
+    done
+
+    # Determine overall status
+    local overall_status="OK"
+    local status_color="#10b981"  # green
+    local status_emoji="✅"
+    if [[ $crit_count -gt 0 ]]; then
+        overall_status="CRITICAL"
+        status_color="#ef4444"  # red
+        status_emoji="🔴"
+    elif [[ $warn_count -gt 0 ]]; then
+        overall_status="WARNING"
+        status_color="#f59e0b"  # orange
+        status_emoji="🟡"
+    fi
+
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S %Z')
+    local hostname
+    hostname=$(hostname)
+    local server_label="${SERVER_LABEL:-$hostname}"
+
+    # Generate HTML
+    cat > "$tmp_file" << 'HTMLHEAD'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+HTMLHEAD
+
+    # Add title and refresh meta tag (if auto-refresh enabled)
+    local refresh_meta=""
+    if [[ "${STATUS_PAGE_AUTO_REFRESH:-false}" == "true" ]]; then
+        local refresh_sec="${STATUS_PAGE_REFRESH_SEC:-60}"
+        refresh_meta="<meta http-equiv=\"refresh\" content=\"${refresh_sec}\">"
+    fi
+
+    cat >> "$tmp_file" << HTMLHEAD2
+    <title>Telemon Status - ${server_label}</title>
+    ${refresh_meta}
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            line-height: 1.6;
+            padding: 20px;
+        }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .header {
+            background: linear-gradient(135deg, #1e293b 0%, #334155 100%);
+            border-radius: 12px;
+            padding: 30px;
+            margin-bottom: 20px;
+            border: 1px solid #475569;
+        }
+        .header-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .server-info h1 {
+            font-size: 1.8rem;
+            color: #f8fafc;
+            margin-bottom: 5px;
+        }
+        .server-info .hostname {
+            color: #94a3b8;
+            font-size: 0.9rem;
+        }
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 1.1rem;
+            background: ${status_color}20;
+            color: ${status_color};
+            border: 2px solid ${status_color};
+        }
+        .summary-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+        }
+        .summary-card {
+            background: #1e293b;
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            border: 1px solid #334155;
+        }
+        .summary-card.critical { border-color: #ef4444; background: #ef444420; }
+        .summary-card.warning { border-color: #f59e0b; background: #f59e0b20; }
+        .summary-card.ok { border-color: #10b981; background: #10b98120; }
+        .summary-card .count {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 5px;
+        }
+        .summary-card.critical .count { color: #ef4444; }
+        .summary-card.warning .count { color: #f59e0b; }
+        .summary-card.ok .count { color: #10b981; }
+        .summary-card .label {
+            color: #94a3b8;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .checks-section {
+            background: #1e293b;
+            border-radius: 12px;
+            padding: 20px;
+            border: 1px solid #334155;
+        }
+        .checks-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        .checks-header h2 {
+            font-size: 1.3rem;
+            color: #f8fafc;
+        }
+        .timestamp {
+            color: #64748b;
+            font-size: 0.85rem;
+        }
+        .checks-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .checks-table th {
+            text-align: left;
+            padding: 12px;
+            color: #94a3b8;
+            font-weight: 500;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 2px solid #334155;
+        }
+        .checks-table td {
+            padding: 12px;
+            border-bottom: 1px solid #334155;
+        }
+        .checks-table tr:hover {
+            background: #33415540;
+        }
+        .status-cell {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
+        .status-critical {
+            background: #ef444420;
+            color: #ef4444;
+        }
+        .status-warning {
+            background: #f59e0b20;
+            color: #f59e0b;
+        }
+        .status-ok {
+            background: #10b98120;
+            color: #10b981;
+        }
+        .detail-text {
+            color: #cbd5e1;
+            font-size: 0.9rem;
+            max-width: 500px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .detail-text:hover {
+            white-space: normal;
+            word-break: break-word;
+        }
+        .filter-buttons {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        .filter-btn {
+            background: #334155;
+            border: none;
+            color: #e2e8f0;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            transition: all 0.2s;
+        }
+        .filter-btn:hover { background: #475569; }
+        .filter-btn.active {
+            background: #3b82f6;
+            color: white;
+        }
+        .no-checks {
+            text-align: center;
+            padding: 60px 20px;
+            color: #64748b;
+        }
+        .footer {
+            text-align: center;
+            margin-top: 30px;
+            padding: 20px;
+            color: #64748b;
+            font-size: 0.85rem;
+        }
+        .footer a {
+            color: #3b82f6;
+            text-decoration: none;
+        }
+        .footer a:hover { text-decoration: underline; }
+        @media (max-width: 768px) {
+            .header-top { flex-direction: column; text-align: center; }
+            .checks-header { flex-direction: column; align-items: flex-start; }
+            .checks-table th, .checks-table td { padding: 8px; }
+            .detail-text { max-width: 200px; }
+        }
+    </style>
+HTMLHEAD2
+
+    cat >> "$tmp_file" << 'HTMLSCRIPT'
+    <script>
+        function filterChecks(status) {
+            const rows = document.querySelectorAll('.check-row');
+            const buttons = document.querySelectorAll('.filter-btn');
+            
+            buttons.forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+            
+            rows.forEach(row => {
+                if (status === 'all' || row.dataset.status === status) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        }
+    </script>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="header-top">
+                <div class="server-info">
+HTMLSCRIPT
+
+    # Server info section
+    cat >> "$tmp_file" << SERVERINFO
+                    <h1>${status_emoji} ${server_label}</h1>
+                    <div class="hostname">${hostname}</div>
+                </div>
+                <div class="status-badge" style="background: ${status_color}20; color: ${status_color}; border-color: ${status_color};">
+                    ${status_emoji} ${overall_status}
+                </div>
+            </div>
+            <div class="summary-cards">
+                <div class="summary-card critical">
+                    <div class="count">${crit_count}</div>
+                    <div class="label">Critical</div>
+                </div>
+                <div class="summary-card warning">
+                    <div class="count">${warn_count}</div>
+                    <div class="label">Warning</div>
+                </div>
+                <div class="summary-card ok">
+                    <div class="count">${ok_count}</div>
+                    <div class="label">Healthy</div>
+                </div>
+                <div class="summary-card">
+                    <div class="count">${total}</div>
+                    <div class="label">Total Checks</div>
+                </div>
+            </div>
+        </div>
+SERVERINFO
+
+    # Checks table section
+    cat >> "$tmp_file" << 'CHECKSHEAD'
+        <div class="checks-section">
+            <div class="checks-header">
+                <h2>🔍 Check Details</h2>
+                <div class="timestamp">Last updated: 
+CHECKSHEAD
+    printf '%s' "$timestamp" >> "$tmp_file"
+    cat >> "$tmp_file" << 'CHECKSMID'
+</div>
+            </div>
+            <div class="filter-buttons">
+                <button class="filter-btn active" onclick="filterChecks('all')">All</button>
+                <button class="filter-btn" onclick="filterChecks('CRITICAL')">Critical</button>
+                <button class="filter-btn" onclick="filterChecks('WARNING')">Warning</button>
+                <button class="filter-btn" onclick="filterChecks('OK')">OK</button>
+            </div>
+            <table class="checks-table">
+                <thead>
+                    <tr>
+                        <th>Status</th>
+                        <th>Check</th>
+                        <th>Detail</th>
+                    </tr>
+                </thead>
+                <tbody>
+CHECKSMID
+
+    # Add check rows
+    if [[ $total -eq 0 ]]; then
+        cat >> "$tmp_file" << 'NOCHECKS'
+                    <tr>
+                        <td colspan="3" class="no-checks">
+                            <p>No checks have been run yet.</p>
+                            <p style="margin-top: 10px; font-size: 0.9rem;">Run telemon.sh to populate status.</p>
+                        </td>
+                    </tr>
+NOCHECKS
+    else
+        # Sort by status: CRITICAL first, then WARNING, then OK
+        local sorted_keys=()
+        
+        # Add CRITICAL items first
+        for key in "${!CURR_STATE[@]}"; do
+            [[ "${CURR_STATE[$key]}" == "CRITICAL" ]] && sorted_keys+=("$key")
+        done
+        
+        # Add WARNING items next
+        for key in "${!CURR_STATE[@]}"; do
+            [[ "${CURR_STATE[$key]}" == "WARNING" ]] && sorted_keys+=("$key")
+        done
+        
+        # Add OK items last
+        for key in "${!CURR_STATE[@]}"; do
+            [[ "${CURR_STATE[$key]}" == "OK" ]] && sorted_keys+=("$key")
+        done
+
+        for key in "${sorted_keys[@]}"; do
+            local state="${CURR_STATE[$key]}"
+            local detail="${STATE_DETAIL[$key]:-$state}"
+            local status_class="status-ok"
+            local status_emoji_row="✅"
+            
+            case "$state" in
+                CRITICAL)
+                    status_class="status-critical"
+                    status_emoji_row="🔴"
+                    ;;
+                WARNING)
+                    status_class="status-warning"
+                    status_emoji_row="🟡"
+                    ;;
+            esac
+
+            # Escape HTML in detail
+            detail=$(printf '%s' "$detail" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g')
+
+            cat >> "$tmp_file" << ROW
+                    <tr class="check-row" data-status="${state}">
+                        <td><span class="status-cell ${status_class}">${status_emoji_row} ${state}</span></td>
+                        <td><code style="background: #334155; padding: 2px 6px; border-radius: 4px; font-size: 0.85rem;">${key}</code></td>
+                        <td><div class="detail-text" title="${detail}">${detail}</div></td>
+                    </tr>
+ROW
+        done
+    fi
+
+    # Footer
+    cat >> "$tmp_file" << 'FOOTER'
+                </tbody>
+            </table>
+        </div>
+        <div class="footer">
+            <p>Generated by <a href="https://github.com/SwordfishTrumpet/telemon" target="_blank">Telemon</a></p>
+FOOTER
+    
+    # Add generation timestamp
+    cat >> "$tmp_file" << FOOTER2
+            <p style="margin-top: 5px;">Page generated: ${timestamp}</p>
+        </div>
+    </div>
+</body>
+</html>
+FOOTER2
+
+    # Atomic move
+    if mv "$tmp_file" "$output_file"; then
+        chmod 644 "$output_file" 2>/dev/null || true
+        log "INFO" "Status page generated: ${output_file} (${total} checks)"
+        return 0
+    else
+        log "ERROR" "Failed to write status page: ${output_file}"
+        rm -f "$tmp_file"
+        return 1
+    fi
+}
+
+# ===========================================================================
 # Heartbeat Sender (Dead Man's Switch)
 # Writes a heartbeat file or pings a webhook URL after each run
 # ===========================================================================
@@ -2991,6 +4013,8 @@ dispatch_with_retry() {
     if send_telegram "$message" 2>/dev/null; then
         send_webhook "$message" || true
         send_email "$message" || true
+        # Audit log successful alert dispatch
+        audit_log "alert" "Alert dispatched successfully"
     else
         # Queue for retry on next cycle (append to preserve previously queued messages)
         log "WARN" "Alert delivery failed — queuing for retry"
@@ -3004,6 +4028,8 @@ dispatch_with_retry() {
         # Still try webhook and email
         send_webhook "$message" || true
         send_email "$message" || true
+        # Audit log failed alert (with queued status)
+        audit_log "alert" "Alert delivery failed - queued for retry"
     fi
 }
 
@@ -3123,6 +4149,9 @@ check_escalation() {
         esc_message+="<i>$(date '+%Y-%m-%d %H:%M:%S %Z')</i>%0A%0A"
         esc_message+="${escalation_alerts}"
 
+        # Audit log the escalation
+        audit_log "escalation" "Escalation triggered after ${escalation_after}min: ${escalation_alerts//%0A/ }"
+
         # Send to escalation webhook (requires python3 for safe JSON encoding)
         if ! command -v python3 &>/dev/null; then
             log "WARN" "Escalation webhook: python3 not found — skipping"
@@ -3210,13 +4239,21 @@ run_validate() {
         ENABLE_GPU_CHECK ENABLE_UPS_CHECK ENABLE_NETWORK_CHECK \
         ENABLE_LOG_CHECK ENABLE_INTEGRITY_CHECK ENABLE_CRON_CHECK \
         ENABLE_FLEET_CHECK ENABLE_HEARTBEAT ENABLE_PROMETHEUS_EXPORT \
-        ENABLE_JSON_STATUS ENABLE_PREDICTIVE_ALERTS ENABLE_DRIFT_DETECTION; do
+        ENABLE_JSON_STATUS ENABLE_PREDICTIVE_ALERTS ENABLE_DRIFT_DETECTION \
+        ENABLE_PLUGINS ENABLE_DATABASE_CHECKS ENABLE_DNS_RECORD_CHECK \
+        ENABLE_AUDIT_LOGGING; do
         local val="${!enable_var:-}"
         if [[ -n "$val" && "$val" != "true" && "$val" != "false" ]]; then
             echo "  WARN: ${enable_var}='${val}' — expected 'true' or 'false' (value treated as false)"
             warnings=$((warnings + 1))
         fi
     done
+
+    # Validate SITE_ALLOW_INTERNAL if set (boolean check)
+    if [[ -n "${SITE_ALLOW_INTERNAL:-}" && "${SITE_ALLOW_INTERNAL}" != "true" && "${SITE_ALLOW_INTERNAL}" != "false" ]]; then
+        echo "  WARN: SITE_ALLOW_INTERNAL='${SITE_ALLOW_INTERNAL}' — expected 'true' or 'false'"
+        warnings=$((warnings + 1))
+    fi
 
     for check in CPU MEMORY DISK SWAP IOWAIT ZOMBIE INTERNET; do
         local var="ENABLE_${check}_CHECK"
@@ -3299,10 +4336,29 @@ run_validate() {
             echo "  WARN: SITE_MONITOR enabled but CRITICAL_SITES is empty"
             warnings=$((warnings + 1))
         fi
+        
+        # Check for internal/localhost URLs and warn if SITE_ALLOW_INTERNAL not set
+        local has_internal_url=false
         for site in ${CRITICAL_SITES:-}; do
             local url="${site%%|*}"
+            local host_check="${url#*://}"
+            host_check="${host_check%%/*}"
+            host_check="${host_check%%:*}"
+            if is_internal_ip "$host_check" 2>/dev/null; then
+                has_internal_url=true
+            fi
             echo "        → $url"
         done
+        
+        if [[ "$has_internal_url" == "true" ]]; then
+            if [[ "${SITE_ALLOW_INTERNAL:-false}" == "true" ]]; then
+                echo "  OK:   Internal URL monitoring enabled (SITE_ALLOW_INTERNAL=true)"
+            else
+                echo "  WARN: CRITICAL_SITES contains internal/localhost URLs but SITE_ALLOW_INTERNAL is not set to true"
+                echo "        These URLs will be skipped due to SSRF protection. Add: SITE_ALLOW_INTERNAL=true"
+                warnings=$((warnings + 1))
+            fi
+        fi
     else
         echo "  OFF:  SITE_MONITOR"
     fi
@@ -3501,6 +4557,169 @@ run_validate() {
                 fi
             done
         fi
+    fi
+
+    # Plugin system validation
+    if [[ "${ENABLE_PLUGINS:-false}" == "true" ]]; then
+        local checks_dir="${CHECKS_DIR:-${SCRIPT_DIR}/checks.d}"
+        echo "  ON:   PLUGINS (${checks_dir})"
+        enabled=$((enabled + 1))
+        if [[ ! -d "$checks_dir" ]]; then
+            echo "  WARN: CHECKS_DIR '${checks_dir}' does not exist (will be monitored when created)"
+            warnings=$((warnings + 1))
+        elif [[ ! -r "$checks_dir" ]]; then
+            echo "  FAIL: CHECKS_DIR '${checks_dir}' is not readable"
+            errors=$((errors + 1))
+        else
+            local plugin_count=0
+            for plugin in "$checks_dir"/*; do
+                [[ -f "$plugin" ]] || continue
+                [[ -x "$plugin" ]] || continue
+                plugin_count=$((plugin_count + 1))
+            done
+            echo "  OK:   ${plugin_count} executable plugin(s) found"
+        fi
+    else
+        echo "  OFF:  PLUGINS"
+    fi
+
+    # Database checks validation
+    if [[ "${ENABLE_DATABASE_CHECKS:-false}" == "true" ]]; then
+        echo "  ON:   DATABASE_CHECKS"
+        enabled=$((enabled + 1))
+        
+        # Validate MySQL configuration
+        if [[ -n "${DB_MYSQL_HOST:-}" ]]; then
+            if [[ -z "${DB_MYSQL_USER:-}" ]]; then
+                echo "  WARN: DB_MYSQL_HOST is set but DB_MYSQL_USER is empty"
+                warnings=$((warnings + 1))
+            fi
+        fi
+        
+        # Validate PostgreSQL configuration
+        if [[ -n "${DB_POSTGRES_HOST:-}" ]]; then
+            if [[ -z "${DB_POSTGRES_USER:-}" ]]; then
+                echo "  WARN: DB_POSTGRES_HOST is set but DB_POSTGRES_USER is empty"
+                warnings=$((warnings + 1))
+            fi
+        fi
+        
+        # Validate Redis configuration
+        if [[ -n "${DB_REDIS_HOST:-}" ]]; then
+            echo "  OK:   Redis configuration present (${DB_REDIS_HOST}:${DB_REDIS_PORT:-6379})"
+        fi
+        
+        # Validate SQLite configuration
+        if [[ -n "${DB_SQLITE_PATHS:-}" ]]; then
+            echo "  OK:   SQLite configuration present"
+            if ! command -v sqlite3 &>/dev/null; then
+                echo "  WARN: SQLite DB paths configured but sqlite3 command not found"
+                warnings=$((warnings + 1))
+            fi
+            # Validate each path
+            for db_path in $DB_SQLITE_PATHS; do
+                if ! is_safe_path "$db_path"; then
+                    echo "  WARN: SQLite path unsafe (contains .., *, ?, or $): ${db_path}"
+                    warnings=$((warnings + 1))
+                elif [[ ! -f "$db_path" ]]; then
+                    echo "  WARN: SQLite database file not found: ${db_path}"
+                    warnings=$((warnings + 1))
+                elif [[ ! -r "$db_path" ]]; then
+                    echo "  WARN: SQLite database file not readable: ${db_path}"
+                    warnings=$((warnings + 1))
+                fi
+            done
+            # Validate size thresholds are numeric
+            if [[ -n "${DB_SQLITE_SIZE_THRESHOLD_WARN:-}" && "${DB_SQLITE_SIZE_THRESHOLD_WARN}" != "0" ]]; then
+                if ! is_valid_number "$DB_SQLITE_SIZE_THRESHOLD_WARN"; then
+                    echo "  WARN: DB_SQLITE_SIZE_THRESHOLD_WARN is not a valid number: ${DB_SQLITE_SIZE_THRESHOLD_WARN}"
+                    warnings=$((warnings + 1))
+                fi
+            fi
+            if [[ -n "${DB_SQLITE_SIZE_THRESHOLD_CRIT:-}" && "${DB_SQLITE_SIZE_THRESHOLD_CRIT}" != "0" ]]; then
+                if ! is_valid_number "$DB_SQLITE_SIZE_THRESHOLD_CRIT"; then
+                    echo "  WARN: DB_SQLITE_SIZE_THRESHOLD_CRIT is not a valid number: ${DB_SQLITE_SIZE_THRESHOLD_CRIT}"
+                    warnings=$((warnings + 1))
+                fi
+                # Validate crit > warn if both set
+                if [[ -n "${DB_SQLITE_SIZE_THRESHOLD_WARN:-}" && "${DB_SQLITE_SIZE_THRESHOLD_WARN}" != "0" ]]; then
+                    if [[ "$DB_SQLITE_SIZE_THRESHOLD_WARN" -ge "$DB_SQLITE_SIZE_THRESHOLD_CRIT" ]]; then
+                        echo "  WARN: DB_SQLITE_SIZE_THRESHOLD_WARN (${DB_SQLITE_SIZE_THRESHOLD_WARN}) should be less than DB_SQLITE_SIZE_THRESHOLD_CRIT (${DB_SQLITE_SIZE_THRESHOLD_CRIT})"
+                        warnings=$((warnings + 1))
+                    fi
+                fi
+            fi
+        fi
+    else
+        echo "  OFF:  DATABASE_CHECKS"
+    fi
+
+    # DNS Record check validation
+    if [[ "${ENABLE_DNS_RECORD_CHECK:-false}" == "true" ]]; then
+        echo "  ON:   DNS_RECORD_CHECK"
+        enabled=$((enabled + 1))
+        if [[ -z "${DNS_CHECK_RECORDS:-}" ]]; then
+            echo "  WARN: DNS_RECORD_CHECK enabled but DNS_CHECK_RECORDS is empty"
+            warnings=$((warnings + 1))
+        else
+            # Check for dig command
+            if ! command -v dig &>/dev/null; then
+                echo "  WARN: DNS_RECORD_CHECK enabled but dig not found (install bind-utils or dnsutils)"
+                warnings=$((warnings + 1))
+            fi
+            # Validate record format
+            local valid_types="A AAAA MX TXT CNAME NS SOA PTR SRV CAA"
+            local IFS=',' record_count=0
+            for record in ${DNS_CHECK_RECORDS}; do
+                record_count=$((record_count + 1))
+                local rec_domain="${record%%:*}"
+                local rec_rest="${record#*:}"
+                local rec_type="${rec_rest%%:*}"
+                local rec_expected="${rec_rest##*:}"
+                
+                if [[ -z "$rec_domain" || -z "$rec_type" || -z "$rec_expected" || "$rec_rest" == "$rec_domain" ]]; then
+                    echo "  FAIL: Invalid DNS_CHECK_RECORDS entry '${record}' (expected domain:type:expected_value)"
+                    errors=$((errors + 1))
+                else
+                    # Check record type validity
+                    local type_valid=false
+                    for vt in $valid_types; do
+                        if [[ "$(echo "$rec_type" | tr '[:lower:]' '[:upper:]')" == "$vt" ]]; then
+                            type_valid=true
+                            break
+                        fi
+                    done
+                    if [[ "$type_valid" != "true" ]]; then
+                        echo "  WARN: Unknown record type '${rec_type}' in '${record}' (valid: ${valid_types})"
+                        warnings=$((warnings + 1))
+                    fi
+                fi
+            done
+            echo "  OK:   ${record_count} DNS record(s) configured"
+        fi
+    else
+        echo "  OFF:  DNS_RECORD_CHECK"
+    fi
+
+    # Audit logging validation
+    if [[ "${ENABLE_AUDIT_LOGGING:-false}" == "true" ]]; then
+        echo "  ON:   AUDIT_LOGGING"
+        local audit_file="${AUDIT_LOG_FILE:-/var/log/telemon_audit.log}"
+        local audit_dir
+        audit_dir="$(dirname "$audit_file")"
+        if [[ ! -d "$audit_dir" ]]; then
+            echo "  WARN: AUDIT_LOGGING enabled but directory '${audit_dir}' does not exist (will attempt creation)"
+            warnings=$((warnings + 1))
+        elif [[ ! -w "$audit_dir" ]]; then
+            echo "  WARN: AUDIT_LOGGING enabled but directory '${audit_dir}' is not writable"
+            warnings=$((warnings + 1))
+        else
+            echo "  OK:   Audit log path: ${audit_file}"
+        fi
+        local audit_events="${AUDIT_EVENTS:-all}"
+        echo "  OK:   Audit events: ${audit_events}"
+    else
+        echo "  OFF:  AUDIT_LOGGING"
     fi
 
     # Heartbeat / Fleet validation
@@ -4292,14 +5511,21 @@ main() {
             run_digest
             exit $?
             ;;
+        --generate-status-page|-g)
+            # Generate static HTML status page from current state
+            load_state
+            generate_status_page "${2:-}"
+            exit $?
+            ;;
         --help|-h)
             echo "Usage: telemon.sh [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --test, -t       Validate config and send a test Telegram message"
-            echo "  --validate, -v   Validate configuration without sending anything"
-            echo "  --digest, -d     Send a health digest summary (even if everything is OK)"
-            echo "  --help, -h       Show this help"
+            echo "  --test, -t                Validate config and send a test Telegram message"
+            echo "  --validate, -v          Validate configuration without sending anything"
+            echo "  --digest, -d              Send a health digest summary (even if everything is OK)"
+            echo "  --generate-status-page,-g [FILE]  Generate static HTML status page"
+            echo "  --help, -h                Show this help"
             echo ""
             echo "With no options, runs a full monitoring check cycle."
             exit 0

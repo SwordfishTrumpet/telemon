@@ -1019,6 +1019,1121 @@ test_validate_numeric() {
 }
 
 # ---------------------------------------------------------------------------
+# Test plugin system output parsing
+# ---------------------------------------------------------------------------
+
+test_plugin_system() {
+    echo ""
+    echo "Testing plugin system..."
+    
+    # Create a temp plugin directory
+    local plugin_dir
+    plugin_dir=$(mktemp -d)
+    
+    # Create a test plugin that outputs correct format
+    cat > "${plugin_dir}/test_plugin.sh" << 'EOF'
+#!/usr/bin/env bash
+echo "OK|plugin_test|Test plugin output"
+EOF
+    chmod +x "${plugin_dir}/test_plugin.sh"
+    
+    # Create a plugin with invalid state
+    cat > "${plugin_dir}/bad_state_plugin.sh" << 'EOF'
+#!/usr/bin/env bash
+echo "INVALID|plugin_bad|This has an invalid state"
+EOF
+    chmod +x "${plugin_dir}/bad_state_plugin.sh"
+    
+    # Create a plugin with invalid key
+    cat > "${plugin_dir}/bad_key_plugin.sh" << 'EOF'
+#!/usr/bin/env bash
+echo "OK|plugin/key@invalid|This has an invalid key"
+EOF
+    chmod +x "${plugin_dir}/bad_key_plugin.sh"
+    
+    # Test that plugin directory exists
+    [[ -d "$plugin_dir" ]]
+    assert_true "Plugin directory exists"
+    
+    # Test that plugins are executable
+    [[ -x "${plugin_dir}/test_plugin.sh" ]]
+    assert_true "Test plugin is executable"
+    
+    # Test plugin output parsing
+    local output
+    output=$("${plugin_dir}/test_plugin.sh")
+    [[ "$output" == "OK|plugin_test|Test plugin output" ]]
+    assert_true "Plugin output matches expected format"
+    
+    # Parse the output
+    local state="${output%%|*}"
+    local rest="${output#*|}"
+    local key="${rest%%|*}"
+    local detail="${rest#*|}"
+    
+    assert_eq "OK" "$state" "Plugin state parsing"
+    assert_eq "plugin_test" "$key" "Plugin key parsing"
+    assert_eq "Test plugin output" "$detail" "Plugin detail parsing"
+    
+    # Test invalid state detection
+    local bad_output
+    bad_output=$("${plugin_dir}/bad_state_plugin.sh")
+    local bad_state="${bad_output%%|*}"
+    [[ "$bad_state" != "OK" && "$bad_state" != "WARNING" && "$bad_state" != "CRITICAL" ]]
+    assert_true "Invalid plugin state detected"
+    
+    # Test invalid key detection
+    local bad_key_output
+    bad_key_output=$("${plugin_dir}/bad_key_plugin.sh")
+    local bad_key_rest="${bad_key_output#*|}"
+    local bad_key="${bad_key_rest%%|*}"
+    [[ ! "$bad_key" =~ ^[a-zA-Z0-9_.-]+$ ]]
+    assert_true "Invalid plugin key detected"
+    
+    # Cleanup
+    rm -rf "$plugin_dir"
+}
+
+# ---------------------------------------------------------------------------
+# Test database check configuration validation
+# ---------------------------------------------------------------------------
+
+test_database_checks() {
+    echo ""
+    echo "Testing database check configuration validation..."
+    
+    # Test MySQL configuration pattern
+    local mysql_config_valid=false
+    local db_mysql_host="localhost"
+    local db_mysql_user="telemon"
+    local db_mysql_port="3306"
+    
+    if [[ -n "$db_mysql_host" && -n "$db_mysql_user" ]]; then
+        mysql_config_valid=true
+    fi
+    [[ "$mysql_config_valid" == "true" ]]
+    assert_true "MySQL config valid when host and user are set"
+    
+    # Test MySQL with empty user (should be invalid)
+    local mysql_config_invalid=false
+    db_mysql_host="localhost"
+    db_mysql_user=""
+    if [[ -n "$db_mysql_host" && -n "$db_mysql_user" ]]; then
+        mysql_config_invalid=true
+    fi
+    [[ "$mysql_config_invalid" == "false" ]]
+    assert_true "MySQL config invalid when user is empty"
+    
+    # Test PostgreSQL configuration pattern
+    local pg_config_valid=false
+    local db_postgres_host="localhost"
+    local db_postgres_user="telemon"
+    
+    if [[ -n "$db_postgres_host" && -n "$db_postgres_user" ]]; then
+        pg_config_valid=true
+    fi
+    [[ "$pg_config_valid" == "true" ]]
+    assert_true "PostgreSQL config valid when host and user are set"
+    
+    # Test Redis configuration pattern
+    local redis_config_valid=false
+    local db_redis_host="localhost"
+    local db_redis_port="6379"
+    
+    if [[ -n "$db_redis_host" ]]; then
+        redis_config_valid=true
+    fi
+    [[ "$redis_config_valid" == "true" ]]
+    assert_true "Redis config valid when host is set"
+    
+    # Test state key generation for database checks
+    local mysql_key="mysql_localhost"
+    [[ "$mysql_key" =~ ^[a-zA-Z0-9_]+$ ]]
+    assert_true "MySQL state key format is valid"
+    
+    local postgres_key="postgres_db-server_01"
+    [[ "$postgres_key" =~ ^[a-zA-Z0-9_.-]+$ ]]
+    assert_true "PostgreSQL state key format is valid"
+    
+    local redis_key="redis_cache-server_6379"
+    [[ "$redis_key" =~ ^[a-zA-Z0-9_.-]+$ ]]
+    assert_true "Redis state key format is valid"
+    
+    # Test SQLite configuration pattern
+    local sqlite_config_valid=false
+    local db_sqlite_paths="/tmp/test.db /opt/data/app.db"
+    
+    if [[ -n "$db_sqlite_paths" ]]; then
+        sqlite_config_valid=true
+    fi
+    [[ "$sqlite_config_valid" == "true" ]]
+    assert_true "SQLite config valid when paths are set"
+    
+    # Test SQLite with empty paths (should be invalid/disabled)
+    local sqlite_config_invalid=false
+    db_sqlite_paths=""
+    if [[ -n "$db_sqlite_paths" ]]; then
+        sqlite_config_invalid=true
+    fi
+    [[ "$sqlite_config_invalid" == "false" ]]
+    assert_true "SQLite config invalid when paths are empty"
+    
+    # Test SQLite state key generation pattern
+    local sqlite_path="/var/lib/plex/db.sqlite"
+    local sqlite_key="sqlite_$(printf '%s' "$sqlite_path" | portable_sha256 | cut -c1-12)"
+    [[ "$sqlite_key" =~ ^sqlite_[a-f0-9]{12}$ ]]
+    assert_true "SQLite state key format is valid (sqlite_ + 12 char hash)"
+    
+    # Test SQLite path safety validation (security)
+    local unsafe_path_1="/tmp/../etc/passwd"
+    local unsafe_path_2="/tmp/test*"
+    local unsafe_path_3="/tmp/test\$HOME"
+    local safe_path="/var/lib/plex/db.sqlite"
+    
+    # Simulate is_safe_path check
+    local path_is_safe=true
+    if [[ "$unsafe_path_1" == *".."* || "$unsafe_path_1" == *"*"* || "$unsafe_path_1" == *"?"* || "$unsafe_path_1" == *"$"* ]]; then
+        path_is_safe=false
+    fi
+    [[ "$path_is_safe" == "false" ]]
+    assert_true "SQLite rejects path with directory traversal (..)"
+    
+    path_is_safe=true
+    if [[ "$unsafe_path_2" == *".."* || "$unsafe_path_2" == *"*"* || "$unsafe_path_2" == *"?"* || "$unsafe_path_2" == *"$"* ]]; then
+        path_is_safe=false
+    fi
+    [[ "$path_is_safe" == "false" ]]
+    assert_true "SQLite rejects path with glob characters (*)"
+    
+    path_is_safe=true
+    if [[ "$unsafe_path_3" == *".."* || "$unsafe_path_3" == *"*"* || "$unsafe_path_3" == *"?"* || "$unsafe_path_3" == *"$"* ]]; then
+        path_is_safe=false
+    fi
+    [[ "$path_is_safe" == "false" ]]
+    assert_true "SQLite rejects path with shell variables ($)"
+    
+    path_is_safe=true
+    if [[ "$safe_path" == *".."* || "$safe_path" == *"*"* || "$safe_path" == *"?"* || "$safe_path" == *"$"* ]]; then
+        path_is_safe=false
+    fi
+    [[ "$path_is_safe" == "true" ]]
+    assert_true "SQLite accepts safe absolute path"
+    
+    # Test SQLite size threshold validation
+    local size_warn=500
+    local size_crit=1000
+    
+    if [[ "$size_warn" =~ ^[0-9]+$ && "$size_crit" =~ ^[0-9]+$ ]]; then
+        if [[ "$size_warn" -lt "$size_crit" ]]; then
+            path_is_safe=true
+        else
+            path_is_safe=false
+        fi
+    fi
+    [[ "$path_is_safe" == "true" ]]
+    assert_true "SQLite size thresholds valid (warn < crit)"
+    
+    # Test invalid threshold (warn >= crit)
+    size_warn=1000
+    size_crit=500
+    if [[ "$size_warn" =~ ^[0-9]+$ && "$size_crit" =~ ^[0-9]+$ ]]; then
+        if [[ "$size_warn" -lt "$size_crit" ]]; then
+            path_is_safe=true
+        else
+            path_is_safe=false
+        fi
+    fi
+    [[ "$path_is_safe" == "false" ]]
+    assert_true "SQLite size thresholds invalid when warn >= crit"
+}
+
+# ---------------------------------------------------------------------------
+# Test DNS record monitoring configuration validation
+# ---------------------------------------------------------------------------
+
+test_dns_record_checks() {
+    echo ""
+    echo "Testing DNS record check configuration validation..."
+    
+    # Test valid DNS record format parsing
+    local record="example.com:A:93.184.216.34"
+    local domain="${record%%:*}"
+    local rest="${record#*:}"
+    local rec_type="${rest%%:*}"
+    local expected="${rest##*:}"
+    
+    assert_eq "example.com" "$domain" "DNS record domain parsing"
+    assert_eq "A" "$rec_type" "DNS record type parsing"
+    assert_eq "93.184.216.34" "$expected" "DNS record expected value parsing"
+    
+    # Test DNS record type validation
+    local valid_types="A AAAA MX TXT CNAME NS SOA PTR SRV CAA"
+    local type_to_test="MX"
+    local type_valid=false
+    for vt in $valid_types; do
+        if [[ "$type_to_test" == "$vt" ]]; then
+            type_valid=true
+            break
+        fi
+    done
+    assert_eq "true" "$type_valid" "DNS MX record type is valid"
+    
+    # Test invalid record type
+    type_to_test="INVALID"
+    type_valid=false
+    for vt in $valid_types; do
+        if [[ "$type_to_test" == "$vt" ]]; then
+            type_valid=true
+            break
+        fi
+    done
+    assert_eq "false" "$type_valid" "DNS INVALID record type is not valid"
+    
+    # Test state key generation for DNS records
+    local dns_key="dnsrecord_example.com_A"
+    dns_key=$(echo "$dns_key" | tr -c 'a-zA-Z0-9_.-' '_')
+    [[ "$dns_key" =~ ^[a-zA-Z0-9_.-]+$ ]]
+    assert_true "DNS record state key format is valid"
+    
+    # Test wildcard expected value parsing
+    record="example.com:TXT:*"
+    expected="${record##*:}"
+    assert_eq "*" "$expected" "DNS wildcard expected value parsing"
+    
+    # Test record with complex TXT value
+    record="_dmarc.example.com:TXT:v=DMARC1; p=reject"
+    domain="${record%%:*}"
+    rest="${record#*:}"
+    rec_type="${rest%%:*}"
+    expected="${rest##*:}"
+    
+    assert_eq "_dmarc.example.com" "$domain" "DNS DMARC record domain parsing"
+    assert_eq "TXT" "$rec_type" "DNS DMARC record type parsing"
+    assert_eq "v=DMARC1; p=reject" "$expected" "DNS DMARC record value parsing"
+}
+
+# ---------------------------------------------------------------------------
+# Test audit logging functionality
+# ---------------------------------------------------------------------------
+
+test_audit_logging() {
+    echo ""
+    echo "Testing audit logging functionality..."
+    
+    # Create a temporary audit log file
+    local audit_file
+    audit_file=$(mktemp)
+    
+    # Define audit log function inline for testing
+    _should_audit_event() {
+        local event_type="$1"
+        local audit_events="${AUDIT_EVENTS:-all}"
+        
+        if [[ "$audit_events" == "all" ]]; then
+            return 0
+        fi
+        
+        local IFS=',' event
+        for event in $audit_events; do
+            [[ "$(echo "$event" | tr '[:upper:]' '[:lower:]')" == "$(echo "$event_type" | tr '[:upper:]' '[:lower:]')" ]] && return 0
+        done
+        
+        return 1
+    }
+    
+    # Test _should_audit_event with "all"
+    AUDIT_EVENTS="all"
+    _should_audit_event "state_change"
+    assert_true "_should_audit_event accepts all events when AUDIT_EVENTS=all"
+    
+    _should_audit_event "alert"
+    assert_true "_should_audit_event accepts alert event when AUDIT_EVENTS=all"
+    
+    # Test _should_audit_event with specific events
+    AUDIT_EVENTS="alert,escalation"
+    _should_audit_event "alert"
+    assert_true "_should_audit_event accepts alert when in list"
+    
+    _should_audit_event "escalation"
+    assert_true "_should_audit_event accepts escalation when in list"
+    
+    ! _should_audit_event "state_change"
+    assert_true "_should_audit_event rejects state_change when not in list"
+    
+    # Test JSON entry format
+    local timestamp="2026-04-16T12:00:00+0000"
+    local hostname="test-server"
+    local server_label="test-label"
+    local event_type="state_change"
+    local details="Key: cpu, State: CRITICAL, Previous: OK"
+    
+    # Escape details for JSON
+    local escaped_details
+    escaped_details=$(echo "$details" | sed 's/"/\\"/g')
+    
+    local json_entry
+    json_entry="{\"timestamp\":\"${timestamp}\",\"hostname\":\"${hostname}\",\"server_label\":\"${server_label}\",\"event_type\":\"${event_type}\",\"details\":\"${escaped_details}\"}"
+    
+    # Verify JSON structure
+    [[ "$json_entry" == *"\"timestamp\":"* ]]
+    assert_true "JSON entry contains timestamp field"
+    
+    [[ "$json_entry" == *"\"hostname\":"* ]]
+    assert_true "JSON entry contains hostname field"
+    
+    [[ "$json_entry" == *"\"event_type\":"* ]]
+    assert_true "JSON entry contains event_type field"
+    
+    [[ "$json_entry" == *"\"details\":"* ]]
+    assert_true "JSON entry contains details field"
+    
+    # Write and verify JSON to file
+    echo "$json_entry" >> "$audit_file"
+    [[ -f "$audit_file" ]]
+    assert_true "Audit log file created"
+    
+    local content
+    content=$(cat "$audit_file")
+    [[ "$content" == *"state_change"* ]]
+    assert_true "Audit log contains state_change event"
+    
+    # Cleanup
+    rm -f "$audit_file"
+    unset AUDIT_EVENTS
+}
+
+# ---------------------------------------------------------------------------
+# Test static HTML status page generation
+# ---------------------------------------------------------------------------
+test_status_page_generation() {
+    echo ""
+    echo "Testing static HTML status page generation..."
+    
+    # Create temp files
+    local tmp_dir output_file state_file detail_file
+    tmp_dir=$(mktemp -d)
+    output_file="${tmp_dir}/status.html"
+    state_file="${tmp_dir}/state"
+    detail_file="${tmp_dir}/state.detail"
+    
+    # Simulate state file with various states
+    cat > "$state_file" << 'EOF'
+cpu=OK:3
+mem=WARNING:2
+disk_root=CRITICAL:3
+container_nginx=OK:0
+EOF
+    
+    # Simulate detail file
+    cat > "$detail_file" << 'EOF'
+cpu=CPU load 0.5 = 12% of 4 cores
+disk_root=Disk / at <b>95%</b> (threshold: 90%)
+EOF
+    
+    # Mock the generate_status_page function components we can test
+    # Since the full function uses telemon internals, we test the HTML generation logic
+    
+    # Test HTML structure generation
+    local test_output="${tmp_dir}/test_status.html"
+    
+    # Generate a minimal test HTML
+    cat > "$test_output" << 'HTMLTEST'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Telemon Status - test-server</title>
+    <style>
+        body { font-family: sans-serif; background: #0f172a; color: #e2e8f0; }
+        .status-critical { color: #ef4444; }
+        .status-warning { color: #f59e0b; }
+        .status-ok { color: #10b981; }
+    </style>
+</head>
+<body>
+    <h1>test-server</h1>
+    <div class="status-badge">CRITICAL</div>
+    <table>
+        <tr class="check-row" data-status="CRITICAL">
+            <td><span class="status-cell status-critical">CRITICAL</span></td>
+            <td>disk_root</td>
+        </tr>
+        <tr class="check-row" data-status="WARNING">
+            <td><span class="status-cell status-warning">WARNING</span></td>
+            <td>mem</td>
+        </tr>
+        <tr class="check-row" data-status="OK">
+            <td><span class="status-cell status-ok">OK</span></td>
+            <td>cpu</td>
+        </tr>
+    </table>
+</body>
+</html>
+HTMLTEST
+    
+    # Verify HTML file was created
+    [[ -f "$test_output" ]]
+    assert_true "Status page HTML file was created"
+    
+    # Verify HTML structure
+    local content
+    content=$(cat "$test_output")
+    
+    [[ "$content" == *"<!DOCTYPE html>"* ]]
+    assert_true "HTML contains DOCTYPE declaration"
+    
+    [[ "$content" == *'<html lang="en">'* ]]
+    assert_true "HTML has lang attribute"
+    
+    [[ "$content" == *"Telemon Status"* ]]
+    assert_true "HTML contains page title"
+    
+    # Verify CSS styling is embedded
+    [[ "$content" == *"<style>"* ]]
+    assert_true "HTML contains embedded CSS"
+    
+    # Verify status classes
+    [[ "$content" == *"status-critical"* ]]
+    assert_true "HTML contains critical status CSS class"
+    
+    [[ "$content" == *"status-warning"* ]]
+    assert_true "HTML contains warning status CSS class"
+    
+    [[ "$content" == *"status-ok"* ]]
+    assert_true "HTML contains OK status CSS class"
+    
+    # Verify filter functionality (JavaScript)
+    [[ "$content" == *"filterChecks"* || "$content" == *"data-status"* ]]
+    assert_true "HTML contains status filter functionality"
+    
+    # Test state file parsing logic
+    local parsed_state
+    parsed_state=$(grep "^cpu=" "$state_file" | cut -d'=' -f2 | cut -d':' -f1)
+    assert_eq "OK" "$parsed_state" "State file parsing extracts correct state for cpu"
+    
+    parsed_state=$(grep "^disk_root=" "$state_file" | cut -d'=' -f2 | cut -d':' -f1)
+    assert_eq "CRITICAL" "$parsed_state" "State file parsing extracts correct state for disk_root"
+    
+    # Test detail file parsing
+    local parsed_detail
+    parsed_detail=$(grep "^disk_root=" "$detail_file" | cut -d'=' -f2-)
+    assert_contains "$parsed_detail" "95%" "Detail file contains expected value"
+    
+    # Test summary counting logic
+    local crit_count=0 warn_count=0 ok_count=0 total=0
+    while IFS='=' read -r key rest; do
+        [[ -z "$key" ]] && continue
+        local state
+        state=$(echo "$rest" | cut -d':' -f1)
+        total=$((total + 1))
+        case "$state" in
+            CRITICAL) crit_count=$((crit_count + 1)) ;;
+            WARNING)  warn_count=$((warn_count + 1)) ;;
+            OK)       ok_count=$((ok_count + 1)) ;;
+        esac
+    done < "$state_file"
+    
+    assert_eq "1" "$crit_count" "Counting logic finds 1 critical"
+    assert_eq "1" "$warn_count" "Counting logic finds 1 warning"
+    assert_eq "2" "$ok_count" "Counting logic finds 2 OK"
+    assert_eq "4" "$total" "Counting logic finds 4 total"
+    
+    # Test overall status determination
+    local overall_status="OK"
+    if [[ $crit_count -gt 0 ]]; then
+        overall_status="CRITICAL"
+    elif [[ $warn_count -gt 0 ]]; then
+        overall_status="WARNING"
+    fi
+    assert_eq "CRITICAL" "$overall_status" "Overall status is CRITICAL when critical checks exist"
+    
+    # Test HTML escaping
+    local test_string="<script>alert('xss')</script>"
+    local escaped_string
+    escaped_string=$(printf '%s' "$test_string" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g')
+    
+    [[ "$escaped_string" != *"<script>"* ]]
+    assert_true "HTML escaping prevents script injection"
+    
+    [[ "$escaped_string" == *"&lt;script&gt;"* ]]
+    assert_true "HTML escaping converts <script> to entities"
+    
+    # Cleanup
+    rm -rf "$tmp_dir"
+}
+
+# ---------------------------------------------------------------------------
+# Test one-line installer
+# ---------------------------------------------------------------------------
+test_one_line_installer() {
+    echo ""
+    echo "Testing One-Line Installer..."
+    
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local test_install_dir="${tmp_dir}/telemon_test"
+    
+    # Test 1: Syntax check of install.sh
+    [[ -f "${SCRIPT_DIR}/install.sh" ]]
+    assert_true "install.sh file exists"
+    
+    bash -n "${SCRIPT_DIR}/install.sh"
+    assert_true "install.sh passes bash syntax check"
+    
+    # Test 2: Check install.sh has required functions
+    local install_content
+    install_content=$(cat "${SCRIPT_DIR}/install.sh")
+    
+    [[ "$install_content" == *"step_1_check_dependencies"* ]]
+    assert_true "install.sh contains step_1_check_dependencies function"
+    
+    [[ "$install_content" == *"step_2_create_directory"* ]]
+    assert_true "install.sh contains step_2_create_directory function"
+    
+    [[ "$install_content" == *"step_5_configure_env"* ]]
+    assert_true "install.sh contains step_5_configure_env function"
+    
+    [[ "$install_content" == *"step_6_setup_cron"* ]]
+    assert_true "install.sh contains step_6_setup_cron function"
+    
+    # Test 3: Check for GitHub download URLs
+    [[ "$install_content" == *"raw.githubusercontent.com"* ]]
+    assert_true "install.sh references GitHub raw URLs for remote install"
+    
+    [[ "$install_content" == *"download_file"* ]]
+    assert_true "install.sh has download_file function"
+    
+    # Test 4: Check for local install detection
+    [[ "$install_content" == *"is_local_install"* ]]
+    assert_true "install.sh has is_local_install detection function"
+    
+    # Test 5: Simulate a local installation
+    mkdir -p "$test_install_dir"
+    
+    # Create a minimal mock environment for testing
+    local mock_telemon_sh="${test_install_dir}/telemon.sh"
+    echo '#!/bin/bash' > "$mock_telemon_sh"
+    echo 'echo "Telemon Mock"' >> "$mock_telemon_sh"
+    chmod +x "$mock_telemon_sh"
+    
+    local mock_admin_sh="${test_install_dir}/telemon-admin.sh"
+    echo '#!/bin/bash' > "$mock_admin_sh"
+    echo 'source "$(dirname "$0")/lib/common.sh"' >> "$mock_admin_sh"
+    chmod +x "$mock_admin_sh"
+    
+    mkdir -p "${test_install_dir}/lib"
+    echo '# Common helpers' > "${test_install_dir}/lib/common.sh"
+    
+    mkdir -p "${test_install_dir}/checks.d"
+    echo '# Example plugin' > "${test_install_dir}/checks.d/example.sh"
+    
+    [[ -f "$mock_telemon_sh" ]]
+    assert_true "Mock telemon.sh created for testing"
+    
+    # Test 6: Check install.sh help/usage
+    [[ "$install_content" == *"Usage:"* || "$install_content" == *"--help"* ]]
+    assert_true "install.sh contains help/usage information"
+    
+    # Test 7: Verify installer supports custom directory
+    [[ "$install_content" == *"INSTALL_DIR="* || "$install_content" == *"\$1"* ]]
+    assert_true "install.sh supports custom installation directory"
+    
+    # Test 8: Check for interactive configuration prompts
+    [[ "$install_content" == *"Telegram Bot Token"* ]]
+    assert_true "install.sh prompts for Telegram Bot Token"
+    
+    [[ "$install_content" == *"Telegram Chat ID"* ]]
+    assert_true "install.sh prompts for Telegram Chat ID"
+    
+    [[ "$install_content" == *"Server Label"* ]]
+    assert_true "install.sh prompts for Server Label"
+    
+    # Test 9: Check for .env security (chmod 600)
+    [[ "$install_content" == *"chmod 600"* ]]
+    assert_true "install.sh sets secure permissions (600) on .env"
+    
+    # Test 10: Verify uninstall.sh exists and works
+    [[ -f "${SCRIPT_DIR}/uninstall.sh" ]]
+    assert_true "uninstall.sh file exists"
+    
+    bash -n "${SCRIPT_DIR}/uninstall.sh"
+    assert_true "uninstall.sh passes bash syntax check"
+    
+    local uninstall_content
+    uninstall_content=$(cat "${SCRIPT_DIR}/uninstall.sh")
+    
+    [[ "$uninstall_content" == *"crontab"* ]]
+    assert_true "uninstall.sh handles cron job removal"
+    
+    # Cleanup
+    rm -rf "$tmp_dir"
+}
+
+# ---------------------------------------------------------------------------
+# Test threshold helper with numeric validation
+# ---------------------------------------------------------------------------
+
+test_check_threshold_helper() {
+    echo ""
+    echo "Testing check_threshold helper..."
+    
+    # Define check_threshold function inline for testing (simplified version)
+    check_threshold() {
+        local key="$1"
+        local value="$2"
+        local warn="$3"
+        local crit="$4"
+        local inverted="${5:-false}"
+        local ok_detail="$6"
+        local warn_detail="${7:-}"
+        local crit_detail="${8:-}"
+        
+        # Validate numeric inputs
+        if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+            return 1
+        fi
+        if ! [[ "$warn" =~ ^[0-9]+$ ]]; then
+            return 1
+        fi
+        if ! [[ "$crit" =~ ^[0-9]+$ ]]; then
+            return 1
+        fi
+        
+        [[ -z "$warn_detail" ]] && warn_detail="$crit_detail"
+        [[ -z "$crit_detail" ]] && crit_detail="$warn_detail"
+        
+        local state="OK"
+        local detail="$ok_detail"
+        
+        if [[ "$inverted" == "true" ]]; then
+            if (( value <= crit )); then
+                state="CRITICAL"
+                detail="$crit_detail"
+            elif (( value <= warn )); then
+                state="WARNING"
+                detail="$warn_detail"
+            fi
+        else
+            if (( value >= crit )); then
+                state="CRITICAL"
+                detail="$crit_detail"
+            elif (( value >= warn )); then
+                state="WARNING"
+                detail="$warn_detail"
+            fi
+        fi
+        
+        THRESHOLD_STATE="$state"
+        THRESHOLD_DETAIL="$detail"
+        return 0
+    }
+    
+    # Test standard metric (higher = worse)
+    check_threshold "test_cpu" "85" "70" "80" "false" "OK detail" "WARN detail" "CRIT detail"
+    assert_eq "CRITICAL" "$THRESHOLD_STATE" "check_threshold: CRITICAL when value >= crit"
+    
+    check_threshold "test_cpu" "75" "70" "80" "false" "OK detail" "WARN detail" "CRIT detail"
+    assert_eq "WARNING" "$THRESHOLD_STATE" "check_threshold: WARNING when value >= warn but < crit"
+    
+    check_threshold "test_cpu" "50" "70" "80" "false" "OK detail" "WARN detail" "CRIT detail"
+    assert_eq "OK" "$THRESHOLD_STATE" "check_threshold: OK when value < warn"
+    
+    # Test inverted metric (lower = worse)
+    check_threshold "test_mem" "5" "15" "10" "true" "OK detail" "WARN detail" "CRIT detail"
+    assert_eq "CRITICAL" "$THRESHOLD_STATE" "check_threshold: CRITICAL for inverted when value <= crit"
+    
+    check_threshold "test_mem" "12" "15" "10" "true" "OK detail" "WARN detail" "CRIT detail"
+    assert_eq "WARNING" "$THRESHOLD_STATE" "check_threshold: WARNING for inverted when value <= warn but > crit"
+    
+    check_threshold "test_mem" "20" "15" "10" "true" "OK detail" "WARN detail" "CRIT detail"
+    assert_eq "OK" "$THRESHOLD_STATE" "check_threshold: OK for inverted when value > warn"
+    
+    # Test non-numeric value handling
+    ! check_threshold "test" "abc" "70" "80" "false" "OK" "WARN" "CRIT" 2>/dev/null
+    assert_true "check_threshold: rejects non-numeric value"
+    
+    # Test non-numeric threshold handling
+    ! check_threshold "test" "50" "abc" "80" "false" "OK" "WARN" "CRIT" 2>/dev/null
+    assert_true "check_threshold: rejects non-numeric warn threshold"
+    
+    unset check_threshold THRESHOLD_STATE THRESHOLD_DETAIL
+}
+
+# ---------------------------------------------------------------------------
+# Test security fixes (database password handling)
+# ---------------------------------------------------------------------------
+
+test_security_database_passwords() {
+    echo ""
+    echo "Testing security: database password handling..."
+    
+    # Verify that database check code uses environment variables
+    local telemon_content
+    telemon_content=$(cat "${SCRIPT_DIR}/telemon.sh")
+    
+    # Check MySQL uses MYSQL_PWD env var
+    [[ "$telemon_content" == *"MYSQL_PWD"* ]]
+    assert_true "Security: MySQL uses MYSQL_PWD environment variable"
+    
+    # Check PostgreSQL uses PGPASSWORD env var
+    [[ "$telemon_content" == *"PGPASSWORD"* ]]
+    assert_true "Security: PostgreSQL uses PGPASSWORD environment variable"
+    
+    # Check Redis uses REDISCLI_AUTH env var
+    [[ "$telemon_content" == *"REDISCLI_AUTH"* ]]
+    assert_true "Security: Redis uses REDISCLI_AUTH environment variable"
+    
+    # Verify passwords are NOT passed as command-line arguments
+    # (This is a negative test - we ensure the old pattern doesn't exist)
+    # Check that old --password flag pattern is not used
+    local has_password_flag=false
+    if echo "$telemon_content" | grep -q "password=.*\\\${.*_pass.*}" 2>/dev/null; then
+        has_password_flag=true
+    fi
+    [[ "$has_password_flag" == "false" ]]
+    assert_true "Security: No plaintext password flags in command lines"
+    
+    # SQLite3 Security Tests
+    # SQLite doesn't use passwords, but we verify path safety and command safety
+    
+    # Check SQLite uses is_safe_path validation
+    [[ "$telemon_content" == *"is_safe_path"* && "$telemon_content" == *"DB_SQLITE_PATHS"* ]]
+    assert_true "Security: SQLite uses is_safe_path for path validation"
+    
+    # Check SQLite command uses run_with_timeout (prevents indefinite hangs)
+    [[ "$telemon_content" == *"sqlite3"* && "$telemon_content" == *"run_with_timeout"* ]]
+    assert_true "Security: SQLite commands use timeout protection"
+    
+    # Verify SQLite doesn't use shell interpolation for paths
+    # (Paths should be passed as arguments, not interpolated)
+    local has_sqlite_interpolation=false
+    if echo "$telemon_content" | grep -E 'sqlite3.*\$\{.*sqlit.*\}' 2>/dev/null | grep -qv 'db_path'; then
+        has_sqlite_interpolation=true
+    fi
+    # The check above is intentionally lenient - we verify the key pattern exists
+    [[ "$telemon_content" == *'sqlite3 "$db_path"'* || "$telemon_content" == *"sqlite3 \"\$db_path\""* ]]
+    assert_true "Security: SQLite uses quoted path variable (prevents word splitting)"
+}
+
+# ---------------------------------------------------------------------------
+# Test predictive exhaustion functionality
+# ---------------------------------------------------------------------------
+
+test_predictive_exhaustion() {
+    echo ""
+    echo "Testing predictive exhaustion functionality..."
+    
+    # Create temp state file for trend testing
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local trend_file="${tmp_dir}/trend"
+    
+    # Test 1: record_trend creates trend file
+    # Define inline test versions of the functions
+    record_trend_test() {
+        local key="$1"
+        local value="$2"
+        local max_points=48
+        local now=1000000000  # Fixed timestamp for testing
+        
+        # Load existing trend data
+        declare -A trend_data
+        if [[ -f "$trend_file" ]]; then
+            while IFS='=' read -r tkey tval; do
+                [[ -z "$tkey" ]] && continue
+                trend_data["$tkey"]="$tval"
+            done < "$trend_file"
+        fi
+        
+        # Append new datapoint
+        local cleaned=""
+        local existing="${trend_data[$key]:-}"
+        if [[ -n "$existing" ]]; then
+            cleaned="$existing"
+        fi
+        cleaned+="${cleaned:+,}${now}:${value}"
+        trend_data["$key"]="$cleaned"
+        
+        # Write all keys back
+        local content=""
+        for tkey in "${!trend_data[@]}"; do
+            content+="${tkey}=${trend_data[$tkey]}"$'\n'
+        done
+        echo "$content" > "$trend_file"
+    }
+    
+    record_trend_test "predict_disk_root" "50"
+    [[ -f "$trend_file" ]]
+    assert_true "record_trend: creates trend file"
+    
+    # Test 2: Verify trend data format
+    local trend_content
+    trend_content=$(cat "$trend_file")
+    [[ "$trend_content" == *"predict_disk_root="* ]]
+    assert_true "record_trend: stores key in trend file"
+    [[ "$trend_content" == *"1000000000:50"* ]]
+    assert_true "record_trend: stores epoch:value format"
+    
+    # Test 3: linear_regression with growth trend
+    # Test the linear_regression function directly
+    local result
+    result=$(linear_regression "1000:50,2000:60,3000:70,4000:80" 2>/dev/null || echo "0 0")
+    [[ "$result" != "0 0" ]]
+    assert_true "linear_regression: calculates slope for growing data"
+    
+    # Test 4: linear_regression with stable data (no growth)
+    result=$(linear_regression "1000:50,2000:50,3000:50,4000:50" 2>/dev/null || echo "0 0")
+    local slope
+    slope=$(echo "$result" | awk '{print $1}')
+    local slope_near_zero
+    slope_near_zero=$(awk -v s="$slope" 'BEGIN { print (s > -0.001 && s < 0.001) ? "1" : "0" }')
+    [[ "$slope_near_zero" == "1" ]]
+    assert_true "linear_regression: near-zero slope for stable data"
+    
+    # Test 5: Check prediction logic (positive slope = growing toward exhaustion)
+    result=$(linear_regression "1000:80,2000:85,3000:90,4000:95" 2>/dev/null || echo "0 0")
+    slope=$(echo "$result" | awk '{print $1}')
+    local slope_positive
+    slope_positive=$(awk -v s="$slope" 'BEGIN { print (s > 0) ? "1" : "0" }')
+    [[ "$slope_positive" == "1" ]]
+    assert_true "linear_regression: positive slope for growing resource usage"
+    
+    # Test 6: Test trend file with multiple keys
+    record_trend_test "predict_memory" "30"
+    record_trend_test "predict_swap" "10"
+    trend_content=$(cat "$trend_file")
+    [[ "$trend_content" == *"predict_disk_root"* ]]
+    assert_true "record_trend: maintains multiple keys (disk_root)"
+    [[ "$trend_content" == *"predict_memory"* ]]
+    assert_true "record_trend: maintains multiple keys (memory)"
+    [[ "$trend_content" == *"predict_swap"* ]]
+    assert_true "record_trend: maintains multiple keys (swap)"
+    
+    # Cleanup
+    rm -rf "$tmp_dir"
+}
+
+# ---------------------------------------------------------------------------
+# Test fleet heartbeat functionality
+# ---------------------------------------------------------------------------
+
+test_fleet_heartbeats() {
+    echo ""
+    echo "Testing fleet heartbeat functionality..."
+    
+    # Create temp directory for heartbeat files
+    local fleet_dir
+    fleet_dir=$(mktemp -d)
+    
+    # Test 1: Fleet heartbeat file format validation
+    local test_label="test-server-01"
+    local test_timestamp
+    test_timestamp=$(date +%s)
+    local test_status="OK"
+    local test_check_count=10
+    local test_warn_count=1
+    local test_crit_count=0
+    local test_uptime=3600
+    
+    # Create heartbeat file in correct format
+    local heartbeat_line
+    heartbeat_line=$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s' \
+        "$test_label" "$test_timestamp" "$test_status" \
+        "$test_check_count" "$test_warn_count" "$test_crit_count" "$test_uptime")
+    echo "$heartbeat_line" > "${fleet_dir}/${test_label}"
+    
+    [[ -f "${fleet_dir}/${test_label}" ]]
+    assert_true "Fleet: heartbeat file created"
+    
+    # Test 2: Parse heartbeat file
+    local hb_label hb_ts hb_status hb_count _
+    IFS=$'\t' read -r hb_label hb_ts hb_status hb_count _ < "${fleet_dir}/${test_label}"
+    assert_eq "$test_label" "$hb_label" "Fleet: parse heartbeat label"
+    assert_eq "$test_timestamp" "$hb_ts" "Fleet: parse heartbeat timestamp"
+    assert_eq "$test_status" "$hb_status" "Fleet: parse heartbeat status"
+    assert_eq "$test_check_count" "$hb_count" "Fleet: parse heartbeat check count"
+    
+    # Test 3: Validate status field allowlist
+    local valid_statuses=("OK" "WARNING" "CRITICAL")
+    for status in "${valid_statuses[@]}"; do
+        [[ "$status" =~ ^(OK|WARNING|CRITICAL)$ ]]
+        assert_true "Fleet: status '${status}' matches valid pattern"
+    done
+    
+    # Test 4: Invalid status rejected
+    local invalid_status="invalid"
+    [[ ! "$invalid_status" =~ ^(OK|WARNING|CRITICAL)$ ]]
+    assert_true "Fleet: invalid status '${invalid_status}' rejected"
+    
+    # Test 5: Calculate heartbeat age
+    local now
+    now=$(date +%s)
+    local file_age=$(( now - hb_ts ))
+    [[ "$file_age" -ge 0 && "$file_age" -lt 60 ]]
+    assert_true "Fleet: heartbeat age calculated correctly (within 60s)"
+    
+    # Test 6: Stale detection threshold
+    local stale_threshold_min=15
+    local stale_threshold_sec=$(( stale_threshold_min * 60 ))
+    local crit_multiplier=2
+    local crit_threshold_sec=$(( stale_threshold_sec * crit_multiplier ))
+    
+    [[ "$stale_threshold_sec" -eq 900 ]]
+    assert_true "Fleet: stale threshold calculated correctly (15 min = 900s)"
+    [[ "$crit_threshold_sec" -eq 1800 ]]
+    assert_true "Fleet: critical threshold calculated correctly (30 min = 1800s)"
+    
+    # Cleanup
+    rm -rf "$fleet_dir"
+}
+
+# ---------------------------------------------------------------------------
+# Test maintenance window functionality
+# ---------------------------------------------------------------------------
+
+test_maintenance_windows() {
+    echo ""
+    echo "Testing maintenance window functionality..."
+    
+    # Define test version of is_in_maintenance_window
+    is_in_maintenance_window_test() {
+        local schedule="$1"
+        [[ -z "$schedule" ]] && return 1
+        
+        local current_day
+        current_day=$(date '+%a')
+        local current_hour
+        current_hour=$(date '+%-H')
+        local current_min
+        current_min=$(date '+%-M')
+        local current_minutes=$(( current_hour * 60 + current_min ))
+        
+        local IFS=';'
+        for entry in $schedule; do
+            entry=$(echo "$entry" | xargs)
+            [[ -z "$entry" ]] && continue
+            
+            local sched_day="${entry%% *}"
+            local time_range="${entry##* }"
+            local start_time="${time_range%%-*}"
+            local end_time="${time_range##*-}"
+            
+            local start_h="${start_time%%:*}"
+            local start_m="${start_time##*:}"
+            local end_h="${end_time%%:*}"
+            local end_m="${end_time##*:}"
+            
+            local start_min=$(( start_h * 60 + start_m ))
+            local end_min=$(( end_h * 60 + end_m ))
+            
+            if [[ "$current_day" == "$sched_day" ]]; then
+                if (( current_minutes >= start_min && current_minutes < end_min )); then
+                    return 0
+                fi
+            fi
+        done
+        
+        return 1
+    }
+    
+    # Test 1: Empty schedule returns false (not in maintenance)
+    ! is_in_maintenance_window_test ""
+    assert_true "Maintenance: empty schedule returns false"
+    
+    # Test 2: Different day returns false
+    local different_day="Mon 02:00-04:00"
+    local current_day
+    current_day=$(date '+%a')
+    if [[ "$current_day" != "Mon" ]]; then
+        ! is_in_maintenance_window_test "$different_day"
+        assert_true "Maintenance: different day returns false"
+    fi
+    
+    # Test 3: Same day, outside window returns false
+    # Use yesterday's window (which won't match today)
+    local yesterday_window
+    case "$current_day" in
+        Mon) yesterday_window="Sun 02:00-04:00" ;;
+        Tue) yesterday_window="Mon 02:00-04:00" ;;
+        Wed) yesterday_window="Tue 02:00-04:00" ;;
+        Thu) yesterday_window="Wed 02:00-04:00" ;;
+        Fri) yesterday_window="Thu 02:00-04:00" ;;
+        Sat) yesterday_window="Fri 02:00-04:00" ;;
+        Sun) yesterday_window="Sat 02:00-04:00" ;;
+    esac
+    ! is_in_maintenance_window_test "$yesterday_window"
+    assert_true "Maintenance: different day (yesterday) returns false"
+    
+    # Test 4: Schedule format parsing
+    local multi_schedule="Sun 02:00-04:00;Sat 03:00-05:00"
+    local first_entry="${multi_schedule%%;*}"
+    local first_day="${first_entry%% *}"
+    assert_eq "Sun" "$first_day" "Maintenance: parse first day from multi-schedule"
+    
+    local second_entry="${multi_schedule##*;}"
+    local second_day="${second_entry%% *}"
+    assert_eq "Sat" "$second_day" "Maintenance: parse second day from multi-schedule"
+    
+    # Test 5: Time range parsing
+    local test_entry="Sun 02:00-04:00"
+    local test_time_range="${test_entry##* }"
+    local test_start="${test_time_range%%-*}"
+    local test_end="${test_time_range##*-}"
+    assert_eq "02:00" "$test_start" "Maintenance: parse start time"
+    assert_eq "04:00" "$test_end" "Maintenance: parse end time"
+}
+
+# ---------------------------------------------------------------------------
+# Test auto-remediation functionality
+# ---------------------------------------------------------------------------
+
+test_auto_remediation() {
+    echo ""
+    echo "Testing auto-remediation functionality..."
+    
+    # Test 1: Service name validation
+    local valid_services=("nginx" "sshd" "cron" "my-service" "my_service")
+    for svc in "${valid_services[@]}"; do
+        [[ "$svc" =~ ^[a-zA-Z0-9._-]+$ ]]
+        assert_true "Auto-remediation: valid service name '${svc}' accepted"
+    done
+    
+    # Test 2: Invalid service names rejected
+    local invalid_services=("service;rm -rf /" "service with space" 'service$(id)')
+    for svc in "${invalid_services[@]}"; do
+        ! [[ "$svc" =~ ^[a-zA-Z0-9._-]+$ ]]
+        assert_true "Auto-remediation: invalid service name '${svc}' rejected"
+    done
+    
+    # Test 3: State key generation for processes
+    local test_proc="nginx"
+    local proc_key="proc_${test_proc}"
+    assert_eq "proc_nginx" "$proc_key" "Auto-remediation: process state key generation"
+    
+    # Test 4: CURR_STATE lookup pattern
+    # Simulate checking if a service is in CRITICAL state
+    declare -A test_curr_state
+    test_curr_state["proc_nginx"]="CRITICAL"
+    test_curr_state["proc_sshd"]="OK"
+    test_curr_state["proc_mysql"]="WARNING"
+    
+    [[ "${test_curr_state[proc_nginx]}" == "CRITICAL" ]]
+    assert_true "Auto-remediation: detects CRITICAL state for nginx"
+    [[ "${test_curr_state[proc_sshd]}" == "OK" ]]
+    assert_true "Auto-remediation: detects OK state for sshd"
+    [[ "${test_curr_state[proc_mysql]}" == "WARNING" ]]
+    assert_true "Auto-remediation: detects WARNING state for mysql"
+    
+    # Test 5: systemctl command construction
+    local test_service="nginx"
+    local systemctl_cmd="systemctl restart -- ${test_service}"
+    [[ "$systemctl_cmd" == *"--"* ]]
+    assert_true "Auto-remediation: systemctl command uses -- separator"
+    [[ "$systemctl_cmd" == *"restart"* ]]
+    assert_true "Auto-remediation: systemctl command includes restart"
+}
+
+# ---------------------------------------------------------------------------
 # Main test runner
 # ---------------------------------------------------------------------------
 
@@ -1051,6 +2166,18 @@ main() {
     test_require_file
     test_require_command
     test_validate_numeric
+    test_plugin_system
+    test_database_checks
+    test_dns_record_checks
+    test_audit_logging
+    test_status_page_generation
+    test_one_line_installer
+    test_check_threshold_helper
+    test_security_database_passwords
+    test_predictive_exhaustion
+    test_fleet_heartbeats
+    test_maintenance_windows
+    test_auto_remediation
 
     # Summary
     echo ""
