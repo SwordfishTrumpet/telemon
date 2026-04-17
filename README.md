@@ -10,6 +10,23 @@
 
 Telemon watches your Linux server — CPU, memory, disk, containers, services, ports, SSL certs, hardware health, and more — and only alerts you when something **changes state**. No spam, just signal. It runs via cron every 5 minutes and requires zero ongoing maintenance.
 
+## 🚀 One-Line Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SwordfishTrumpet/telemon/main/install.sh | bash
+```
+
+**That's it.** The installer will prompt for your Telegram credentials and configure everything automatically.
+
+For **silent/CI/CD installs** (no prompts):
+
+```bash
+TELEGRAM_BOT_TOKEN="xxx" TELEGRAM_CHAT_ID="yyy" \
+  curl -fsSL https://raw.githubusercontent.com/SwordfishTrumpet/telemon/main/install.sh | bash -s -- --silent
+```
+
+[📖 Full installation options](#quick-install-one-liner) | [🔧 Manual install](#quick-start-manual-install)
+
 ## Features
 
 ### Core System Monitoring
@@ -182,9 +199,11 @@ Telemon sends alerts through up to three channels simultaneously:
 - **One-Line Install** — `curl | bash` installer downloads, configures, and sets up Telemon in one step
 - **Local Install** — `bash install.sh` handles dependencies, permissions, cron, logrotate, and test message
 
-## One-Line Install (Easiest)
+## Quick Install (One-Liner)
 
-Install Telemon with a single command:
+### Interactive Install (Recommended for First Time)
+
+Install Telemon with a single command. The installer will guide you through configuration:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/SwordfishTrumpet/telemon/main/install.sh | bash
@@ -196,18 +215,60 @@ Or install to a custom directory:
 curl -fsSL https://raw.githubusercontent.com/SwordfishTrumpet/telemon/main/install.sh | bash -s -- /opt/telemon
 ```
 
+### Silent/Automated Install (CI/CD, Ansible, Cloud Init)
+
+For automated deployments, use silent mode with environment variables:
+
+```bash
+# Basic silent install (auto-detects Docker/PM2)
+TELEGRAM_BOT_TOKEN="123456789:ABCdefGHIjklMNOpqrSTUvwxyz" \
+TELEGRAM_CHAT_ID="123456789" \
+  curl -fsSL https://raw.githubusercontent.com/SwordfishTrumpet/telemon/main/install.sh | bash -s -- --silent
+```
+
+```bash
+# Advanced silent install with all options
+TELEGRAM_BOT_TOKEN="xxx" \
+TELEGRAM_CHAT_ID="yyy" \
+SERVER_LABEL="web-prod-01" \
+ENABLE_DOCKER=true \
+ENABLE_PM2=true \
+ENABLE_SITES=true \
+SITE_URLS="https://example.com https://api.example.com" \
+  curl -fsSL https://raw.githubusercontent.com/SwordfishTrumpet/telemon/main/install.sh | bash -s -- --silent
+```
+
+**Silent Mode Features:**
+- ✅ No interactive prompts — perfect for automation
+- ✅ Auto-detects Docker and PM2 (enables if found)
+- ✅ Uses sensible defaults for all settings
+- ✅ Merges with existing `.env` if present (safe for updates)
+- ✅ Fails gracefully with error codes for CI/CD
+
+**Silent Mode Environment Variables:**
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `TELEGRAM_BOT_TOKEN` | Yes | — | Your Telegram bot token |
+| `TELEGRAM_CHAT_ID` | Yes | — | Your Telegram chat ID |
+| `SERVER_LABEL` | No | `hostname` | Server name in alerts |
+| `ENABLE_DOCKER` | No | `auto` | `auto`/`true`/`false` — auto detects docker command |
+| `ENABLE_PM2` | No | `auto` | `auto`/`true`/`false` — auto detects pm2 + python3 |
+| `ENABLE_SITES` | No | `false` | `true`/`false` — enable website monitoring |
+| `SITE_URLS` | No | — | Space-separated URLs (if ENABLE_SITES=true) |
+
 ### What the Installer Does
 
 1. **Downloads** the latest Telemon files from GitHub
-2. **Configures** your Telegram credentials interactively
-3. **Sets up** optional monitoring (Docker, PM2, websites)
+2. **Configures** your Telegram credentials (interactive or from env vars)
+3. **Sets up** optional monitoring (Docker, PM2, websites — auto-detected in silent mode)
 4. **Installs** a cron job (runs every 5 minutes)
 5. **Validates** the configuration and sends a test alert
 
 ### Requirements for One-Line Install
 
 - Linux server with `curl`, `bash`, and `awk`
-- Your Telegram bot token and chat ID (the installer will prompt you)
+- Your Telegram bot token and chat ID ([see below for how to get these](#getting-telegram-credentials))
 
 ---
 
@@ -1333,7 +1394,7 @@ Telemon reads from Linux-specific interfaces: `/proc/loadavg`, `/proc/meminfo`, 
 
 ```
 telemon/
-├── telemon.sh              # Main monitoring script (~5700 lines)
+├── telemon.sh              # Main monitoring script (~5674 lines)
 ├── telemon-admin.sh        # Admin CLI (backup, restore, status, validate, logs)
 ├── checks.d/               # Plugin directory (optional custom checks)
 │   └── example-plugin.sh   # Example plugin showing output format

@@ -388,6 +388,16 @@ validate_thresholds() {
     [[ "${ENABLE_UPS_CHECK:-false}" == "true" ]] && { check_threshold_pair "UPS" "${UPS_THRESHOLD_WARN:-30}" "${UPS_THRESHOLD_CRIT:-10}" "true" || has_errors=true; }
     [[ "${ENABLE_NVME_CHECK:-false}" == "true" ]] && { check_threshold_pair "NVME_TEMP" "${NVME_TEMP_THRESHOLD_WARN:-70}" "${NVME_TEMP_THRESHOLD_CRIT:-80}" || has_errors=true; }
     
+    # Validate SQLite size thresholds if database checks are enabled and SQLite paths are configured
+    if [[ "${ENABLE_DATABASE_CHECKS:-false}" == "true" ]] && [[ -n "${DB_SQLITE_PATHS:-}" ]]; then
+        local sqlite_warn="${DB_SQLITE_SIZE_THRESHOLD_WARN:-0}"
+        local sqlite_crit="${DB_SQLITE_SIZE_THRESHOLD_CRIT:-0}"
+        # Only validate if at least one threshold is set (non-zero)
+        if [[ "$sqlite_warn" != "0" ]] || [[ "$sqlite_crit" != "0" ]]; then
+            check_threshold_pair "DB_SQLITE_SIZE" "$sqlite_warn" "$sqlite_crit" || has_errors=true
+        fi
+    fi
+    
     # Validate confirmation count
     if ! is_valid_number "${CONFIRMATION_COUNT:-3}"; then
         log "ERROR" "Invalid CONFIRMATION_COUNT: '${CONFIRMATION_COUNT}' must be a positive integer"
@@ -1202,8 +1212,6 @@ check_swap() {
                 "Swap: <b>${swap_used_mb}MB</b> used of ${swap_total_mb}MB (<b>${swap_pct}%</b>, threshold: ${SWAP_THRESHOLD_WARN}%)" \
                 "Swap: <b>${swap_used_mb}MB</b> used of ${swap_total_mb}MB (<b>${swap_pct}%</b>, threshold: ${SWAP_THRESHOLD_CRIT}%)"
             
-            # Predictive: track swap usage trend (state change already handled by check_threshold)
-
             # Predictive: track swap usage trend
             record_trend "predict_swap" "$swap_pct"
             check_prediction "predict_swap" "Swap" "$swap_pct"
