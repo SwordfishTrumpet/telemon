@@ -11,6 +11,7 @@ telemon_cron.log
 
 # State files
 /tmp/telemon_*
+.telemon_state*
 
 # Backup directories
 backups/

@@ -53,6 +53,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Changed `check_internet()` state key from `inet` to `internet` to match function name
   - Updated AGENTS.md documentation to reflect the correct key name
 
+- **ODBC String Concatenation Bug** — fixed connection string building:
+  - Fixed missing `=` sign in `conn_str+"UID=${conn_user};"` and `conn_str+"PWD=${conn_pass};"`
+  - Changed to `conn_str+="UID=${conn_user};"` and `conn_str+="PWD=${conn_pass};"`
+  - Added test coverage to catch similar string concatenation issues
+  - Bug prevented UID and PWD from being added to ODBC connection strings
+
 ### Added
 - **ODBC Database Monitoring** — universal database connectivity support:
   - New `check_odbc()` function for monitoring any ODBC-compatible database
