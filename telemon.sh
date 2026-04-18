@@ -5482,7 +5482,12 @@ EOF
     
     # Add authentication if configured
     if [[ -n "$smtp_user" && -n "$smtp_pass" ]]; then
-        curl_args+=(--user "${smtp_user}:${smtp_pass}")
+        # SECURITY: URL-encode password to handle special characters (@, #, %, &, etc)
+        # Order matters: encode % first, then other characters
+        # This prevents curl from misinterpreting characters like @ in passwords
+        local encoded_pass
+        encoded_pass=$(printf '%s' "$smtp_pass" | sed 's/%/%25/g; s/@/%40/g; s/#/%23/g; s/&/%26/g; s/=/%3D/g; s/?/%3F/g')
+        curl_args+=(--user "${smtp_user}:${encoded_pass}")
     fi
     
     # Add TLS/SSL options
@@ -5494,12 +5499,24 @@ EOF
         curl_args+=(--ssl-reqd)
     fi
     
+    # SECURITY: Warn if sending credentials without encryption
+    if [[ -n "$smtp_user" && "$smtp_tls" != "yes" && "$smtp_port" != "465" ]]; then
+        log "WARN" "SMTP authentication without TLS - credentials will be sent in plaintext!"
+    fi
+    
     # Send the email
-    if curl "${curl_args[@]}" --mail-from "$email_from" --mail-rcpt "$email_to" <<< "$email_content" 2>/dev/null; then
+    local curl_output
+    curl_output=$(curl "${curl_args[@]}" --mail-from "$email_from" --mail-rcpt "$email_to" <<< "$email_content" 2>&1)
+    local curl_exit=$?
+    
+    if [[ $curl_exit -eq 0 ]]; then
         log "DEBUG" "Email alert sent to ${email_to} via SMTP ${smtp_host}:${smtp_port}"
         return 0
     else
-        log "WARN" "Email delivery failed via SMTP ${smtp_host}:${smtp_port}"
+        # Log the actual error for debugging (but sanitize credentials)
+        local sanitized_error
+        sanitized_error=$(echo "$curl_output" | grep -E "(^< [0-9]|^curl:|Failed|Could not|Error|timeout|refused|resolve)" | tail -3 | sed 's/'"$smtp_pass"'/***/g')
+        log "WARN" "Email delivery failed via SMTP ${smtp_host}:${smtp_port}: ${sanitized_error:-"Unknown error (exit $curl_exit)"}"
         return 1
     fi
 }
