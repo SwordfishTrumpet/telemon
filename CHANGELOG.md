@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Input Validation** — critical `.env` security hardening:
+  - Added `validate_env_security()` function to sanitize critical variables after sourcing
+  - Validates `STATE_FILE` for dangerous characters (prevents command injection via malicious path)
+  - Validates `TELEGRAM_BOT_TOKEN` format (expected `123456:ABC...` pattern)
+  - Validates `TELEGRAM_CHAT_ID` is numeric (prevents injection)
+  - Validates `EMAIL_TO` email format
+  - Validates `SMTP_PORT` is valid port number (1-65535)
+  - Validates `MAX_ALERT_QUEUE_*` settings are numeric
+  - FATAL exit on security validation failures (prevents running with dangerous config)
+
+### Fixed
+- **State File Persistence** — fixes critical re-alert spam on reboots:
+  - Changed default `STATE_FILE` from `/tmp/telemon_sys_alert_state` to `${SCRIPT_DIR}/.telemon_state`
+  - `/tmp` is cleared on reboot → state lost → confirmation counts reset → false re-alerts
+  - Added auto-migration: on first run, migrates existing state from `/tmp` to persistent location
+  - Logs warning if state detected in `/tmp` with instructions to update `.env`
+  - For production, use `/var/lib/telemon/state` or `~/.local/share/telemon/state`
+  
+- **Bounded Alert Queue** — prevents unbounded disk growth from failed alerts:
+  - Added `MAX_ALERT_QUEUE_SIZE` (default: 1MB) — truncates oldest alerts if exceeded
+  - Added `MAX_ALERT_QUEUE_AGE` (default: 24h) — clears entire queue if older than threshold
+  - Queue is now bounded: cannot grow indefinitely from persistent Telegram failures
+  - Logs warnings when queue is truncated or cleared
+
 ### Added
 - **Native SMTP Support** — send email alerts directly via curl without local mailer:
   - New config options: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_TLS`
