@@ -1871,6 +1871,12 @@ test_odbc_checks() {
     # Check connection validation (DSN or DRIVER+SERVER required)
     [[ "$telemon_content" == *"need ODBC_\${conn_name}_DSN or"* || "$telemon_content" == *"ODBC_\${conn_name}_DRIVER"* ]]
     assert_true "ODBC: validates connection has DSN or DRIVER+SERVER"
+    
+    # Check string concatenation is correct (bug fix verification)
+    [[ "$telemon_content" == *"conn_str+=\"UID=\${conn_user};\""* ]]
+    assert_true "ODBC: correct string concatenation for UID (conn_str+=)"
+    [[ "$telemon_content" == *"conn_str+=\"PWD=\${conn_pass};\""* ]]
+    assert_true "ODBC: correct string concatenation for PWD (conn_str+=)"
 }
 
 # ---------------------------------------------------------------------------

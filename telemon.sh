@@ -2781,8 +2781,8 @@ check_odbc() {
             # Connection string-based
             conn_str="DRIVER={${conn_driver}};SERVER=${conn_server};"
             [[ -n "$conn_database" ]] && conn_str+="DATABASE=${conn_database};"
-            [[ -n "$conn_user" ]] && conn_str+"UID=${conn_user};"
-            [[ -n "$conn_pass" ]] && conn_str+"PWD=${conn_pass};"
+            [[ -n "$conn_user" ]] && conn_str+="UID=${conn_user};"
+            [[ -n "$conn_pass" ]] && conn_str+="PWD=${conn_pass};"
         fi
         
         # Test connection using isql
