@@ -1278,7 +1278,7 @@ check_internet() {
         detail="Internet: ${fail_count}/${PING_FAIL_THRESHOLD} pings to ${safe_target} failed -- intermittent"
     fi
 
-    check_state_change "inet" "$state" "$detail"
+    check_state_change "internet" "$state" "$detail"
 }
 
 # ===========================================================================
@@ -5312,6 +5312,17 @@ run_validate() {
         warnings=$((warnings + 1))
     else
         echo "  OK:   CHECK_TIMEOUT=${ct}s"
+    fi
+
+    # ODBC_CHECK_TIMEOUT (only validate if ODBC is enabled)
+    if [[ "${ENABLE_ODBC_CHECKS:-false}" == "true" ]]; then
+        local oct="${ODBC_CHECK_TIMEOUT:-${CHECK_TIMEOUT:-30}}"
+        if ! is_valid_number "$oct" || [[ "$oct" -lt 1 ]]; then
+            echo "  WARN: ODBC_CHECK_TIMEOUT '${oct}' should be a positive integer"
+            warnings=$((warnings + 1))
+        else
+            echo "  OK:   ODBC_CHECK_TIMEOUT=${oct}s"
+        fi
     fi
 
     # LOG_MAX_SIZE_MB

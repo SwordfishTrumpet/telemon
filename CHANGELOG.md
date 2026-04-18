@@ -48,6 +48,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Code Quality** — fixed inconsistent state key generation in database checks:
   - MySQL, PostgreSQL, and Redis checks now use centralized `sanitize_state_key()` function
   - Previously used inline pattern substitution which violated DRY principle
+
+- **State Key Consistency** — fixed inconsistent `internet` state key:
+  - Changed `check_internet()` state key from `inet` to `internet` to match function name
+  - Updated AGENTS.md documentation to reflect the correct key name
+
+### Added
+- **ODBC Database Monitoring** — universal database connectivity support:
+  - New `check_odbc()` function for monitoring any ODBC-compatible database
+  - Supports SQL Server, Oracle, IBM DB2, Informix, Sybase, and more
+  - DSN-based and connection string-based configuration options
+  - Timeout support via `ODBC_CHECK_TIMEOUT` parameter
+  - Configuration validation in `run_validate()`
+  - State key pattern: `odbc_<connection_name>`
   - Improves maintainability and ensures consistent state key format
 
 ### Added

@@ -96,6 +96,8 @@ TELEGRAM_BOT_TOKEN="xxx" TELEGRAM_CHAT_ID="yyy" \
 - **MySQL/MariaDB** — Connection check and replication lag monitoring
 - **PostgreSQL** — Connection check and streaming replication lag monitoring  
 - **Redis** — Connection check, authentication validation, master/replica status
+- **SQLite3** — File integrity, size thresholds, corruption detection
+- **ODBC** — Universal database support (SQL Server, Oracle, DB2, etc.) via unixODBC
 - **Configurable Timeouts** — Per-database timeout settings to prevent hanging
 
 ### Alert Channels
@@ -189,6 +191,7 @@ Telemon sends alerts through multiple channels simultaneously:
 | Predictive | `check_prediction` | `ENABLE_PREDICTIVE_ALERTS` | `false` | awk | `predict_*` | `PREDICT_HORIZON_HOURS=24` (hours to exhaustion) |
 | Plugins | `check_plugins` | `ENABLE_PLUGINS` | `false` | executable scripts in `checks.d/` | `<plugin_key>` | Binary: OK/WARNING/CRITICAL |
 | Database | `check_databases` | `ENABLE_DATABASE_CHECKS` | `false` | `mysql`/`psql`/`redis-cli`/`sqlite3` | `mysql_<host>`, `postgres_<host>`, `redis_<host>_<port>`, `sqlite_<hash>` | Binary: connected or not |
+| ODBC | `check_odbc` | `ENABLE_ODBC_CHECKS` | `false` | `isql` (unixODBC) | `odbc_<name>` | DSN-based or connection string |
 
 </details>
 
@@ -802,6 +805,44 @@ DB_SQLITE_SIZE_THRESHOLD_CRIT=1000  # MB (0 = disabled)
 - **CRITICAL**: Connection failure, authentication error, replication lag > 5 minutes, or database corruption (SQLite3)
 - **WARNING**: Replication lag > 1 minute (for MySQL/PostgreSQL replica) or size threshold exceeded (SQLite3)
 - **State Keys**: `mysql_<host>`, `postgres_<host>`, `redis_<host>_<port>`, `sqlite_<hash>`
+
+### ODBC Database Connections
+
+Monitor virtually any database via ODBC using unixODBC (`isql` command). Supports Microsoft SQL Server, Oracle, IBM DB2, Informix, Sybase, and any database with an ODBC driver:
+
+```bash
+# Enable ODBC monitoring (separate from native database checks)
+ENABLE_ODBC_CHECKS=true
+
+# Define connections to monitor (space-separated list of connection names)
+ODBC_CONNECTIONS="mssql_prod oracle_dw"
+
+# --- Example 1: DSN-based connection (using /etc/odbc.ini entry) ---
+ODBC_MSSQL_PROD_DSN="MSSQL-Production-DSN"
+ODBC_MSSQL_PROD_USER="telemon"
+ODBC_MSSQL_PROD_PASS="secure_password"
+ODBC_MSSQL_PROD_QUERY="SELECT 1"
+
+# --- Example 2: Connection string-based (no DSN needed) ---
+ODBC_ORACLE_DW_DRIVER="Oracle ODBC Driver"
+ODBC_ORACLE_DW_SERVER="oracle-dw.example.com:1521/ORCLDW"
+ODBC_ORACLE_DW_USER="monitor"
+ODBC_ORACLE_DW_PASS="secure_password"
+ODBC_ORACLE_DW_QUERY="SELECT 1 FROM DUAL"
+
+# Optional: custom timeout for ODBC connections (default: same as CHECK_TIMEOUT)
+ODBC_CHECK_TIMEOUT=30
+```
+
+**Requirements:**
+- `unixodbc` package (provides `isql` command)
+- Database-specific ODBC drivers (e.g., `msodbcsql18` for SQL Server, `oracle-instantclient-odbc` for Oracle)
+
+**Alerts:**
+- **CRITICAL**: Connection failed, authentication error, or query failed
+- **WARNING**: Slow response (>5 seconds)
+- **OK**: Connected successfully
+- **State Keys**: `odbc_<connection_name>`
 
 ### DNS Record Monitoring
 
