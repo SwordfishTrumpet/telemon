@@ -45,6 +45,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added helpful installation hints in warning messages
   - Previously: checks silently skipped, users didn't know monitoring wasn't working
 
+- **Code Quality** — fixed inconsistent state key generation in database checks:
+  - MySQL, PostgreSQL, and Redis checks now use centralized `sanitize_state_key()` function
+  - Previously used inline pattern substitution which violated DRY principle
+  - Improves maintainability and ensures consistent state key format
+
 ### Added
 - **Native SMTP Support** — send email alerts directly via curl without local mailer:
   - New config options: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_TLS`

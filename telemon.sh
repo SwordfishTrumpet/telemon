@@ -2500,7 +2500,7 @@ check_databases() {
                 fi
             fi
             
-            check_state_change "mysql_${mysql_host//[^a-zA-Z0-9]/_}" "$mysql_state" "$mysql_detail"
+            check_state_change "mysql_$(sanitize_state_key "$mysql_host")" "$mysql_state" "$mysql_detail"
         fi
     fi
     
@@ -2561,7 +2561,7 @@ check_databases() {
                 fi
             fi
             
-            check_state_change "postgres_${pg_host//[^a-zA-Z0-9]/_}" "$pg_state" "$pg_detail"
+            check_state_change "postgres_$(sanitize_state_key "$pg_host")" "$pg_state" "$pg_detail"
         fi
     fi
     
@@ -2628,7 +2628,7 @@ check_databases() {
                 fi
             fi
             
-            check_state_change "redis_${redis_host//[^a-zA-Z0-9]/_}_${redis_port}" "$redis_state" "$redis_detail"
+            check_state_change "redis_$(sanitize_state_key "${redis_host}_${redis_port}")" "$redis_state" "$redis_detail"
         fi
     fi
 
