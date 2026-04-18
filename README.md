@@ -244,6 +244,7 @@ SITE_URLS="https://example.com https://api.example.com" \
 - ✅ Uses sensible defaults for all settings
 - ✅ Merges with existing `.env` if present (safe for updates)
 - ✅ Fails gracefully with error codes for CI/CD
+- ✅ Supports both cron and systemd scheduling
 
 **Silent Mode Environment Variables:**
 
@@ -256,14 +257,54 @@ SITE_URLS="https://example.com https://api.example.com" \
 | `ENABLE_PM2` | No | `auto` | `auto`/`true`/`false` — auto detects pm2 + python3 |
 | `ENABLE_SITES` | No | `false` | `true`/`false` — enable website monitoring |
 | `SITE_URLS` | No | — | Space-separated URLs (if ENABLE_SITES=true) |
+| `TELEMON_SILENT` | No | `false` | Alternative to `--silent` flag |
+| `TELEMON_SYSTEMD` | No | `false` | Alternative to `--systemd` flag |
+
+### Systemd Timer Install (Alternative to Cron)
+
+For systems without cron (common in containers and minimal systems), use systemd timer:
+
+```bash
+# Interactive install with systemd timer
+curl -fsSL https://raw.githubusercontent.com/SwordfishTrumpet/telemon/main/install.sh | bash -s -- --systemd
+
+# Silent install with systemd timer
+TELEGRAM_BOT_TOKEN="xxx" TELEGRAM_CHAT_ID="yyy" \
+  curl -fsSL https://raw.githubusercontent.com/SwordfishTrumpet/telemon/main/install.sh | bash -s -- --silent --systemd
+```
+
+**Systemd Features:**
+- ✅ Works on systems without `crontab`
+- ✅ Auto-detects user vs system install
+- ✅ Uses user systemd by default (no root required)
+- ✅ Journal integration for logging (`journalctl -u telemon`)
 
 ### What the Installer Does
 
-1. **Downloads** the latest Telemon files from GitHub
+1. **Downloads** the latest Telemon files from GitHub (or copies from local clone)
 2. **Configures** your Telegram credentials (interactive or from env vars)
 3. **Sets up** optional monitoring (Docker, PM2, websites — auto-detected in silent mode)
-4. **Installs** a cron job (runs every 5 minutes)
+4. **Installs** a cron job or systemd timer (runs every 5 minutes)
 5. **Validates** the configuration and sends a test alert
+
+### Installer Options
+
+```bash
+bash install.sh [OPTIONS] [INSTALL_DIR]
+
+Options:
+  --silent      Non-interactive mode (uses env vars for config)
+  --systemd     Use systemd timer instead of cron
+  --skip-test   Skip the test notification at the end
+  --help, -h    Show help message
+
+Examples:
+  bash install.sh                          # Interactive, default dir
+  bash install.sh /opt/telemon             # Interactive, custom dir
+  bash install.sh --silent                 # Silent mode
+  bash install.sh --systemd                # Use systemd timer
+  bash install.sh --silent --systemd       # Silent + systemd
+```
 
 ### Requirements for One-Line Install
 

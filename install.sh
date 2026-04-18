@@ -8,11 +8,18 @@
 # Or with custom install directory:
 #   curl -fsSL ... | bash -s -- /opt/telemon
 #
+# Silent/Automated install (CI/CD, no prompts):
+#   TELEGRAM_BOT_TOKEN="xxx" TELEGRAM_CHAT_ID="yyy" \
+#     curl -fsSL ... | bash -s -- --silent
+#
+# With systemd instead of cron:
+#   curl -fsSL ... | bash -s -- --systemd
+#
 # Features:
-#   - Downloads latest release from GitHub
-#   - Interactive .env configuration
+#   - Downloads latest release from GitHub (or uses local files if cloned)
+#   - Interactive or silent .env configuration
 #   - Automatic dependency checking
-#   - Cron job setup
+#   - Cron or systemd timer setup
 #   - Initial test run
 # =============================================================================
 set -euo pipefail
@@ -25,9 +32,15 @@ REPO_NAME="telemon"
 REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}"
 RAW_URL="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/main"
 
-# Installation directory (can be overridden via first argument)
-INSTALL_DIR="${1:-$HOME/telemon}"
+# Default installation directory
+DEFAULT_INSTALL_DIR="${HOME}/telemon"
+INSTALL_DIR="$DEFAULT_INSTALL_DIR"
 CRON_SCHEDULE="*/5 * * * *"
+
+# Flags
+SILENT_MODE="${TELEMON_SILENT:-false}"
+SYSTEMD_MODE="${TELEMON_SYSTEMD:-false}"
+SKIP_TEST="${TELEMON_SKIP_TEST:-false}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -46,8 +59,9 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 # Check if we're running from local repo or need to download
 is_local_install() {
-    [[ -f "${BASH_SOURCE[0]:-$0}" && "$(dirname "${BASH_SOURCE[0]:-$0}")" != "." ]] && \
-    [[ -f "$(dirname "${BASH_SOURCE[0]:-$0}")/telemon.sh" ]]
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || return 1
+    [[ -f "${script_dir}/telemon.sh" ]]
 }
 
 # Download a file from GitHub
@@ -61,6 +75,84 @@ download_file() {
         return 1
     fi
     return 0
+}
+
+# Parse command line arguments
+parse_arguments() {
+    local args=()
+    
+    for arg in "$@"; do
+        case "$arg" in
+            --silent)
+                SILENT_MODE="true"
+                ;;
+            --systemd)
+                SYSTEMD_MODE="true"
+                ;;
+            --skip-test)
+                SKIP_TEST="true"
+                ;;
+            --help|-h)
+                show_help
+                exit 0
+                ;;
+            -*)
+                log_warn "Unknown option: $arg"
+                ;;
+            *)
+                # Non-flag argument is the install directory
+                if [[ "$arg" != "" && "$INSTALL_DIR" == "$DEFAULT_INSTALL_DIR" ]]; then
+                    INSTALL_DIR="$arg"
+                fi
+                ;;
+        esac
+    done
+    
+    # Also check environment variables for backward compatibility
+    [[ "${TELEMON_SILENT:-}" == "true" ]] && SILENT_MODE="true"
+    [[ "${TELEMON_SYSTEMD:-}" == "true" ]] && SYSTEMD_MODE="true"
+}
+
+show_help() {
+    cat << EOF
+Telemon Installer
+
+Usage: bash install.sh [OPTIONS] [INSTALL_DIR]
+
+Arguments:
+  INSTALL_DIR           Target directory (default: ~/telemon)
+
+Options:
+  --silent              Non-interactive mode (uses env vars for config)
+  --systemd             Use systemd timer instead of cron
+  --skip-test           Skip the test notification at the end
+  --help, -h            Show this help message
+
+Environment Variables (for --silent mode):
+  TELEGRAM_BOT_TOKEN    Telegram bot token (required)
+  TELEGRAM_CHAT_ID      Telegram chat ID (required)
+  SERVER_LABEL          Server name in alerts (default: hostname)
+  ENABLE_DOCKER         Enable Docker monitoring (true/false/auto)
+  ENABLE_PM2            Enable PM2 monitoring (true/false/auto)
+  ENABLE_SITES          Enable site monitoring (true/false)
+  SITE_URLS             Space-separated URLs to monitor
+  TELEMON_SILENT        Same as --silent flag
+  TELEMON_SYSTEMD       Same as --systemd flag
+
+Examples:
+  # Interactive install to default location
+  bash install.sh
+
+  # Silent install with Telegram credentials
+  TELEGRAM_BOT_TOKEN="xxx" TELEGRAM_CHAT_ID="yyy" bash install.sh --silent
+
+  # Install with systemd timer instead of cron
+  bash install.sh --systemd
+
+  # Custom directory with silent mode
+  TELEGRAM_BOT_TOKEN="xxx" TELEGRAM_CHAT_ID="yyy" bash install.sh --silent /opt/telemon
+
+EOF
 }
 
 # ---------------------------------------------------------------------------
@@ -95,6 +187,7 @@ step_1_check_dependencies() {
     command -v pgrep &>/dev/null || optional+=("pgrep (for process monitoring)")
     command -v docker &>/dev/null || optional+=("docker (for container monitoring)")
     command -v python3 &>/dev/null || optional+=("python3 (for PM2 & webhook support)")
+    command -v crontab &>/dev/null || optional+=("crontab (for cron scheduling - use --systemd if missing)")
     
     if (( ${#optional[@]} > 0 )); then
         echo ""
@@ -103,6 +196,13 @@ step_1_check_dependencies() {
             echo "  - $note"
         done
     fi
+    
+    # Warn if both cron and systemd are unavailable
+    if ! command -v crontab &>/dev/null && ! command -v systemctl &>/dev/null; then
+        log_warn "Neither crontab nor systemctl found - scheduling must be set up manually"
+    elif ! command -v crontab &>/dev/null && [[ "$SYSTEMD_MODE" == "false" ]]; then
+        log_warn "crontab not found - consider using --systemd flag for systemd timer"
+    fi
 }
 
 step_2_create_directory() {
@@ -110,12 +210,16 @@ step_2_create_directory() {
     log_info "Step 2/8: Creating installation directory..."
     
     if [[ -d "$INSTALL_DIR" ]]; then
-        log_warn "Directory ${INSTALL_DIR} already exists"
-        read -rp "  Continue and update files? [Y/n] " answer
-        answer="${answer:-Y}"
-        if [[ ! "$answer" =~ ^[Yy]$ ]]; then
-            log_info "Installation cancelled"
-            exit 0
+        if [[ "$SILENT_MODE" == "true" ]]; then
+            log_info "Directory ${INSTALL_DIR} already exists, continuing..."
+        else
+            log_warn "Directory ${INSTALL_DIR} already exists"
+            read -rp "  Continue and update files? [Y/n] " answer
+            answer="${answer:-Y}"
+            if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+                log_info "Installation cancelled"
+                exit 0
+            fi
         fi
     else
         mkdir -p "$INSTALL_DIR"
@@ -211,14 +315,104 @@ step_5_configure_env() {
     
     # Check if .env already exists
     if [[ -f "$env_file" ]]; then
-        log_warn ".env already exists at ${env_file}"
-        read -rp "  Keep existing configuration? [Y/n] " answer
-        answer="${answer:-Y}"
-        if [[ "$answer" =~ ^[Yy]$ ]]; then
-            log_success "Using existing configuration"
-            return 0
+        if [[ "$SILENT_MODE" == "true" ]]; then
+            log_info ".env already exists, merging with new values..."
+            # In silent mode, we'll update specific values but keep the file
+        else
+            log_warn ".env already exists at ${env_file}"
+            read -rp "  Keep existing configuration? [Y/n] " answer
+            answer="${answer:-Y}"
+            if [[ "$answer" =~ ^[Yy]$ ]]; then
+                log_success "Using existing configuration"
+                return 0
+            fi
         fi
     fi
+    
+    # Silent mode configuration
+    if [[ "$SILENT_MODE" == "true" ]]; then
+        step_5_configure_env_silent "$env_file" "$env_example"
+    else
+        step_5_configure_env_interactive "$env_file" "$env_example"
+    fi
+}
+
+step_5_configure_env_silent() {
+    local env_file="$1"
+    local env_example="$2"
+    
+    # Check required environment variables
+    local bot_token="${TELEGRAM_BOT_TOKEN:-}"
+    local chat_id="${TELEGRAM_CHAT_ID:-}"
+    
+    if [[ -z "$bot_token" || -z "$chat_id" ]]; then
+        log_error "Silent mode requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID environment variables"
+        log_error "Example: TELEGRAM_BOT_TOKEN='xxx' TELEGRAM_CHAT_ID='yyy' bash install.sh --silent"
+        exit 1
+    fi
+    
+    # Copy example if .env doesn't exist
+    if [[ ! -f "$env_file" ]]; then
+        cp "$env_example" "$env_file"
+    fi
+    
+    # Server label
+    local server_label="${SERVER_LABEL:-$(hostname)}"
+    
+    # Auto-detect Docker if ENABLE_DOCKER is "auto" or not set
+    local enable_docker="${ENABLE_DOCKER:-auto}"
+    if [[ "$enable_docker" == "auto" ]]; then
+        if command -v docker &>/dev/null; then
+            enable_docker="true"
+            log_info "Auto-detected Docker - enabling container monitoring"
+        else
+            enable_docker="false"
+        fi
+    fi
+    
+    # Auto-detect PM2 if ENABLE_PM2 is "auto" or not set
+    local enable_pm2="${ENABLE_PM2:-auto}"
+    if [[ "$enable_pm2" == "auto" ]]; then
+        if command -v pm2 &>/dev/null && command -v python3 &>/dev/null; then
+            enable_pm2="true"
+            log_info "Auto-detected PM2 - enabling process monitoring"
+        else
+            enable_pm2="false"
+        fi
+    fi
+    
+    # Site monitoring
+    local enable_sites="${ENABLE_SITES:-false}"
+    local site_urls="${SITE_URLS:-}"
+    
+    # Update configuration values
+    sed -i "s/^TELEGRAM_BOT_TOKEN=.*/TELEGRAM_BOT_TOKEN=\"${bot_token}\"/" "$env_file"
+    sed -i "s/^TELEGRAM_CHAT_ID=.*/TELEGRAM_CHAT_ID=\"${chat_id}\"/" "$env_file"
+    sed -i "s/^SERVER_LABEL=.*/SERVER_LABEL=\"${server_label}\"/" "$env_file"
+    sed -i "s/^ENABLE_DOCKER_CONTAINERS=.*/ENABLE_DOCKER_CONTAINERS=${enable_docker}/" "$env_file"
+    sed -i "s/^ENABLE_PM2_PROCESSES=.*/ENABLE_PM2_PROCESSES=${enable_pm2}/" "$env_file"
+    sed -i "s/^ENABLE_SITE_MONITOR=.*/ENABLE_SITE_MONITOR=${enable_sites}/" "$env_file"
+    
+    # Add site URLs if provided
+    if [[ -n "$site_urls" && "$enable_sites" == "true" ]]; then
+        if grep -q "^CRITICAL_SITES=" "$env_file"; then
+            sed -i "s|^CRITICAL_SITES=.*|CRITICAL_SITES=\"${site_urls}\"|" "$env_file"
+        else
+            echo "" >> "$env_file"
+            echo "# Monitored websites (space-separated URLs)" >> "$env_file"
+            echo "CRITICAL_SITES=\"${site_urls}\"" >> "$env_file"
+        fi
+    fi
+    
+    # Secure the .env file
+    chmod 600 "$env_file"
+    
+    log_success "Configuration saved to ${env_file} (silent mode)"
+}
+
+step_5_configure_env_interactive() {
+    local env_file="$1"
+    local env_example="$2"
     
     echo ""
     echo "=============================================="
@@ -298,13 +492,13 @@ step_5_configure_env() {
     
     # Add site URLs if provided
     if [[ -n "$site_urls" && "$enable_sites" == "true" ]]; then
-        # Check if SITE_URLS line exists
-        if grep -q "^SITE_URLS=" "$env_file"; then
-            sed -i "s/^SITE_URLS=.*/SITE_URLS=\"${site_urls}\"/" "$env_file"
+        # Check if CRITICAL_SITES line exists
+        if grep -q "^CRITICAL_SITES=" "$env_file"; then
+            sed -i "s|^CRITICAL_SITES=.*|CRITICAL_SITES=\"${site_urls}\"|" "$env_file"
         else
             echo "" >> "$env_file"
             echo "# Monitored websites (space-separated URLs)" >> "$env_file"
-            echo "SITE_URLS=\"${site_urls}\"" >> "$env_file"
+            echo "CRITICAL_SITES=\"${site_urls}\"" >> "$env_file"
         fi
     fi
     
@@ -316,18 +510,138 @@ step_5_configure_env() {
 
 step_6_setup_cron() {
     echo ""
-    log_info "Step 5/8: Setting up cron job..."
+    log_info "Step 5/8: Setting up scheduler..."
+    
+    # Determine scheduling method
+    if [[ "$SYSTEMD_MODE" == "true" ]]; then
+        step_6_setup_systemd
+    else
+        step_6_setup_cron_legacy
+    fi
+}
+
+step_6_setup_systemd() {
+    log_info "Setting up systemd timer..."
+    
+    # Determine if we should use user or system systemd
+    local use_user_systemd="true"
+    if [[ "$EUID" -eq 0 ]] || [[ "$INSTALL_DIR" == /opt/* ]] || [[ "$INSTALL_DIR" == /usr/* ]]; then
+        use_user_systemd="false"
+    fi
+    
+    if [[ "$use_user_systemd" == "true" ]]; then
+        # User systemd
+        local user_dir="${HOME}/.config/systemd/user"
+        mkdir -p "$user_dir"
+        
+        # Create service file
+        cat > "${user_dir}/telemon.service" << EOF
+[Unit]
+Description=Telemon System Health Monitor
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=${INSTALL_DIR}/telemon.sh
+StandardOutput=append:${INSTALL_DIR}/telemon_cron.log
+StandardError=append:${INSTALL_DIR}/telemon_cron.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        
+        # Create timer file
+        cat > "${user_dir}/telemon.timer" << EOF
+[Unit]
+Description=Run Telemon every 5 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+EOF
+        
+        # Reload and enable
+        systemctl --user daemon-reload
+        systemctl --user enable telemon.timer
+        systemctl --user start telemon.timer
+        
+        log_success "User systemd timer installed and started"
+        echo "  Check status: systemctl --user status telemon.timer"
+        echo "  View logs: journalctl --user -u telemon"
+    else
+        # System systemd (requires root)
+        if [[ "$EUID" -ne 0 ]]; then
+            log_warn "System-wide systemd install requires root - skipping timer setup"
+            echo "  To set up manually, run as root or use --systemd with user install"
+            return 0
+        fi
+        
+        # Create system service
+        cat > /etc/systemd/system/telemon.service << EOF
+[Unit]
+Description=Telemon System Health Monitor
+After=network.target
+
+[Service]
+Type=oneshot
+User=$(id -un)
+ExecStart=${INSTALL_DIR}/telemon.sh
+StandardOutput=append:${INSTALL_DIR}/telemon_cron.log
+StandardError=append:${INSTALL_DIR}/telemon_cron.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        
+        # Create timer file
+        cat > /etc/systemd/system/telemon.timer << EOF
+[Unit]
+Description=Run Telemon every 5 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+EOF
+        
+        # Reload and enable
+        systemctl daemon-reload
+        systemctl enable telemon.timer
+        systemctl start telemon.timer
+        
+        log_success "System systemd timer installed and started"
+        echo "  Check status: systemctl status telemon.timer"
+        echo "  View logs: journalctl -u telemon"
+    fi
+}
+
+step_6_setup_cron_legacy() {
+    log_info "Setting up cron job..."
     
     local monitor_script="${INSTALL_DIR}/telemon.sh"
-    local cron_line="${CRON_SCHEDULE} ${monitor_script} >> ${INSTALL_DIR}/telemon_cron.log 2>&1"
+    local cron_line="${CRON_SCHEDULE} cd ${INSTALL_DIR} && bash ${monitor_script} >> ${INSTALL_DIR}/telemon_cron.log 2>&1"
+    
+    # Check if crontab is available
+    if ! command -v crontab &>/dev/null; then
+        log_warn "crontab not found - skipping cron setup"
+        echo "  Consider using --systemd flag for systemd timer instead"
+        return 0
+    fi
     
     # Check if cron line already exists
     if crontab -l 2>/dev/null | grep -qF "$monitor_script"; then
         log_warn "Cron job already exists"
-        read -rp "  Reinstall cron job? [y/N] " answer
-        if [[ ! "$answer" =~ ^[Yy]$ ]]; then
-            log_info "Keeping existing cron job"
-            return 0
+        if [[ "$SILENT_MODE" != "true" ]]; then
+            read -rp "  Reinstall cron job? [y/N] " answer
+            if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+                log_info "Keeping existing cron job"
+                return 0
+            fi
         fi
         # Remove old entry
         crontab -l 2>/dev/null | grep -vF "$monitor_script" | crontab -
@@ -395,6 +709,11 @@ step_8_run_test() {
         log_warn "Configuration validation failed - check your .env file"
     fi
     
+    if [[ "$SKIP_TEST" == "true" || "$SILENT_MODE" == "true" ]]; then
+        log_info "Step 8/8: Skipping test notification (--skip-test or --silent)"
+        return 0
+    fi
+    
     echo ""
     log_info "Step 8/8: Sending test notification..."
     echo ""
@@ -428,10 +747,21 @@ print_summary() {
     echo "Main script:            ${INSTALL_DIR}/telemon.sh"
     echo "Admin script:           ${INSTALL_DIR}/telemon-admin.sh"
     echo "Log file:               ${INSTALL_DIR}/telemon.log"
-    echo "Cron schedule:          Every 5 minutes"
+    
+    if [[ "$SYSTEMD_MODE" == "true" ]]; then
+        echo "Schedule:               Systemd timer (every 5 minutes)"
+        if [[ "$EUID" -ne 0 ]] && [[ "$INSTALL_DIR" != /opt/* ]] && [[ "$INSTALL_DIR" != /usr/* ]]; then
+            echo "Timer status:           systemctl --user status telemon.timer"
+        else
+            echo "Timer status:           systemctl status telemon.timer"
+        fi
+    else
+        echo "Schedule:               Cron (every 5 minutes)"
+    fi
+    
     echo ""
     echo "Quick Commands:"
-    echo "  Run manually:       bash ${INSTALL_DIR}/telemon.sh"
+    echo "  Run manually:         bash ${INSTALL_DIR}/telemon.sh"
     echo "  View logs:            tail -f ${INSTALL_DIR}/telemon.log"
     echo "  Admin tools:          bash ${INSTALL_DIR}/telemon-admin.sh --help"
     echo "  Update:               bash ${INSTALL_DIR}/update.sh"
@@ -454,14 +784,19 @@ print_summary() {
 # Main
 # ---------------------------------------------------------------------------
 main() {
+    # Parse command line arguments first
+    parse_arguments "$@"
+    
     echo "=============================================="
     echo "  Telemon - One-Line Installer"
     echo "=============================================="
     
-    # Handle install directory argument if passed via command line
-    if [[ -n "${1:-}" && ! "$1" =~ ^- ]]; then
-        INSTALL_DIR="$1"
-        shift
+    if [[ "$SILENT_MODE" == "true" ]]; then
+        log_info "Running in SILENT mode (no interactive prompts)"
+    fi
+    
+    if [[ "$SYSTEMD_MODE" == "true" ]]; then
+        log_info "Using SYSTEMD timer instead of cron"
     fi
     
     log_info "Installation directory: ${INSTALL_DIR}"
