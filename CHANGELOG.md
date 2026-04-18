@@ -32,6 +32,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Queue is now bounded: cannot grow indefinitely from persistent Telegram failures
   - Logs warnings when queue is truncated or cleared
 
+- **Partial Alert Delivery** — fixed inconsistent reliability across channels:
+  - All channels (Telegram, webhook, email) now attempted independently
+  - Track individual channel success/failure separately
+  - Log warnings when secondary channels (webhook/email) fail even if Telegram succeeds
+  - Only queue for retry when primary channel (Telegram) fails
+  - Previously: if Telegram succeeded but email failed, email failure was silent
+
+- **Silent Check Failures** — now warns when enabled checks cannot run:
+  - Changed log level from DEBUG to WARN for missing critical dependencies
+  - Affected checks: ping, lm-sensors, GPU tools (nvidia-smi/intel_gpu_top), database clients, DNS tools
+  - Added helpful installation hints in warning messages
+  - Previously: checks silently skipped, users didn't know monitoring wasn't working
+
 ### Added
 - **Native SMTP Support** — send email alerts directly via curl without local mailer:
   - New config options: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_TLS`
