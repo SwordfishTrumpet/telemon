@@ -4830,7 +4830,15 @@ run_validate() {
     echo "[Alert Channels]"
     echo "  Telegram:  ${TELEGRAM_BOT_TOKEN:+configured}"
     [[ -n "${WEBHOOK_URL:-}" ]] && echo "  Webhook:   ${WEBHOOK_URL}" || echo "  Webhook:   not configured"
-    [[ -n "${EMAIL_TO:-}" ]] && echo "  Email:     ${EMAIL_TO}" || echo "  Email:     not configured"
+    if [[ -n "${EMAIL_TO:-}" ]]; then
+        if [[ -n "${SMTP_HOST:-}" ]]; then
+            echo "  Email:     ${EMAIL_TO} (SMTP: ${SMTP_HOST}:${SMTP_PORT:-587})"
+        else
+            echo "  Email:     ${EMAIL_TO} (local mailer)"
+        fi
+    else
+        echo "  Email:     not configured"
+    fi
     [[ -n "${ESCALATION_WEBHOOK_URL:-}" ]] && echo "  Escalation: ${ESCALATION_WEBHOOK_URL}" || echo "  Escalation: not configured"
     [[ -n "${MAINT_SCHEDULE:-}" ]] && echo "  Maint windows: ${MAINT_SCHEDULE}" || echo "  Maint windows: not configured"
     [[ "${ENABLE_PROMETHEUS_EXPORT:-false}" == "true" ]] && echo "  Prometheus: ${PROMETHEUS_TEXTFILE_DIR:-/var/lib/node_exporter/textfile_collector}" || echo "  Prometheus: disabled"
@@ -4847,16 +4855,27 @@ run_validate() {
 
     # Email provider validation
     if [[ -n "${EMAIL_TO:-}" ]]; then
-        local email_mailer_found=false
-        for candidate in msmtp sendmail /usr/sbin/sendmail; do
-            if command -v "$candidate" &>/dev/null; then
-                email_mailer_found=true
-                break
+        # Check for native SMTP
+        if [[ -n "${SMTP_HOST:-}" ]]; then
+            if command -v curl &>/dev/null; then
+                echo "  OK:   Email configured with native SMTP (${SMTP_HOST}:${SMTP_PORT:-587})"
+            else
+                echo "  WARN: SMTP_HOST is set but curl not found (required for native SMTP)"
+                warnings=$((warnings + 1))
             fi
-        done
-        if [[ "$email_mailer_found" != "true" ]]; then
-            echo "  WARN: EMAIL_TO is set but no mailer found (install msmtp or sendmail)"
-            warnings=$((warnings + 1))
+        else
+            # Check for local mailers
+            local email_mailer_found=false
+            for candidate in msmtp sendmail /usr/sbin/sendmail; do
+                if command -v "$candidate" &>/dev/null; then
+                    email_mailer_found=true
+                    break
+                fi
+            done
+            if [[ "$email_mailer_found" != "true" ]]; then
+                echo "  WARN: EMAIL_TO is set but no mailer found (install msmtp/sendmail, or configure SMTP_HOST)"
+                warnings=$((warnings + 1))
+            fi
         fi
     fi
 
@@ -5365,7 +5384,10 @@ print(json.dumps(data))
 
 # ===========================================================================
 # Email (SMTP) Dispatch
-# Sends plain-text alert via sendmail/msmtp if available and EMAIL_TO is set
+# Supports three methods (in order of preference):
+#   1. Native SMTP via curl (direct to SMTP server with auth)
+#   2. msmtp (lightweight SMTP relay)
+#   3. sendmail (local MTA)
 # ===========================================================================
 send_email() {
     local message="$1"
@@ -5373,28 +5395,10 @@ send_email() {
     [[ -z "$email_to" ]] && return 0
 
     # SECURITY: Strict email validation (RFC 5322 simplified)
-    # Requires non-empty local and domain parts with valid TLD
     if ! is_valid_email "$email_to"; then
         log "WARN" "send_email: EMAIL_TO '${email_to}' failed validation — skipping"
         return 1
     fi
-
-    # Find mail transport
-    local mailer=""
-    for candidate in msmtp sendmail /usr/sbin/sendmail; do
-        if command -v "$candidate" &>/dev/null; then
-            mailer="$candidate"
-            break
-        fi
-    done
-    if [[ -z "$mailer" ]]; then
-        log "WARN" "EMAIL_TO is set but no mailer found (install msmtp or sendmail)"
-        return 1
-    fi
-
-    # Strip HTML tags for plain-text email
-    local plain_message
-    plain_message=$(printf '%s\n' "$message" | sed 's/%0A/\n/g; s/<[^>]*>//g; s/&amp;/\&/g; s/&lt;/</g; s/&gt;/>/g; s/&quot;/"/g')
 
     local hostname
     hostname=$(hostname)
@@ -5406,11 +5410,122 @@ send_email() {
         email_from="telemon@${hostname}"
     fi
     
-    # Sanitize email headers: strip newlines, carriage returns, tabs, and null bytes
+    # Sanitize email headers
     email_from=$(printf '%s' "$email_from" | tr -d '\n\r\t\0')
     email_to=$(printf '%s' "$email_to" | tr -d '\n\r\t\0')
     local subject
     subject=$(printf '[Telemon] %s — alert' "$hostname" | tr -d '\n\r\t\0')
+    
+    # Strip HTML tags for plain-text email
+    local plain_message
+    plain_message=$(printf '%s\n' "$message" | sed 's/%0A/\n/g; s/<[^>]*>//g; s/&amp;/\&/g; s/&lt;/</g; s/&gt;/>/g; s/&quot;/"/g')
+
+    # Method 1: Native SMTP via curl (if SMTP_HOST is configured)
+    local smtp_host="${SMTP_HOST:-}"
+    if [[ -n "$smtp_host" ]]; then
+        send_email_native_smtp "$email_from" "$email_to" "$subject" "$plain_message"
+        return $?
+    fi
+    
+    # Method 2 & 3: Local mailers (msmtp, sendmail)
+    send_email_local_mailer "$email_from" "$email_to" "$subject" "$plain_message"
+    return $?
+}
+
+# ---------------------------------------------------------------------------
+# Native SMTP via curl (supports external SMTP servers with auth)
+# ---------------------------------------------------------------------------
+send_email_native_smtp() {
+    local email_from="$1"
+    local email_to="$2"
+    local subject="$3"
+    local plain_message="$4"
+    
+    local smtp_host="${SMTP_HOST:-}"
+    local smtp_port="${SMTP_PORT:-587}"
+    local smtp_user="${SMTP_USER:-}"
+    local smtp_pass="${SMTP_PASS:-}"
+    local smtp_tls="${SMTP_TLS:-yes}"
+    
+    if ! command -v curl &>/dev/null; then
+        log "WARN" "Native SMTP requires curl — not found"
+        return 1
+    fi
+    
+    # Build curl SMTP URL
+    local smtp_url
+    if [[ "$smtp_port" == "465" ]]; then
+        # SMTPS (SSL/TLS wrapper)
+        smtp_url="smtps://${smtp_host}:${smtp_port}"
+    else
+        # SMTP with STARTTLS or plain
+        smtp_url="smtp://${smtp_host}:${smtp_port}"
+    fi
+    
+    # Build email content
+    local email_content
+    email_content=$(cat << EOF
+From: ${email_from}
+To: ${email_to}
+Subject: ${subject}
+Content-Type: text/plain; charset=utf-8
+
+${plain_message}
+EOF
+)
+    
+    # Build curl command arguments
+    local curl_args=()
+    curl_args+=(--url "$smtp_url")
+    curl_args+=(--max-time 30)
+    curl_args+=(--silent --show-error)
+    
+    # Add authentication if configured
+    if [[ -n "$smtp_user" && -n "$smtp_pass" ]]; then
+        curl_args+=(--user "${smtp_user}:${smtp_pass}")
+    fi
+    
+    # Add TLS/SSL options
+    if [[ "$smtp_tls" == "yes" && "$smtp_port" != "465" ]]; then
+        # Use STARTTLS on port 587
+        curl_args+=(--ssl-reqd)
+    elif [[ "$smtp_port" == "465" ]]; then
+        # SMTPS requires SSL
+        curl_args+=(--ssl-reqd)
+    fi
+    
+    # Send the email
+    if curl "${curl_args[@]}" --mail-from "$email_from" --mail-rcpt "$email_to" <<< "$email_content" 2>/dev/null; then
+        log "DEBUG" "Email alert sent to ${email_to} via SMTP ${smtp_host}:${smtp_port}"
+        return 0
+    else
+        log "WARN" "Email delivery failed via SMTP ${smtp_host}:${smtp_port}"
+        return 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Local mailer (msmtp, sendmail)
+# ---------------------------------------------------------------------------
+send_email_local_mailer() {
+    local email_from="$1"
+    local email_to="$2"
+    local subject="$3"
+    local plain_message="$4"
+    
+    # Find mail transport
+    local mailer=""
+    for candidate in msmtp sendmail /usr/sbin/sendmail; do
+        if command -v "$candidate" &>/dev/null; then
+            mailer="$candidate"
+            break
+        fi
+    done
+    
+    if [[ -z "$mailer" ]]; then
+        log "WARN" "EMAIL_TO is set but no mailer found (install msmtp, sendmail, or configure SMTP_HOST for native SMTP)"
+        return 1
+    fi
 
     {
         echo "From: ${email_from}"
@@ -5422,7 +5537,7 @@ send_email() {
     } | "$mailer" -t 2>/dev/null
 
     if [[ $? -eq 0 ]]; then
-        log "DEBUG" "Email alert sent to ${email_to}"
+        log "DEBUG" "Email alert sent to ${email_to} via ${mailer}"
         return 0
     else
         log "WARN" "Email delivery failed via ${mailer}"
