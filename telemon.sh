@@ -44,6 +44,70 @@ fi
 # shellcheck source=/dev/null
 source "$ENV_FILE"
 
+# SECURITY: Validate critical input variables to prevent code injection
+validate_env_security() {
+    local errors=0
+    
+    # Validate STATE_FILE doesn't contain command substitution or dangerous patterns
+    if [[ -n "${STATE_FILE:-}" ]]; then
+        if [[ "$STATE_FILE" =~ [\`\$\;\|\&\<\>] ]]; then
+            echo "ERROR: STATE_FILE contains dangerous characters — refusing to start" >&2
+            ((errors++))
+        fi
+    fi
+    
+    # Validate TELEGRAM_BOT_TOKEN format (should be digits:alphanumeric)
+    if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+        if [[ ! "$TELEGRAM_BOT_TOKEN" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]]; then
+            echo "WARN: TELEGRAM_BOT_TOKEN format looks invalid (expected '123:ABC...')" >&2
+        fi
+    fi
+    
+    # Validate TELEGRAM_CHAT_ID is numeric (or starts with - for groups)
+    if [[ -n "${TELEGRAM_CHAT_ID:-}" ]]; then
+        if [[ ! "$TELEGRAM_CHAT_ID" =~ ^-?[0-9]+$ ]]; then
+            echo "WARN: TELEGRAM_CHAT_ID should be numeric (e.g., '123456789' or '-1001234567890')" >&2
+        fi
+    fi
+    
+    # Validate EMAIL_TO if set
+    if [[ -n "${EMAIL_TO:-}" ]]; then
+        if [[ ! "$EMAIL_TO" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+            echo "WARN: EMAIL_TO format looks invalid" >&2
+        fi
+    fi
+    
+    # Validate SMTP_PORT is numeric
+    if [[ -n "${SMTP_PORT:-}" ]]; then
+        if [[ ! "$SMTP_PORT" =~ ^[0-9]+$ ]] || [[ "$SMTP_PORT" -lt 1 ]] || [[ "$SMTP_PORT" -gt 65535 ]]; then
+            echo "ERROR: SMTP_PORT must be a valid port number (1-65535)" >&2
+            ((errors++))
+        fi
+    fi
+    
+    # Validate MAX_ALERT_QUEUE_SIZE is numeric
+    if [[ -n "${MAX_ALERT_QUEUE_SIZE:-}" ]]; then
+        if [[ ! "$MAX_ALERT_QUEUE_SIZE" =~ ^[0-9]+$ ]]; then
+            echo "WARN: MAX_ALERT_QUEUE_SIZE should be numeric (bytes)" >&2
+            MAX_ALERT_QUEUE_SIZE="1048576"  # Reset to default
+        fi
+    fi
+    
+    # Validate MAX_ALERT_QUEUE_AGE is numeric
+    if [[ -n "${MAX_ALERT_QUEUE_AGE:-}" ]]; then
+        if [[ ! "$MAX_ALERT_QUEUE_AGE" =~ ^[0-9]+$ ]]; then
+            echo "WARN: MAX_ALERT_QUEUE_AGE should be numeric (seconds)" >&2
+            MAX_ALERT_QUEUE_AGE="86400"  # Reset to default
+        fi
+    fi
+    
+    if [[ $errors -gt 0 ]]; then
+        echo "FATAL: ${errors} security validation errors — fix .env and restart" >&2
+        exit 1
+    fi
+}
+validate_env_security
+
 # Server identity — used in alert headers, heartbeat files, fleet monitoring
 SERVER_LABEL="${SERVER_LABEL:-$(hostname)}"
 
@@ -171,6 +235,42 @@ acquire_lock
 
 # Release lock on exit
 trap release_lock EXIT
+
+# ---------------------------------------------------------------------------
+# State File Migration (Critical: prevents re-alerts on reboot)
+# If state is in /tmp (non-persistent) and persistent location is available,
+# migrate existing state to prevent confirmation count loss
+# ---------------------------------------------------------------------------
+migrate_state_file() {
+    local current_state="${STATE_FILE:-/tmp/telemon_sys_alert_state}"
+    
+    # Only migrate if current state is in /tmp and file exists
+    if [[ "$current_state" == /tmp/* && -f "$current_state" ]]; then
+        # Determine best persistent location
+        local persistent_dir=""
+        if [[ -d "$SCRIPT_DIR" && -w "$SCRIPT_DIR" ]]; then
+            persistent_dir="$SCRIPT_DIR"
+        elif [[ -d "$HOME/.local/share" && -w "$HOME/.local/share" ]]; then
+            persistent_dir="$HOME/.local/share/telemon"
+            mkdir -p "$persistent_dir"
+        elif [[ -d "/var/lib" && -w "/var/lib" ]]; then
+            persistent_dir="/var/lib/telemon"
+            mkdir -p "$persistent_dir" 2>/dev/null || true
+        fi
+        
+        if [[ -n "$persistent_dir" && -d "$persistent_dir" && -w "$persistent_dir" ]]; then
+            local new_state="${persistent_dir}/.telemon_state"
+            # Copy state atomically
+            if cp "$current_state" "$new_state" 2>/dev/null && chmod 600 "$new_state" 2>/dev/null; then
+                log "INFO" "State file auto-migrated from /tmp to persistent location: ${new_state}"
+                log "INFO" "Update STATE_FILE in .env to: STATE_FILE=\"${new_state}\" to prevent re-alerts on reboot"
+                # Update runtime variable (but not the config file)
+                export STATE_FILE="$new_state"
+            fi
+        fi
+    fi
+}
+migrate_state_file
 
 # ---------------------------------------------------------------------------
 # Logging helper — respects LOG_LEVEL (DEBUG < INFO < WARN < ERROR)
@@ -4030,6 +4130,26 @@ dispatch_with_retry() {
         local existing_queue=""
         if [[ -f "$ALERT_QUEUE_FILE" ]]; then
             existing_queue=$(cat "$ALERT_QUEUE_FILE" 2>/dev/null) || existing_queue=""
+            
+            # BOUNDED QUEUE: Check size and age to prevent unbounded growth
+            local max_queue_size="${MAX_ALERT_QUEUE_SIZE:-1048576}"  # Default 1MB
+            local max_queue_age="${MAX_ALERT_QUEUE_AGE:-86400}"    # Default 24 hours
+            local queue_size queue_age
+            
+            queue_size=$(stat -c%s "$ALERT_QUEUE_FILE" 2>/dev/null || echo "0")
+            queue_age=$(( $(date +%s) - $(stat -c%Y "$ALERT_QUEUE_FILE" 2>/dev/null || echo "0") ))
+            
+            # Evict old queue if exceeds max size or age
+            if [[ $queue_size -gt $max_queue_size ]]; then
+                log "WARN" "Alert queue exceeds ${max_queue_size} bytes (${queue_size} bytes) — truncating to prevent disk fill"
+                # Keep only last 50% of queue (approximate by line count)
+                local total_lines
+                total_lines=$(wc -l < "$ALERT_QUEUE_FILE")
+                existing_queue=$(tail -n $(( total_lines / 2 )) "$ALERT_QUEUE_FILE")
+            elif [[ $queue_age -gt $max_queue_age ]]; then
+                log "WARN" "Alert queue older than ${max_queue_age}s (${queue_age}s) — clearing stale alerts"
+                existing_queue=""  # Clear queue entirely
+            fi
         fi
         local separator=""
         [[ -n "$existing_queue" ]] && separator=$'\n---QUEUED_ALERT---\n'
