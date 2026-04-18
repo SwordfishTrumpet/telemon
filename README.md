@@ -341,6 +341,71 @@ bash install.sh
 
 **That's it.** Telemon sends you a test message and then monitors silently until something needs your attention.
 
+## Auto-Discovery
+
+Telemon can automatically detect services, hardware, and infrastructure on your system and suggest appropriate configuration:
+
+```bash
+bash telemon-admin.sh discover
+```
+
+This scans your system and generates `.env` suggestions for:
+
+| Category | Detected Items |
+|----------|----------------|
+| **Hardware** | NVMe drives, NVIDIA/Intel GPUs, UPS (APC/NUT/upower), lm-sensors, RAID (mdadm, ZFS, LVM) |
+| **Infrastructure** | Docker Swarm, Kubernetes, Proxmox VE, KVM/QEMU, NFS/SMB mounts, WireGuard, Tailscale, HAProxy |
+| **Databases** | MySQL/MariaDB, PostgreSQL, Redis (only if servers are running, not just clients) |
+| **Applications** | RabbitMQ, Mosquitto (MQTT), Fail2ban, CrowdSec |
+| **Core Services** | Docker containers, PM2 processes, Nginx, Apache, Systemd services |
+| **Smart Thresholds** | CPU and memory thresholds based on your actual hardware specs |
+
+### Discovery Output Example
+
+```
+=== Hardware ===
+✓ NVMe drives detected (2): /dev/nvme0n1, /dev/nvme1n1
+✓ NVIDIA GPU detected: NVIDIA GeForce RTX 3080
+✓ lm-sensors configured
+
+=== Infrastructure ===
+✓ Docker Swarm (manager node)
+✓ ZFS pools detected: tank, rpool
+
+=== Databases ===
+✓ MySQL/MariaDB server running
+✓ Redis server running
+
+=== Smart Thresholds ===
+✓ Thresholds suggested based on system specs: 64GB RAM, 16 cores
+
+===============================================
+Suggested Configuration
+===============================================
+
+# NVMe health monitoring
+ENABLE_NVME_CHECK=true
+
+# NVIDIA GPU monitoring  
+ENABLE_GPU_CHECK=true
+
+# CPU temperature monitoring
+ENABLE_TEMP_CHECK=true
+
+# Smart Thresholds (based on system specs: 64GB RAM, 16 cores)
+MEM_THRESHOLD_WARN=10
+MEM_THRESHOLD_CRIT=5
+CPU_THRESHOLD_WARN=80
+CPU_THRESHOLD_CRIT=90
+
+# MySQL/MariaDB (detected running)
+DB_MYSQL_HOST="localhost"
+DB_MYSQL_PORT="3306"
+...
+```
+
+Simply copy the suggested lines into your `.env` file, customize as needed, and validate with `bash telemon.sh --validate`.
+
 ## Configuration
 
 All configuration lives in `.env`. Key principles:

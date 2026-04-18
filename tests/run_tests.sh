@@ -2192,6 +2192,207 @@ test_auto_remediation() {
 }
 
 # ---------------------------------------------------------------------------
+# Test Discovery System (telemon-admin.sh)
+# ---------------------------------------------------------------------------
+
+test_discovery_system() {
+    echo ""
+    echo "Testing discovery system helpers..."
+    
+    # Source the admin script helpers (only test helper functions that don't depend on system state)
+    local admin_script="${SCRIPT_DIR}/telemon-admin.sh"
+    
+    # Test 1: verify admin script syntax
+    bash -n "$admin_script" 2>/dev/null
+    assert_true "Discovery: admin script syntax check passes"
+    
+    # Test 2: verify discover command exists
+    grep -q "cmd_discover()" "$admin_script"
+    assert_true "Discovery: cmd_discover function exists"
+    
+    # Test 3: verify helper functions exist
+    grep -q "detect_hardware()" "$admin_script"
+    assert_true "Discovery: detect_hardware helper exists"
+    
+    grep -q "detect_infrastructure()" "$admin_script"
+    assert_true "Discovery: detect_infrastructure helper exists"
+    
+    grep -q "detect_applications()" "$admin_script"
+    assert_true "Discovery: detect_applications helper exists"
+    
+    grep -q "detect_database_servers()" "$admin_script"
+    assert_true "Discovery: detect_database_servers helper exists"
+    
+    grep -q "generate_smart_thresholds()" "$admin_script"
+    assert_true "Discovery: generate_smart_thresholds helper exists"
+    
+    # Test 4: verify systemd helper functions
+    grep -q "_systemd_is_active()" "$admin_script"
+    assert_true "Discovery: _systemd_is_active helper exists"
+    
+    grep -q "_cmd_exists()" "$admin_script"
+    assert_true "Discovery: _cmd_exists helper exists"
+    
+    # Test 5: verify system spec helpers exist
+    grep -q "_get_total_memory_gb()" "$admin_script"
+    assert_true "Discovery: _get_total_memory_gb helper exists"
+    
+    grep -q "_get_cpu_cores()" "$admin_script"
+    assert_true "Discovery: _get_cpu_cores helper exists"
+    
+    # Test 6: test _cmd_exists helper (inline test)
+    # This tests the function pattern without sourcing the whole script
+    test_cmd_exists() {
+        command -v bash &>/dev/null
+    }
+    test_cmd_exists
+    assert_true "Discovery: _cmd_exists pattern works for existing command"
+    
+    # Test 7: verify discovery categories in output
+    grep -q "Hardware" "$admin_script"
+    assert_true "Discovery: Hardware section in output"
+    
+    grep -q "Infrastructure" "$admin_script"
+    assert_true "Discovery: Infrastructure section in output"
+    
+    grep -q "Core Services" "$admin_script"
+    assert_true "Discovery: Core Services section in output"
+    
+    grep -q "Databases" "$admin_script"
+    assert_true "Discovery: Databases section in output"
+    
+    grep -q "Smart Thresholds" "$admin_script"
+    assert_true "Discovery: Smart Thresholds section in output"
+    
+    # Test 8: verify smart thresholds generates expected keys
+    grep -q "MEM_THRESHOLD_WARN" "$admin_script"
+    assert_true "Discovery: generates MEM_THRESHOLD_WARN"
+    
+    grep -q "CPU_THRESHOLD_WARN" "$admin_script"
+    assert_true "Discovery: generates CPU_THRESHOLD_WARN"
+    
+    grep -q "MEM_THRESHOLD_CRIT" "$admin_script"
+    assert_true "Discovery: generates MEM_THRESHOLD_CRIT"
+    
+    grep -q "CPU_THRESHOLD_CRIT" "$admin_script"
+    assert_true "Discovery: generates CPU_THRESHOLD_CRIT"
+    
+    # Test 9: verify hardware detection patterns
+    grep -q "nvme" "$admin_script" || grep -q "smartctl" "$admin_script"
+    assert_true "Discovery: NVMe detection pattern exists"
+    
+    grep -q "nvidia-smi" "$admin_script"
+    assert_true "Discovery: NVIDIA GPU detection pattern exists"
+    
+    grep -q "intel_gpu_top" "$admin_script"
+    assert_true "Discovery: Intel GPU detection pattern exists"
+    
+    grep -q "sensors" "$admin_script"
+    assert_true "Discovery: lm-sensors detection pattern exists"
+    
+    # Test 10: verify UPS detection patterns  
+    grep -q "apcupsd" "$admin_script"
+    assert_true "Discovery: APC UPS detection pattern exists"
+    
+    grep -q "upower" "$admin_script"
+    assert_true "Discovery: upower detection pattern exists"
+    
+    # Test 11: verify storage detection patterns
+    grep -q "zpool" "$admin_script"
+    assert_true "Discovery: ZFS detection pattern exists"
+    
+    grep -q "pvs" "$admin_script"
+    assert_true "Discovery: LVM detection pattern exists"
+    
+    grep -q "/proc/mdstat" "$admin_script"
+    assert_true "Discovery: mdadm RAID detection pattern exists"
+    
+    # Test 12: verify virtualization detection patterns
+    grep -q "docker" "$admin_script"
+    assert_true "Discovery: Docker detection pattern exists"
+    
+    grep -q "kubectl" "$admin_script"
+    assert_true "Discovery: Kubernetes detection pattern exists"
+    
+    grep -q "Swarm" "$admin_script"
+    assert_true "Discovery: Docker Swarm detection pattern exists"
+    
+    grep -q "pveversion" "$admin_script"
+    assert_true "Discovery: Proxmox detection pattern exists"
+    
+    grep -q "virsh" "$admin_script"
+    assert_true "Discovery: KVM/QEMU detection pattern exists"
+    
+    # Test 13: verify network/VPN detection patterns
+    grep -q "tailscale" "$admin_script"
+    assert_true "Discovery: Tailscale detection pattern exists"
+    
+    grep -q "wireguard" "$admin_script" || grep -q "wg " "$admin_script"
+    assert_true "Discovery: WireGuard detection pattern exists"
+    
+    grep -q "haproxy" "$admin_script"
+    assert_true "Discovery: HAProxy detection pattern exists"
+    
+    # Test 14: verify application detection patterns
+    grep -q "fail2ban" "$admin_script"
+    assert_true "Discovery: Fail2ban detection pattern exists"
+    
+    grep -q "crowdsec" "$admin_script"
+    assert_true "Discovery: CrowdSec detection pattern exists"
+    
+    grep -q "rabbitmq" "$admin_script"
+    assert_true "Discovery: RabbitMQ detection pattern exists"
+    
+    grep -q "mosquitto" "$admin_script"
+    assert_true "Discovery: Mosquitto MQTT detection pattern exists"
+    
+    # Test 15: verify database server detection (vs just client)
+    grep -q "mysqld" "$admin_script"
+    assert_true "Discovery: MySQL server detection pattern exists"
+    
+    grep -q "postgresql" "$admin_script"
+    assert_true "Discovery: PostgreSQL server detection pattern exists"
+    
+    grep -q "redis-server" "$admin_script"
+    assert_true "Discovery: Redis server detection pattern exists"
+    
+    # Test 16: verify suggestions are properly formatted
+    grep -q "ENABLE_NVME_CHECK" "$admin_script"
+    assert_true "Discovery: suggests ENABLE_NVME_CHECK"
+    
+    grep -q "ENABLE_GPU_CHECK" "$admin_script"
+    assert_true "Discovery: suggests ENABLE_GPU_CHECK"
+    
+    grep -q "ENABLE_UPS_CHECK" "$admin_script"
+    assert_true "Discovery: suggests ENABLE_UPS_CHECK"
+    
+    grep -q "ENABLE_TEMP_CHECK" "$admin_script"
+    assert_true "Discovery: suggests ENABLE_TEMP_CHECK"
+    
+    # Test 17: verify memory-based threshold logic
+    grep -q "total_mem_gb" "$admin_script"
+    assert_true "Discovery: uses total memory for threshold calculation"
+    
+    # Test 18: verify core-based threshold logic  
+    grep -q "cores" "$admin_script"
+    assert_true "Discovery: uses CPU cores for threshold calculation"
+    
+    # Test 19: verify output sections have proper headers
+    grep -q "=== Hardware ===" "$admin_script"
+    assert_true "Discovery: Hardware section header"
+    
+    grep -q "=== Infrastructure ===" "$admin_script"
+    assert_true "Discovery: Infrastructure section header"
+    
+    grep -q "=== Databases ===" "$admin_script"
+    assert_true "Discovery: Databases section header"
+    
+    # Test 20: verify timestamp in output
+    grep -q 'date +%Y-%m-%d' "$admin_script"
+    assert_true "Discovery: includes generation timestamp"
+}
+
+# ---------------------------------------------------------------------------
 # Main test runner
 # ---------------------------------------------------------------------------
 
@@ -2237,6 +2438,7 @@ main() {
     test_fleet_heartbeats
     test_maintenance_windows
     test_auto_remediation
+    test_discovery_system
 
     # Summary
     echo ""

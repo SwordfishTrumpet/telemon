@@ -669,13 +669,569 @@ cmd_fleet_status() {
 }
 
 # ---------------------------------------------------------------------------
-# Discover command — Auto-discovery of services and containers
+# Discover command — Comprehensive Auto-discovery of services, hardware,
+# infrastructure, and applications with smart defaults
 # ---------------------------------------------------------------------------
+
+# Helper: Check if a systemd service is active
+_systemd_is_active() {
+    local service="$1"
+    systemctl is-active "$service" &>/dev/null
+}
+
+# Helper: Check if a command exists
+_cmd_exists() {
+    command -v "$1" &>/dev/null
+}
+
+# Helper: Get total system memory in GB for threshold calculations
+_get_total_memory_gb() {
+    local mem_kb
+    mem_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    echo $((mem_kb / 1024 / 1024))
+}
+
+# Helper: Get CPU core count
+_get_cpu_cores() {
+    nproc 2>/dev/null || echo 1
+}
+
+# Helper: Generate smart thresholds based on system specs
+generate_smart_thresholds() {
+    local total_mem_gb
+    total_mem_gb=$(_get_total_memory_gb)
+    local cores
+    cores=$(_get_cpu_cores)
+    
+    local thresholds=""
+    thresholds+="# Smart Thresholds (based on system specs: ${total_mem_gb}GB RAM, ${cores} cores)"
+    thresholds+=$'\n'
+    
+    # Memory thresholds based on total RAM
+    # More RAM = lower threshold percentages (same absolute safety margin)
+    if [[ "$total_mem_gb" -ge 32 ]]; then
+        thresholds+="# High memory system - using generous thresholds"
+        thresholds+=$'\n'
+        thresholds+="MEM_THRESHOLD_WARN=10"
+        thresholds+=$'\n'
+        thresholds+="MEM_THRESHOLD_CRIT=5"
+        thresholds+=$'\n'
+    elif [[ "$total_mem_gb" -ge 16 ]]; then
+        thresholds+="MEM_THRESHOLD_WARN=12"
+        thresholds+=$'\n'
+        thresholds+="MEM_THRESHOLD_CRIT=8"
+        thresholds+=$'\n'
+    else
+        thresholds+="MEM_THRESHOLD_WARN=15"
+        thresholds+=$'\n'
+        thresholds+="MEM_THRESHOLD_CRIT=10"
+        thresholds+=$'\n'
+    fi
+    
+    # CPU thresholds based on core count
+    # More cores = can handle higher load
+    if [[ "$cores" -ge 16 ]]; then
+        thresholds+="CPU_THRESHOLD_WARN=80"
+        thresholds+=$'\n'
+        thresholds+="CPU_THRESHOLD_CRIT=90"
+        thresholds+=$'\n'
+    elif [[ "$cores" -ge 8 ]]; then
+        thresholds+="CPU_THRESHOLD_WARN=75"
+        thresholds+=$'\n'
+        thresholds+="CPU_THRESHOLD_CRIT=85"
+        thresholds+=$'\n'
+    else
+        thresholds+="CPU_THRESHOLD_WARN=70"
+        thresholds+=$'\n'
+        thresholds+="CPU_THRESHOLD_CRIT=80"
+        thresholds+=$'\n'
+    fi
+    
+    thresholds+=$'\n'
+    echo "$thresholds"
+}
+
+# Helper: Detect hardware components
+detect_hardware() {
+    local hw_info=""
+    local hw_suggestions=""
+    
+    # NVMe Drives
+    local nvme_drives=""
+    if _cmd_exists nvme; then
+        nvme_drives=$(nvme list 2>/dev/null | awk 'NR>2 && /^\/dev\// {print $1, $2, $3}' | head -10)
+    elif _cmd_exists smartctl; then
+        nvme_drives=$(smartctl --scan 2>/dev/null | grep -i nvme | awk '{print $1}' | while read -r dev; do
+            model=$(smartctl -i "$dev" 2>/dev/null | grep -i "Model Number" | cut -d: -f2 | xargs)
+            echo "$dev $model"
+        done)
+    fi
+    
+    if [[ -n "$nvme_drives" ]]; then
+        local nvme_count
+        nvme_count=$(echo "$nvme_drives" | wc -l)
+        hw_info+="${GREEN}✓${NC} NVMe drives detected ($nvme_count):"
+        hw_info+=$'\n'
+        hw_info+=$(echo "$nvme_drives" | sed 's/^/  - /')
+        hw_info+=$'\n\n'
+        hw_suggestions+="# NVMe health monitoring"
+        hw_suggestions+=$'\n'
+        hw_suggestions+="ENABLE_NVME_CHECK=true"
+        hw_suggestions+=$'\n'
+        hw_suggestions+="# NVME_TEMP_THRESHOLD_WARN=70"
+        hw_suggestions+=$'\n'
+        hw_suggestions+="# NVME_TEMP_THRESHOLD_CRIT=80"
+        hw_suggestions+=$'\n\n'
+    fi
+    
+    # GPU Detection
+    local has_nvidia=false
+    local has_intel_gpu=false
+    
+    if _cmd_exists nvidia-smi; then
+        local gpu_info
+        gpu_info=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+        if [[ -n "$gpu_info" ]]; then
+            hw_info+="${GREEN}✓${NC} NVIDIA GPU detected: $gpu_info"
+            hw_info+=$'\n\n'
+            has_nvidia=true
+            hw_suggestions+="# NVIDIA GPU monitoring"
+            hw_suggestions+=$'\n'
+            hw_suggestions+="ENABLE_GPU_CHECK=true"
+            hw_suggestions+=$'\n'
+            hw_suggestions+="# GPU_TEMP_THRESHOLD_WARN=80"
+            hw_suggestions+=$'\n'
+            hw_suggestions+="# GPU_TEMP_THRESHOLD_CRIT=95"
+            hw_suggestions+=$'\n\n'
+        fi
+    fi
+    
+    # Intel GPU detection via vendor ID or intel_gpu_top
+    if _cmd_exists intel_gpu_top || [[ -d /sys/class/drm/card0/device ]] && grep -q "0x8086" /sys/class/drm/card*/device/vendor 2>/dev/null; then
+        hw_info+="${GREEN}✓${NC} Intel GPU detected"
+        hw_info+=$'\n\n'
+        has_intel_gpu=true
+        if [[ "$has_nvidia" == "false" ]]; then
+            hw_suggestions+="# Intel GPU monitoring (requires intel-gpu-tools)"
+            hw_suggestions+=$'\n'
+            hw_suggestions+="# ENABLE_GPU_CHECK=true"
+            hw_suggestions+=$'\n\n'
+        fi
+    fi
+    
+    # UPS/Battery Detection
+    local has_ups=false
+    
+    if _systemd_is_active apcupsd; then
+        hw_info+="${GREEN}✓${NC} APC UPS detected (apcupsd)"
+        hw_info+=$'\n\n'
+        has_ups=true
+    elif _cmd_exists apcaccess && [[ -f /etc/apcupsd/apcupsd.conf ]]; then
+        hw_info+="${GREEN}✓${NC} APC UPS configuration found"
+        hw_info+=$'\n\n'
+        has_ups=true
+    fi
+    
+    if _systemd_is_active nut-server || _systemd_is_active nut-client; then
+        hw_info+="${GREEN}✓${NC} NUT UPS detected"
+        hw_info+=$'\n\n'
+        has_ups=true
+    elif _cmd_exists upsc; then
+        hw_info+="${GREEN}✓${NC} NUT (Network UPS Tools) available"
+        hw_info+=$'\n\n'
+        has_ups=true
+    fi
+    
+    if _cmd_exists upower; then
+        local batteries
+        batteries=$(upower -e 2>/dev/null | grep -i battery | head -3)
+        if [[ -n "$batteries" ]]; then
+            hw_info+="${GREEN}✓${NC} Battery/UPS detected via upower"
+            hw_info+=$'\n'
+            hw_info+=$(echo "$batteries" | sed 's/^/  - /')
+            hw_info+=$'\n\n'
+            has_ups=true
+        fi
+    fi
+    
+    if [[ "$has_ups" == "true" ]]; then
+        hw_suggestions+="# UPS/Battery monitoring"
+        hw_suggestions+=$'\n'
+        hw_suggestions+="ENABLE_UPS_CHECK=true"
+        hw_suggestions+=$'\n'
+        hw_suggestions+="# UPS_THRESHOLD_WARN=30"
+        hw_suggestions+=$'\n'
+        hw_suggestions+="# UPS_THRESHOLD_CRIT=10"
+        hw_suggestions+=$'\n\n'
+    fi
+    
+    # CPU Temperature / Sensors
+    if _cmd_exists sensors; then
+        local sensor_chips
+        sensor_chips=$(sensors -u 2>/dev/null | grep -E '^[a-zA-Z]+-i2c' | head -5)
+        if [[ -n "$sensor_chips" ]]; then
+            hw_info+="${GREEN}✓${NC} lm-sensors configured"
+            hw_info+=$'\n'
+            hw_info+=$(echo "$sensor_chips" | sed 's/^/  - /')
+            hw_info+=$'\n\n'
+            hw_suggestions+="# CPU temperature monitoring"
+            hw_suggestions+=$'\n'
+            hw_suggestions+="ENABLE_TEMP_CHECK=true"
+            hw_suggestions+=$'\n'
+            hw_suggestions+="# TEMP_THRESHOLD_WARN=75"
+            hw_suggestions+=$'\n'
+            hw_suggestions+="# TEMP_THRESHOLD_CRIT=90"
+            hw_suggestions+=$'\n\n'
+        fi
+    fi
+    
+    # RAID Detection
+    local has_raid=false
+    
+    # mdadm software RAID
+    if [[ -f /proc/mdstat ]] && grep -q "md[0-9]" /proc/mdstat 2>/dev/null; then
+        local md_devices
+        md_devices=$(grep "^md" /proc/mdstat | awk '{print $1}')
+        hw_info+="${GREEN}✓${NC} Software RAID (mdadm) detected:"
+        hw_info+=$'\n'
+        hw_info+=$(echo "$md_devices" | sed 's/^/  - /')
+        hw_info+=$'\n\n'
+        has_raid=true
+    fi
+    
+    # LVM
+    if _cmd_exists pvs && pvs &>/dev/null; then
+        local vg_count
+        vg_count=$(vgs --noheadings 2>/dev/null | wc -l)
+        if [[ "$vg_count" -gt 0 ]]; then
+            hw_info+="${GREEN}✓${NC} LVM configured ($vg_count volume groups)"
+            hw_info+=$'\n\n'
+        fi
+    fi
+    
+    # ZFS
+    if _cmd_exists zpool; then
+        local zfs_pools
+        zfs_pools=$(zpool list -H 2>/dev/null | awk '{print $1}')
+        if [[ -n "$zfs_pools" ]]; then
+            hw_info+="${GREEN}✓${NC} ZFS pools detected:"
+            hw_info+=$'\n'
+            hw_info+=$(echo "$zfs_pools" | sed 's/^/  - /')
+            hw_info+=$'\n\n'
+        fi
+    fi
+    
+    echo -e "$hw_info"
+    echo "$hw_suggestions"
+}
+
+# Helper: Detect virtualization and container platforms
+detect_infrastructure() {
+    local infra_info=""
+    local infra_suggestions=""
+    
+    # Docker Swarm
+    if _cmd_exists docker; then
+        local swarm_state
+        swarm_state=$(docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null || echo "")
+        if [[ "$swarm_state" == "active" ]]; then
+            local swarm_role
+            swarm_role=$(docker info --format '{{.Swarm.ControlAvailable}}' 2>/dev/null)
+            if [[ "$swarm_role" == "true" ]]; then
+                infra_info+="${GREEN}✓${NC} Docker Swarm (manager node)"
+            else
+                infra_info+="${GREEN}✓${NC} Docker Swarm (worker node)"
+            fi
+            infra_info+=$'\n\n'
+        fi
+        
+        # Check for common container images that indicate specific apps
+        local all_containers
+        all_containers=$(docker ps --format '{{.Image}}' 2>/dev/null | tr ':/' ' ' | awk '{print $1}')
+        
+        # Traefik detection
+        if echo "$all_containers" | grep -qi "traefik"; then
+            infra_info+="${GREEN}✓${NC} Traefik reverse proxy detected"
+            infra_info+=$'\n\n'
+        fi
+    fi
+    
+    # Kubernetes
+    if _cmd_exists kubectl; then
+        local k8s_context
+        k8s_context=$(kubectl config current-context 2>/dev/null || echo "")
+        if [[ -n "$k8s_context" ]]; then
+            local k8s_nodes
+            k8s_nodes=$(kubectl get nodes --no-headers 2>/dev/null | wc -l)
+            infra_info+="${GREEN}✓${NC} Kubernetes cluster detected ($k8s_nodes nodes, context: $k8s_context)"
+            infra_info+=$'\n\n'
+            infra_suggestions+="# Note: Kubernetes monitoring requires additional configuration"
+            infra_suggestions+=$'\n'
+            infra_suggestions+="# Consider using node-exporter or k8s-specific monitoring"
+            infra_suggestions+=$'\n\n'
+        fi
+    fi
+    
+    # Proxmox VE
+    if [[ -f /etc/pve/status.cfg ]] || _cmd_exists pveversion; then
+        local pve_ver
+        pve_ver=$(pveversion 2>/dev/null || echo "Proxmox VE")
+        infra_info+="${GREEN}✓${NC} Proxmox VE detected: $pve_ver"
+        infra_info+=$'\n\n'
+    fi
+    
+    # KVM/QEMU
+    if _cmd_exists virsh; then
+        local vm_count
+        vm_count=$(virsh list --all 2>/dev/null | grep -c "running" || echo 0)
+        if [[ "$vm_count" -gt 0 ]]; then
+            infra_info+="${GREEN}✓${NC} KVM/QEMU virtual machines: $vm_count running"
+            infra_info+=$'\n\n'
+        fi
+    fi
+    
+    # VMware tools
+    if _systemd_is_active vmtoolsd || [[ -f /etc/vmware-tools/tools.conf ]]; then
+        infra_info+="${GREEN}✓${NC} VMware Tools detected (running in VMware VM)"
+        infra_info+=$'\n\n'
+    fi
+    
+    # NFS mounts
+    local nfs_mounts
+    nfs_mounts=$(mount | grep -E '^.* on .* type nfs' | awk '{print $3}' || true)
+    if [[ -n "$nfs_mounts" ]]; then
+        local nfs_count
+        nfs_count=$(echo "$nfs_mounts" | wc -l)
+        infra_info+="${GREEN}✓${NC} NFS mounts detected ($nfs_count):"
+        infra_info+=$'\n'
+        infra_info+=$(echo "$nfs_mounts" | head -5 | sed 's/^/  - /')
+        infra_info+=$'\n\n'
+    fi
+    
+    # SMB/CIFS mounts
+    local cifs_mounts
+    cifs_mounts=$(mount | grep -E '^.* on .* type cifs' | awk '{print $3}' || true)
+    if [[ -n "$cifs_mounts" ]]; then
+        local cifs_count
+        cifs_count=$(echo "$cifs_mounts" | wc -l)
+        infra_info+="${GREEN}✓${NC} SMB/CIFS mounts detected ($cifs_count):"
+        infra_info+=$'\n'
+        infra_info+=$(echo "$cifs_mounts" | head -5 | sed 's/^/  - /')
+        infra_info+=$'\n\n'
+    fi
+    
+    # Network infrastructure
+    # WireGuard
+    if _cmd_exists wg || [[ -d /etc/wireguard ]]; then
+        local wg_interfaces
+        wg_interfaces=$(wg show interfaces 2>/dev/null || true)
+        if [[ -n "$wg_interfaces" ]]; then
+            infra_info+="${GREEN}✓${NC} WireGuard VPN interfaces:"
+            infra_info+=$'\n'
+            infra_info+=$(echo "$wg_interfaces" | tr ' ' '\n' | sed 's/^/  - /')
+            infra_info+=$'\n\n'
+        fi
+    fi
+    
+    # Tailscale
+    if _cmd_exists tailscale; then
+        local tailscale_status
+        tailscale_status=$(tailscale status --json 2>/dev/null | grep -q '"Self"' && echo "active" || echo "")
+        if [[ -n "$tailscale_status" ]]; then
+            infra_info+="${GREEN}✓${NC} Tailscale VPN connected"
+            infra_info+=$'\n\n'
+        fi
+    fi
+    
+    # HAProxy
+    if _systemd_is_active haproxy; then
+        infra_info+="${GREEN}✓${NC} HAProxy load balancer active"
+        infra_info+=$'\n\n'
+    fi
+    
+    echo -e "$infra_info"
+    echo "$infra_suggestions"
+}
+
+# Helper: Detect application services
+detect_applications() {
+    local app_info=""
+    local app_suggestions=""
+    
+    # RabbitMQ
+    if _systemd_is_active rabbitmq-server || ss -tlnp 2>/dev/null | grep -q ":5672"; then
+        app_info+="${GREEN}✓${NC} RabbitMQ detected"
+        app_info+=$'\n\n'
+    fi
+    
+    # Mosquitto MQTT
+    if _systemd_is_active mosquitto || ss -tlnp 2>/dev/null | grep -q ":1883"; then
+        app_info+="${GREEN}✓${NC} Mosquitto MQTT broker detected"
+        app_info+=$'\n\n'
+    fi
+    
+    # Fail2ban
+    if _systemd_is_active fail2ban; then
+        local banned_count
+        banned_count=$(fail2ban-client status 2>/dev/null | grep "Currently banned:" | head -1 | awk '{print $3}' || echo "?")
+        app_info+="${GREEN}✓${NC} Fail2ban active (currently banned: $banned_count)"
+        app_info+=$'\n\n'
+        app_suggestions+="# Security monitoring"
+        app_suggestions+=$'\n'
+        app_suggestions+="# Consider monitoring fail2ban log: /var/log/fail2ban.log"
+        app_suggestions+=$'\n'
+        app_suggestions+="# ENABLE_LOG_CHECK=true"
+        app_suggestions+=$'\n'
+        app_suggestions+="# LOG_WATCH_FILES=\"/var/log/fail2ban.log\""
+        app_suggestions+=$'\n'
+        app_suggestions+="# LOG_PATTERNS=\"BAN|ERROR|WARNING\""
+        app_suggestions+=$'\n\n'
+    fi
+    
+    # CrowdSec
+    if _systemd_is_active crowdsec || _cmd_exists cscli; then
+        local cs_alerts
+        cs_alerts=$(cscli alerts list 2>/dev/null | grep -c "^\│" 2>/dev/null || echo "?")
+        app_info+="${GREEN}✓${NC} CrowdSec active (alerts: $cs_alerts)"
+        app_info+=$'\n\n'
+    fi
+    
+    # Elasticsearch
+    if ss -tlnp 2>/dev/null | grep -q ":9200"; then
+        app_info+="${GREEN}✓${NC} Elasticsearch detected (port 9200)"
+        app_info+=$'\n\n'
+    fi
+    
+    # MongoDB
+    if _systemd_is_active mongod || ss -tlnp 2>/dev/null | grep -q ":27017"; then
+        app_info+="${GREEN}✓${NC} MongoDB detected"
+        app_info+=$'\n\n'
+    fi
+    
+    # InfluxDB
+    if _systemd_is_active influxdb || ss -tlnp 2>/dev/null | grep -q ":8086"; then
+        app_info+="${GREEN}✓${NC} InfluxDB detected"
+        app_info+=$'\n\n'
+    fi
+    
+    echo -e "$app_info"
+    echo "$app_suggestions"
+}
+
+# Helper: Detect actually-running database servers
+detect_database_servers() {
+    local db_info=""
+    local db_suggestions=""
+    local has_running_db=false
+    
+    # MySQL/MariaDB Server
+    if _systemd_is_active mysqld || _systemd_is_active mysql || _systemd_is_active mariadb; then
+        db_info+="${GREEN}✓${NC} MySQL/MariaDB server running"
+        db_info+=$'\n\n'
+        has_running_db=true
+        db_suggestions+="# MySQL/MariaDB (detected running)"
+        db_suggestions+=$'\n'
+        db_suggestions+="DB_MYSQL_HOST=\"localhost\""
+        db_suggestions+=$'\n'
+        db_suggestions+="DB_MYSQL_PORT=\"3306\""
+        db_suggestions+=$'\n'
+        db_suggestions+="DB_MYSQL_USER=\"telemon\""
+        db_suggestions+=$'\n'
+        db_suggestions+="# DB_MYSQL_PASS=\"your-secure-password\""
+        db_suggestions+=$'\n'
+        db_suggestions+="DB_MYSQL_TIMEOUT=5"
+        db_suggestions+=$'\n\n'
+    fi
+    
+    # PostgreSQL Server
+    if _systemd_is_active postgresql || _systemd_is_active "postgres*" 2>/dev/null; then
+        # Get the specific version service
+        local pg_service
+        pg_service=$(systemctl list-units --type=service --state=running | grep -oE 'postgresql-[0-9]+\.[0-9]+' | head -1 || echo "postgresql")
+        db_info+="${GREEN}✓${NC} PostgreSQL server running ($pg_service)"
+        db_info+=$'\n\n'
+        has_running_db=true
+        db_suggestions+="# PostgreSQL (detected running)"
+        db_suggestions+=$'\n'
+        db_suggestions+="DB_POSTGRES_HOST=\"localhost\""
+        db_suggestions+=$'\n'
+        db_suggestions+="DB_POSTGRES_PORT=\"5432\""
+        db_suggestions+=$'\n'
+        db_suggestions+="DB_POSTGRES_USER=\"telemon\""
+        db_suggestions+=$'\n'
+        db_suggestions+="# DB_POSTGRES_PASS=\"your-secure-password\""
+        db_suggestions+=$'\n'
+        db_suggestions+="DB_POSTGRES_TIMEOUT=5"
+        db_suggestions+=$'\n\n'
+    fi
+    
+    # Redis Server
+    if _systemd_is_active redis-server || _systemd_is_active redis; then
+        db_info+="${GREEN}✓${NC} Redis server running"
+        db_info+=$'\n\n'
+        has_running_db=true
+        db_suggestions+="# Redis (detected running)"
+        db_suggestions+=$'\n'
+        db_suggestions+="DB_REDIS_HOST=\"localhost\""
+        db_suggestions+=$'\n'
+        db_suggestions+="DB_REDIS_PORT=\"6379\""
+        db_suggestions+=$'\n'
+        db_suggestions+="# DB_REDIS_PASS=\"your-secure-password\""
+        db_suggestions+=$'\n'
+        db_suggestions+="DB_REDIS_TIMEOUT=5"
+        db_suggestions+=$'\n\n'
+    fi
+    
+    # Check for databases in Docker containers
+    if _cmd_exists docker; then
+        local db_containers
+        db_containers=$(docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null | grep -iE 'mysql|postgres|redis|mongo|mariadb' || true)
+        if [[ -n "$db_containers" ]]; then
+            db_info+="${GREEN}✓${NC} Database containers running:"
+            db_info+=$'\n'
+            db_info+=$(echo "$db_containers" | awk '{print "  - " $1 " (" $2 ")"}')
+            db_info+=$'\n\n'
+            if [[ "$has_running_db" == "false" ]]; then
+                db_suggestions+="# Database containers detected - configure host ports for monitoring"
+                db_suggestions+=$'\n'
+                db_suggestions+="# Example: map container ports and monitor localhost:PORT"
+                db_suggestions+=$'\n\n'
+            fi
+        fi
+    fi
+    
+    # SQLite3 availability (always available if command exists)
+    if _cmd_exists sqlite3; then
+        db_info+="${GREEN}✓${NC} SQLite3 available"
+        db_info+=$'\n\n'
+        if [[ "$has_running_db" == "false" ]]; then
+            db_suggestions+="# SQLite3 - uncomment to monitor specific databases"
+            db_suggestions+=$'\n'
+            db_suggestions+="# DB_SQLITE_PATHS=\"/var/lib/app/data.db /opt/other/stats.db\""
+            db_suggestions+=$'\n'
+            db_suggestions+="# DB_SQLITE_SIZE_THRESHOLD_WARN=500"
+            db_suggestions+=$'\n'
+            db_suggestions+="# DB_SQLITE_SIZE_THRESHOLD_CRIT=1000"
+            db_suggestions+=$'\n\n'
+        fi
+    fi
+    
+    if [[ "$has_running_db" == "true" ]]; then
+        db_suggestions+="# Enable database health checks"
+        db_suggestions+=$'\n'
+        db_suggestions+="ENABLE_DATABASE_CHECKS=true"
+        db_suggestions+=$'\n\n'
+    fi
+    
+    echo -e "$db_info"
+    echo "$db_suggestions"
+}
+
 cmd_discover() {
     echo "Telemon Auto-Discovery"
     echo "======================"
     echo ""
-    echo "Scanning for services and generating suggested .env configuration..."
+    echo "Scanning for hardware, services, and infrastructure..."
     echo ""
     
     local suggestions=""
@@ -683,33 +1239,57 @@ cmd_discover() {
     local has_pm2=false
     local has_nginx=false
     local has_apache=false
-    local has_mysql=false
-    local has_postgres=false
-    local has_redis=false
-    local has_sqlite=false
     local has_systemd_services=false
-    local has_plex=false
+    local containers=""
+    
+    # ============================================
+    # HARDWARE SECTION
+    # ============================================
+    echo -e "${BLUE}=== Hardware ===${NC}"
+    echo ""
+    local hw_output
+    hw_output=$(detect_hardware)
+    local hw_suggestions
+    hw_suggestions=$(detect_hardware | grep -A 1000 "^ENABLE_\|^#" || true)
+    # Print only the info part (lines before suggestions)
+    echo -e "$(echo "$hw_output" | grep -B 1000 "^ENABLE_" | head -n -1 || echo "$hw_output")"
+    suggestions+="$hw_suggestions"
+    
+    # ============================================
+    # INFRASTRUCTURE SECTION
+    # ============================================
+    echo -e "${BLUE}=== Infrastructure ===${NC}"
+    echo ""
+    local infra_output
+    infra_output=$(detect_infrastructure)
+    echo -e "$infra_output"
+    
+    # ============================================
+    # CORE SERVICES SECTION
+    # ============================================
+    echo -e "${BLUE}=== Core Services ===${NC}"
+    echo ""
     
     # Check for Docker containers
-    if command -v docker &>/dev/null; then
-        local containers
+    if _cmd_exists docker; then
         containers=$(docker ps --format '{{.Names}}' 2>/dev/null | sort)
         if [[ -n "$containers" ]]; then
             has_docker=true
-            suggestions+="# Docker containers detected"
+            echo -e "${GREEN}✓${NC} Docker containers found:"
+            echo "$containers" | sed 's/^/  - /'
+            echo ""
+            
+            suggestions+="# Docker containers"
             suggestions+=$'\n'
             suggestions+="ENABLE_DOCKER_CONTAINERS=true"
             suggestions+=$'\n'
             suggestions+="CRITICAL_CONTAINERS=\"${containers//$'\n'/ }\""
             suggestions+=$'\n\n'
-            echo -e "${GREEN}✓${NC} Docker containers found:"
-            echo "$containers" | sed 's/^/  - /'
-            echo ""
         fi
     fi
     
     # Check for PM2 processes
-    if command -v pm2 &>/dev/null; then
+    if _cmd_exists pm2; then
         local pm2_procs
         pm2_procs=$(pm2 jlist 2>/dev/null | python3 -c "
 import sys, json
@@ -722,22 +1302,51 @@ except Exception:
 " 2>/dev/null)
         if [[ -n "$pm2_procs" ]]; then
             has_pm2=true
-            suggestions+="# PM2 processes detected"
-            suggestions+=$'\n'
-            suggestions+="ENABLE_PM2_PROCESSES=true"
-            suggestions+=$'\n'
-            suggestions+="CRITICAL_PM2_PROCESSES=\"${pm2_procs}\""
-            suggestions+=$'\n\n'
             echo -e "${GREEN}✓${NC} PM2 processes found:"
             for proc in $pm2_procs; do
                 echo "  - $proc"
             done
             echo ""
+            
+            suggestions+="# PM2 processes"
+            suggestions+=$'\n'
+            suggestions+="ENABLE_PM2_PROCESSES=true"
+            suggestions+=$'\n'
+            suggestions+="CRITICAL_PM2_PROCESSES=\"${pm2_procs}\""
+            suggestions+=$'\n\n'
         fi
     fi
     
-    # Check for listening ports
-    if command -v ss &>/dev/null; then
+    # Check for web servers
+    if _cmd_exists nginx || _systemd_is_active nginx; then
+        has_nginx=true
+        echo -e "${GREEN}✓${NC} Nginx web server active"
+        echo ""
+    fi
+    
+    if _cmd_exists apache2 || _systemd_is_active apache2 || _systemd_is_active httpd; then
+        has_apache=true
+        echo -e "${GREEN}✓${NC} Apache web server active"
+        echo ""
+    fi
+    
+    # ============================================
+    # DATABASE SERVERS SECTION (Enhanced)
+    # ============================================
+    echo -e "${BLUE}=== Databases ===${NC}"
+    echo ""
+    local db_output
+    db_output=$(detect_database_servers)
+    local db_suggestions
+    db_suggestions=$(detect_database_servers | grep -A 1000 "^ENABLE_\|^#" | head -100 || true)
+    # Print info part only
+    echo -e "$(echo "$db_output" | grep -B 1000 "^DB_\|^ENABLE_" | grep -v "^DB_\|^ENABLE_" | head -n -1 || echo "$db_output")"
+    suggestions+="$db_suggestions"
+    
+    # ============================================
+    # NETWORK & PORTS SECTION
+    # ============================================
+    if _cmd_exists ss; then
         local listening_ports
         listening_ports=$(ss -tlnp 2>/dev/null | awk 'NR>1 && /LISTEN/ {
             port = $4
@@ -746,116 +1355,78 @@ except Exception:
             gsub(/.*users:/, "", proc)
             gsub(/\\)/, "", proc)
             if (proc != $0) print port, proc
-        }' | sort -u -k1,1n | head -20)
+        }' | sort -u -k1,1n | head -15)
         if [[ -n "$listening_ports" ]]; then
-            suggestions+="# TCP ports detected (manual review recommended)"
-            suggestions+=$'\n'
-            suggestions+="# Sample ports from ss -tlnp:"
-            suggestions+=$'\n'
-            suggestions+="# (Uncomment and customize as needed)"
+            echo -e "${BLUE}=== Network Ports ===${NC}"
+            echo ""
+            echo -e "${GREEN}✓${NC} Key listening ports:"
+            echo "  Port  | Process"
+            echo "$listening_ports" | head -10 | while read -r port proc; do
+                printf "  %-5s | %s\n" "$port" "$proc"
+            done
+            echo ""
+            
+            suggestions+="# TCP Port monitoring (review and customize)"
             suggestions+=$'\n'
             suggestions+="# ENABLE_TCP_PORT_CHECK=true"
             suggestions+=$'\n'
             suggestions+="# CRITICAL_PORTS=\"localhost:22 localhost:80\""
             suggestions+=$'\n\n'
-            echo -e "${GREEN}✓${NC} Listening ports detected:"
-            echo "  Port | Process"
-            echo "$listening_ports" | while read -r port proc; do
-                printf "  %-5s | %s\n" "$port" "$proc"
-            done
+        fi
+    fi
+    
+    # ============================================
+    # APPLICATION SERVICES SECTION
+    # ============================================
+    local app_output
+    app_output=$(detect_applications)
+    if [[ -n "$app_output" ]]; then
+        echo -e "${BLUE}=== Application Services ===${NC}"
+        echo ""
+        echo -e "$app_output"
+        local app_suggestions
+        app_suggestions=$(detect_applications | grep -A 1000 "^ENABLE_\|^#" || true)
+        suggestions+="$app_suggestions"
+    fi
+    
+    # ============================================
+    # SYSTEMD SERVICES SECTION
+    # ============================================
+    if _cmd_exists systemctl; then
+        local active_services
+        active_services=$(systemctl list-units --type=service --state=running --no-legend --plain 2>/dev/null | \
+            awk '{print $1}' | grep -E '^(ssh|cron|crond|nginx|apache|httpd|mysql|postgres|redis|fail2ban)' || true)
+        if [[ -n "$active_services" ]]; then
+            echo -e "${BLUE}=== Systemd Services ===${NC}"
             echo ""
+            echo -e "${GREEN}✓${NC} Key active services:"
+            echo "$active_services" | sed 's/^/  - /'
+            echo ""
+            
+            suggestions+="# Systemd service monitoring"
+            suggestions+=$'\n'
+            suggestions+="ENABLE_FAILED_SYSTEMD_SERVICES=true"
+            suggestions+=$'\n'
+            suggestions+="CRITICAL_SYSTEM_PROCESSES=\"sshd cron\""
+            suggestions+=$'\n\n'
         fi
     fi
     
-    # Check for web servers
-    if command -v nginx &>/dev/null || systemctl is-active nginx &>/dev/null 2>&1; then
-        has_nginx=true
-        echo -e "${GREEN}✓${NC} Nginx detected"
-    fi
-    if command -v apache2 &>/dev/null || systemctl is-active apache2 &>/dev/null 2>&1 || systemctl is-active httpd &>/dev/null 2>&1; then
-        has_apache=true
-        echo -e "${GREEN}✓${NC} Apache detected"
-    fi
+    # ============================================
+    # SMART THRESHOLDS
+    # ============================================
+    echo -e "${BLUE}=== Smart Thresholds ===${NC}"
+    echo ""
+    local smart_thresholds
+    smart_thresholds=$(generate_smart_thresholds)
+    echo -e "${GREEN}✓${NC} Thresholds suggested based on system specs"
+    echo ""
+    suggestions+="$smart_thresholds"
+    suggestions+=$'\n'
     
-    if [[ "$has_nginx" == "true" || "$has_apache" == "true" ]]; then
-        if [[ "$has_nginx" == "true" ]]; then
-            echo -e "${GREEN}✓${NC} Nginx detected"
-        fi
-        if [[ "$has_apache" == "true" ]]; then
-            echo -e "${GREEN}✓${NC} Apache detected"
-        fi
-    fi
-    
-    # Check for databases
-    if command -v mysql &>/dev/null || command -v mariadb &>/dev/null; then
-        has_mysql=true
-        echo -e "${GREEN}✓${NC} MySQL/MariaDB client detected"
-        suggestions+="# MySQL client detected - configure if MySQL runs locally"
-        suggestions+=$'\n'
-        suggestions+="# DB_MYSQL_HOST=\"localhost\""
-        suggestions+=$'\n'
-        suggestions+="# DB_MYSQL_PORT=\"3306\""
-        suggestions+=$'\n'
-        suggestions+="# DB_MYSQL_USER=\"telemon\""
-        suggestions+=$'\n'
-        suggestions+="# DB_MYSQL_PASS=\"\""
-        suggestions+=$'\n\n'
-    fi
-    
-    if command -v psql &>/dev/null; then
-        has_postgres=true
-        echo -e "${GREEN}✓${NC} PostgreSQL client (psql) detected"
-        suggestions+="# PostgreSQL client detected - configure if PostgreSQL runs locally"
-        suggestions+=$'\n'
-        suggestions+="# DB_POSTGRES_HOST=\"localhost\""
-        suggestions+=$'\n'
-        suggestions+="# DB_POSTGRES_PORT=\"5432\""
-        suggestions+=$'\n'
-        suggestions+="# DB_POSTGRES_USER=\"telemon\""
-        suggestions+=$'\n'
-        suggestions+="# DB_POSTGRES_PASS=\"\""
-        suggestions+=$'\n\n'
-    fi
-    
-    if command -v redis-cli &>/dev/null; then
-        has_redis=true
-        echo -e "${GREEN}✓${NC} Redis client (redis-cli) detected"
-        suggestions+="# Redis client detected - configure if Redis runs locally"
-        suggestions+=$'\n'
-        suggestions+="# DB_REDIS_HOST=\"localhost\""
-        suggestions+=$'\n'
-        suggestions+="# DB_REDIS_PORT=\"6379\""
-        suggestions+=$'\n'
-        suggestions+="# DB_REDIS_PASS=\"\""
-        suggestions+=$'\n\n'
-    fi
-
-    # Check for SQLite3 (commonly used by Plex and other applications)
-    # Check for SQLite3 (just note availability, don't search filesystem)
-    local has_sqlite=false
-    if command -v sqlite3 &>/dev/null; then
-        has_sqlite=true
-        echo -e "${GREEN}✓${NC} SQLite3 available"
-        suggestions+="# SQLite3 detected — uncomment to monitor databases"
-        suggestions+=$'\n'
-        suggestions+="# ENABLE_DATABASE_CHECKS=true"
-        suggestions+=$'\n'
-        suggestions+="# DB_SQLITE_PATHS=\"/path/to/database.db\""
-        suggestions+=$'\n'
-        suggestions+="# DB_SQLITE_SIZE_THRESHOLD_WARN=500"
-        suggestions+=$'\n'
-        suggestions+="# DB_SQLITE_SIZE_THRESHOLD_CRIT=1000"
-        suggestions+=$'\n\n'
-    fi
-    
-    if [[ "$has_mysql" == "true" || "$has_postgres" == "true" || "$has_redis" == "true" || "$has_sqlite" == "true" ]]; then
-        suggestions+="# Enable database checks"
-        suggestions+=$'\n'
-        suggestions+="ENABLE_DATABASE_CHECKS=true"
-        suggestions+=$'\n\n'
-    fi
-
-    # Suggest site monitoring for local services (web servers, containers with web ports)
+    # ============================================
+    # SITE MONITORING SUGGESTION
+    # ============================================
     local has_local_web=false
     if [[ "$has_nginx" == "true" || "$has_apache" == "true" ]]; then
         has_local_web=true
@@ -870,7 +1441,7 @@ except Exception:
     fi
     
     if [[ "$has_local_web" == "true" ]]; then
-        suggestions+="# Local web services detected"
+        suggestions+="# Site monitoring (local services detected)"
         suggestions+=$'\n'
         suggestions+="# For localhost monitoring, set: SITE_ALLOW_INTERNAL=true"
         suggestions+=$'\n'
@@ -880,25 +1451,9 @@ except Exception:
         suggestions+=$'\n\n'
     fi
     
-    # Check for systemd services
-    if command -v systemctl &>/dev/null; then
-        local active_services
-        active_services=$(systemctl list-units --type=service --state=running --no-legend --plain 2>/dev/null | awk '{print $1}' | grep -E '^(ssh|cron|nginx|apache|mysql|postgres|redis)' || true)
-        if [[ -n "$active_services" ]]; then
-            has_systemd_services=true
-            suggestions+="# Systemd services detected"
-            suggestions+=$'\n'
-            suggestions+="ENABLE_FAILED_SYSTEMD_SERVICES=true"
-            suggestions+=$'\n'
-            suggestions+="CRITICAL_SYSTEM_PROCESSES=\"sshd cron\""
-            suggestions+=$'\n\n'
-            echo -e "${GREEN}✓${NC} Active systemd services:"
-            echo "$active_services" | sed 's/^/  - /'
-            echo ""
-        fi
-    fi
-    
-    # Output suggestions
+    # ============================================
+    # OUTPUT SUGGESTIONS
+    # ============================================
     echo ""
     echo "==============================================="
     echo "Suggested Configuration"
@@ -907,23 +1462,33 @@ except Exception:
     echo "Add the following to your .env file:"
     echo ""
     echo "# ============================================="
-    echo "# Auto-discovered settings (review before use)"
+    echo "# Auto-discovered settings ($(date +%Y-%m-%d))"
+    echo "# Generated by: telemon-admin.sh discover"
     echo "# ============================================="
     echo ""
+    
     if [[ -n "$suggestions" ]]; then
         echo "$suggestions"
     else
         echo "# No services auto-detected."
         echo "# Consider manually configuring checks for your environment."
     fi
+    
     echo ""
     echo "==============================================="
     echo ""
     echo "Usage:"
-    echo "  1. Copy the suggested lines above to your .env file"
-    echo "  2. Review and adjust values as needed"
-    echo "  3. Run: bash telemon.sh --validate"
-    echo "  4. Run: bash telemon.sh --test"
+    echo "  1. Review the suggested configuration above"
+    echo "  2. Copy relevant lines to your .env file"
+    echo "  3. Set credentials for database connections"
+    echo "  4. Run: bash telemon.sh --validate"
+    echo "  5. Run: bash telemon.sh --test"
+    echo ""
+    echo "Tips:"
+    echo "  - All suggestions are commented with # for safety"
+    echo "  - Uncomment the lines you want to enable"
+    echo "  - Adjust thresholds to match your environment"
+    echo "  - Never commit .env files with real credentials"
 }
 
 # ---------------------------------------------------------------------------

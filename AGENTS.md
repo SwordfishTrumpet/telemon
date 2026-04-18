@@ -66,7 +66,7 @@ check_myfeature() {
   - `swap` — Swap usage
   - `iowait` — I/O wait
   - `zombies` — Zombie processes
-  - `inet` — Internet connectivity
+  - `internet` — Internet connectivity
   - `proc_<name>` — System process (name sanitized via `sanitize_state_key`)
   - `systemd_failed` — Failed systemd services
   - `docker_engine` — Docker engine availability
@@ -103,6 +103,90 @@ ${STATE_FILE}.net          — Network bandwidth previous counters (rx tx timest
 ${STATE_FILE}.iowait       — I/O wait previous counters (cpu_total iowait timestamp)
 ${STATE_FILE}.trend        — Predictive trend data (key=epoch:value,epoch:value,...)
 ```
+
+### Auto-Discovery System
+
+The discovery system in `telemon-admin.sh` (`cmd_discover()`) scans the host system and suggests configuration based on detected components:
+
+#### Discovery Categories
+
+1. **Hardware Detection** (`detect_hardware()`)
+   - NVMe drives: `nvme list`, `smartctl --scan`
+   - GPUs: `nvidia-smi`, `intel_gpu_top`, `/sys/class/drm/.../vendor`
+   - UPS/Battery: `systemctl is-active apcupsd`, `upower`, NUT
+   - Sensors: `sensors` (lm-sensors)
+   - Storage: ZFS (`zpool`), LVM (`pvs`), mdadm (`/proc/mdstat`)
+
+2. **Infrastructure Detection** (`detect_infrastructure()`)
+   - Container platforms: Docker Swarm, Kubernetes, Podman
+   - Virtualization: Proxmox VE (`pveversion`), KVM (`virsh`), VMware
+   - Network: WireGuard (`wg`), Tailscale, HAProxy, NFS/SMB mounts
+
+3. **Database Detection** (`detect_database_servers()`)
+   - Checks for **running servers** via `systemctl is-active`, not just clients
+   - MySQL/MariaDB: `mysqld`, `mysql`, `mariadb` services
+   - PostgreSQL: `postgresql` service (handles versioned services)
+   - Redis: `redis-server`, `redis` services
+   - Also detects database containers via `docker ps`
+
+4. **Application Detection** (`detect_applications()`)
+   - Messaging: RabbitMQ (port 5672), Mosquitto (port 1883)
+   - Security: Fail2ban, CrowdSec
+   - Databases: Elasticsearch (9200), MongoDB (27017), InfluxDB (8086)
+
+5. **Smart Thresholds** (`generate_smart_thresholds()`)
+   - Analyzes total RAM and suggests memory thresholds
+   - Analyzes CPU cores and suggests CPU thresholds
+   - Higher RAM → lower threshold percentages (same absolute margin)
+   - More cores → can handle higher load percentages
+
+#### Discovery Helpers
+
+```bash
+_systemd_is_active()    # Check systemd service status (wrapper for safety)
+_cmd_exists()           # Check if command available (wrapper for safety)
+_get_total_memory_gb()  # Parse /proc/meminfo for RAM size
+_get_cpu_cores()        # Wrapper for nproc
+```
+
+#### Adding New Discovery Detectors
+
+To add detection for a new service type:
+
+1. **Choose the appropriate helper function** based on category:
+   - Hardware → `detect_hardware()`
+   - Infrastructure → `detect_infrastructure()`
+   - Application → `detect_applications()`
+   - Database → `detect_database_servers()`
+
+2. **Use safe detection patterns**:
+```bash
+# Check command exists first
+if _cmd_exists mycommand; then
+    # Check if actually running/active
+    if _systemd_is_active myservice; then
+        info+="Service detected"
+        suggestions+="ENABLE_MY_CHECK=true"
+    fi
+fi
+```
+
+3. **Always provide example suggestions**:
+```bash
+suggestions+="# My Service monitoring"
+suggestions+=$'\n'
+suggestions+="ENABLE_MY_CHECK=true"
+suggestions+=$'\n'
+suggestions+="# MY_THRESHOLD_WARN=70"
+suggestions+=$'\n\n'
+```
+
+4. **Security considerations**:
+   - Never execute user-controlled data
+   - Use `_cmd_exists` to verify commands before running
+   - Use `_systemd_is_active` for service checks (safe wrapper)
+   - Don't search filesystem for files (privacy/security risk)
+   - Only detect via standard system commands
 
 ### Alert Dispatch Chain
 ```
