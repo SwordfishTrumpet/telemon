@@ -7,7 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Native SMTP Support** — send email alerts directly via curl without local mailer:
+  - New config options: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_TLS`
+  - Supports authenticated SMTP (Gmail, SendGrid, AWS SES, etc.)
+  - STARTTLS on port 587, SMTPS (SSL) on port 465
+  - Password URL-encoding for special characters (@, #, %, &, =, ?)
+  - Falls back to local mailers (msmtp/sendmail) when SMTP_HOST not set
+  - Warns if SMTP auth used without TLS (plaintext protection)
+  - Credentials redacted from error logs
+  - See [Email Alerts documentation](README.md#email-alerts) for setup guide
+
+- **Improved Installer** — better automation and container support:
+  - `--silent` flag for non-interactive installs (CI/CD friendly)
+  - `--systemd` flag for systemd timer instead of cron
+  - Proper argument parsing (fixes --silent being interpreted as directory)
+  - Auto-detects local clone vs remote install
+  - Environment variables: `TELEMON_SILENT`, `TELEMON_SYSTEMD`
+  - Warns when crontab missing and suggests `--systemd`
+
 ### Security
+- **SMTP Password Protection** — URL-encoding prevents credential issues:
+  - Special characters (@, #, %, &, =, ?) in passwords are URL-encoded
+  - Prevents curl from misinterpreting @ in passwords as URL delimiter
+  - Order-safe encoding (encodes % first to avoid double-encoding)
 - **Database Password Security** — fixed credential exposure in process listings:
   - MySQL/MariaDB: Password now passed via `MYSQL_PWD` environment variable instead of `--password` flag
   - PostgreSQL: Password now passed via `PGPASSWORD` environment variable instead of connection string
