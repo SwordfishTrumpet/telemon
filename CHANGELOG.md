@@ -84,6 +84,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Credentials redacted from error logs
   - See [Email Alerts documentation](README.md#email-alerts) for setup guide
 
+- **Enhanced Auto-Discovery** — comprehensive system scanning with smart defaults:
+  - Run: `telemon-admin.sh discover` to scan hardware, services, and infrastructure
+  - **Hardware Detection**: NVMe drives, NVIDIA/Intel GPUs, UPS (APC/NUT/upower), lm-sensors, RAID/ZFS/LVM
+  - **Infrastructure Detection**: Docker Swarm, Kubernetes, Proxmox VE, KVM/QEMU, NFS/SMB mounts, WireGuard, Tailscale, HAProxy
+  - **Database Detection**: MySQL/MariaDB, PostgreSQL, Redis (only if servers running, not just clients)
+  - **Application Detection**: RabbitMQ, Mosquitto MQTT, Fail2ban, CrowdSec, Elasticsearch, MongoDB
+  - **Smart Thresholds**: CPU/memory thresholds based on actual hardware specs (RAM size, core count)
+  - **Enhanced Cron Detection**: Detects cron, crond, cronie, anacron, systemd-cron, and systemd timers
+  - Generates ready-to-use `.env` configuration with helpful comments
+  - Test coverage: 55+ new tests for discovery system (340 total tests)
+
 - **Improved Installer** — better automation and container support:
   - `--silent` flag for non-interactive installs (CI/CD friendly)
   - `--systemd` flag for systemd timer instead of cron

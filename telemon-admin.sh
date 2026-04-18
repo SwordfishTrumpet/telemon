@@ -1390,25 +1390,64 @@ except Exception:
     fi
     
     # ============================================
-    # SYSTEMD SERVICES SECTION
+    # SYSTEMD SERVICES & CRON DETECTION
     # ============================================
     if _cmd_exists systemctl; then
         local active_services
         active_services=$(systemctl list-units --type=service --state=running --no-legend --plain 2>/dev/null | \
-            awk '{print $1}' | grep -E '^(ssh|cron|crond|nginx|apache|httpd|mysql|postgres|redis|fail2ban)' || true)
-        if [[ -n "$active_services" ]]; then
+            awk '{print $1}' | grep -E '^(ssh|cron|crond|cronie|anacron|systemd-cron|nginx|apache|httpd|mysql|postgres|redis|fail2ban)' || true)
+        
+        # Also check for systemd timers (modern cron replacement)
+        local active_timers
+        active_timers=$(systemctl list-timers --no-legend --plain 2>/dev/null | awk 'NR>0 {print $NF}' | grep -v "n/a" | head -5 || true)
+        local has_timers=false
+        if [[ -n "$active_timers" ]]; then
+            has_timers=true
+        fi
+        
+        if [[ -n "$active_services" ]] || [[ "$has_timers" == "true" ]]; then
             echo -e "${BLUE}=== Systemd Services ===${NC}"
             echo ""
-            echo -e "${GREEN}✓${NC} Key active services:"
-            echo "$active_services" | sed 's/^/  - /'
-            echo ""
+            
+            if [[ -n "$active_services" ]]; then
+                echo -e "${GREEN}✓${NC} Key active services:"
+                echo "$active_services" | sed 's/^/  - /'
+                echo ""
+            fi
+            
+            if [[ "$has_timers" == "true" ]]; then
+                echo -e "${GREEN}✓${NC} Systemd timers active (cron alternative):"
+                echo "$active_timers" | sed 's/^/  - /'
+                echo ""
+            fi
+            
+            # Build critical processes list based on what was detected
+            local critical_procs="sshd"
+            local has_cron=false
+            
+            if echo "$active_services" | grep -qE '^(cron|crond|cronie|anacron|systemd-cron)'; then
+                has_cron=true
+                # Add the specific cron service name found
+                local cron_service
+                cron_service=$(echo "$active_services" | grep -E '^(cron|crond|cronie|anacron|systemd-cron)' | head -1)
+                critical_procs="${critical_procs} ${cron_service%.service}"
+            fi
             
             suggestions+="# Systemd service monitoring"
             suggestions+=$'\n'
             suggestions+="ENABLE_FAILED_SYSTEMD_SERVICES=true"
             suggestions+=$'\n'
-            suggestions+="CRITICAL_SYSTEM_PROCESSES=\"sshd cron\""
-            suggestions+=$'\n\n'
+            suggestions+="CRITICAL_SYSTEM_PROCESSES=\"${critical_procs}\""
+            suggestions+=$'\n'
+            
+            if [[ "$has_timers" == "true" ]] && [[ "$has_cron" == "false" ]]; then
+                suggestions+="# Note: System uses systemd timers instead of traditional cron"
+                suggestions+=$'\n'
+                suggestions+="# Consider monitoring timer-triggered services if needed"
+                suggestions+=$'\n'
+            fi
+            
+            suggestions+=$'\n'
         fi
     fi
     

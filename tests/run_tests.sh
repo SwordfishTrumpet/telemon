@@ -2390,6 +2390,34 @@ test_discovery_system() {
     # Test 20: verify timestamp in output
     grep -q 'date +%Y-%m-%d' "$admin_script"
     assert_true "Discovery: includes generation timestamp"
+    
+    # Test 21: verify enhanced cron detection patterns
+    grep -q "cronie" "$admin_script"
+    assert_true "Discovery: cronie detection pattern exists"
+    
+    grep -q "anacron" "$admin_script"
+    assert_true "Discovery: anacron detection pattern exists"
+    
+    grep -q "systemd-cron" "$admin_script"
+    assert_true "Discovery: systemd-cron detection pattern exists"
+    
+    # Test 22: verify systemd timers detection
+    grep -q "list-timers" "$admin_script"
+    assert_true "Discovery: systemd timers detection exists"
+    
+    grep -q "active_timers" "$admin_script"
+    assert_true "Discovery: active timers variable exists"
+    
+    # Test 23: verify smart critical processes list building
+    grep -q "critical_procs" "$admin_script"
+    assert_true "Discovery: dynamic critical_procs list building exists"
+    
+    grep -q "has_cron" "$admin_script"
+    assert_true "Discovery: has_cron detection flag exists"
+    
+    # Test 24: verify timers note in suggestions
+    grep -q "systemd timers instead of traditional cron" "$admin_script"
+    assert_true "Discovery: systemd timers note in suggestions"
 }
 
 # ---------------------------------------------------------------------------
