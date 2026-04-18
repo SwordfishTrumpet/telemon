@@ -1219,7 +1219,7 @@ check_disk() {
 # ===========================================================================
 check_internet() {
     if ! command -v ping &>/dev/null; then
-        log "DEBUG" "check_internet: ping not found — skipping"
+        log "WARN" "check_internet: ping not found — skipping (install iputils-ping for internet checks)"
         return
     fi
     local target="${PING_TARGET:-8.8.8.8}"
@@ -1987,7 +1987,7 @@ check_tcp_ports() {
 # ===========================================================================
 check_cpu_temp() {
     if ! command -v sensors &>/dev/null; then
-        log "DEBUG" "CPU temp check: sensors not installed — skipping"
+        log "WARN" "CPU temp check: lm-sensors not installed — skipping (install lm-sensors for temperature monitoring)"
         return
     fi
 
@@ -2042,7 +2042,7 @@ check_dns() {
             resolved=true
         fi
     else
-        log "DEBUG" "DNS check: no resolver tool found (dig/nslookup/host) — skipping"
+        log "WARN" "DNS check: no resolver tool found (dig/nslookup/host) — skipping (install dnsutils or bind-utils for DNS monitoring)"
         return
     fi
 
@@ -2070,7 +2070,7 @@ check_gpu() {
         return
     fi
     
-    log "DEBUG" "GPU check: neither nvidia-smi nor intel_gpu_top found — skipping"
+    log "WARN" "GPU check: neither nvidia-smi nor intel_gpu_top found — skipping (install nvidia-utils for NVIDIA or intel-gpu-tools for Intel GPU monitoring)"
 }
 
 # ===========================================================================
@@ -2235,7 +2235,7 @@ check_dns_records() {
 
     # Check for dig command (required for proper record lookups)
     if ! command -v dig &>/dev/null; then
-        log "DEBUG" "DNS record check: dig not available — skipping"
+        log "WARN" "DNS record check: dig not available — skipping (install dnsutils or bind-utils for DNS record validation)"
         return
     fi
 
@@ -2449,7 +2449,7 @@ check_databases() {
         local mysql_detail=""
         
         if ! command -v mysql &>/dev/null; then
-            log "DEBUG" "Database check: mysql client not found — skipping MySQL check"
+            log "WARN" "Database check: mysql/mariadb-client not found — skipping MySQL check"
         else
             local mysql_port="${DB_MYSQL_PORT:-3306}"
             local mysql_user="${DB_MYSQL_USER:-}"
@@ -2510,7 +2510,7 @@ check_databases() {
         local pg_detail=""
         
         if ! command -v psql &>/dev/null; then
-            log "DEBUG" "Database check: psql client not found — skipping PostgreSQL check"
+            log "WARN" "Database check: postgresql-client not found — skipping PostgreSQL check"
         else
             local pg_port="${DB_POSTGRES_PORT:-5432}"
             local pg_user="${DB_POSTGRES_USER:-}"
@@ -2571,7 +2571,7 @@ check_databases() {
         local redis_detail=""
         
         if ! command -v redis-cli &>/dev/null; then
-            log "DEBUG" "Database check: redis-cli not found — skipping Redis check"
+            log "WARN" "Database check: redis-tools not found — skipping Redis check"
         else
             local redis_port="${DB_REDIS_PORT:-6379}"
             local redis_pass="${DB_REDIS_PASS:-}"
@@ -4100,12 +4100,17 @@ ALERT_QUEUE_FILE="${STATE_FILE}.queue"
 dispatch_with_retry() {
     local message="$1"
 
+    # Export hostname for all dispatchers
+    export TELEMON_HOSTNAME
+    TELEMON_HOSTNAME="$(hostname)"
+
     # First try to send any queued alerts from previous failures
     if [[ -f "$ALERT_QUEUE_FILE" ]]; then
         local queued_msg
         queued_msg=$(cat "$ALERT_QUEUE_FILE" 2>/dev/null)
         if [[ -n "$queued_msg" ]]; then
             log "DEBUG" "Retrying queued alert from previous cycle"
+            # Try all channels - remove queue only if Telegram succeeds (primary)
             if send_telegram "$queued_msg" 2>/dev/null; then
                 send_webhook "$queued_msg" || true
                 send_email "$queued_msg" || true
@@ -4115,18 +4120,41 @@ dispatch_with_retry() {
         fi
     fi
 
-    # Now try to send the current message
-    export TELEMON_HOSTNAME
-    TELEMON_HOSTNAME="$(hostname)"
+    # Now try to send the current message to all channels
+    # Track individual channel failures for proper retry logic
+    local telegram_ok="false"
+    local webhook_ok="false"
+    local email_ok="false"
 
+    # Try Telegram (primary channel)
     if send_telegram "$message" 2>/dev/null; then
-        send_webhook "$message" || true
-        send_email "$message" || true
-        # Audit log successful alert dispatch
-        audit_log "alert" "Alert dispatched successfully"
+        telegram_ok="true"
+    fi
+
+    # Try Webhook (independent of Telegram)
+    if send_webhook "$message" 2>/dev/null; then
+        webhook_ok="true"
+    fi
+
+    # Try Email (independent of Telegram)
+    if send_email "$message" 2>/dev/null; then
+        email_ok="true"
+    fi
+
+    # Determine overall success and audit log
+    if [[ "$telegram_ok" == "true" ]]; then
+        # Telegram is the primary channel - if it works, consider alert delivered
+        # But log if other channels failed
+        if [[ "$webhook_ok" == "false" && -n "${WEBHOOK_URL:-}" ]]; then
+            log "WARN" "Telegram delivered but webhook failed — will NOT retry webhook (configure webhook retry separately if needed)"
+        fi
+        if [[ "$email_ok" == "false" && -n "${EMAIL_TO:-}" ]]; then
+            log "WARN" "Telegram delivered but email failed — will NOT retry email (configure email retry separately if needed)"
+        fi
+        audit_log "alert" "Alert dispatched successfully (Telegram primary)"
     else
-        # Queue for retry on next cycle (append to preserve previously queued messages)
-        log "WARN" "Alert delivery failed — queuing for retry"
+        # Telegram failed - queue for full retry (all channels)
+        log "WARN" "Alert delivery failed — queuing for retry (Telegram primary channel failed)"
         local existing_queue=""
         if [[ -f "$ALERT_QUEUE_FILE" ]]; then
             existing_queue=$(cat "$ALERT_QUEUE_FILE" 2>/dev/null) || existing_queue=""
@@ -4154,9 +4182,6 @@ dispatch_with_retry() {
         local separator=""
         [[ -n "$existing_queue" ]] && separator=$'\n---QUEUED_ALERT---\n'
         safe_write_state_file "$ALERT_QUEUE_FILE" "${existing_queue}${separator}${message}"
-        # Still try webhook and email
-        send_webhook "$message" || true
-        send_email "$message" || true
         # Audit log failed alert (with queued status)
         audit_log "alert" "Alert delivery failed - queued for retry"
     fi
