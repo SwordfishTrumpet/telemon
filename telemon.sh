@@ -2718,6 +2718,129 @@ check_databases() {
 }
 
 # ===========================================================================
+# CHECK: ODBC Database Connections
+# Monitors any database via ODBC using unixODBC isql command.
+# Supports DSN-based and connection string-based configurations.
+# ===========================================================================
+check_odbc() {
+    [[ "${ENABLE_ODBC_CHECKS:-false}" == "true" ]] || return
+    [[ -n "${ODBC_CONNECTIONS:-}" ]] || return
+    
+    if ! command -v isql &>/dev/null; then
+        log "WARN" "ODBC check: isql (unixODBC) not found — install with: apt install unixodbc"
+        return
+    fi
+    
+    local check_timeout="${ODBC_CHECK_TIMEOUT:-${CHECK_TIMEOUT:-30}}"
+    
+    # Check each defined ODBC connection
+    for conn_name in $ODBC_CONNECTIONS; do
+        # SECURITY: Validate connection name
+        if ! is_valid_service_name "$conn_name"; then
+            log "WARN" "ODBC check: invalid connection name '${conn_name}' — skipping (alphanumeric, underscore, hyphen, dot only)"
+            continue
+        fi
+        
+        # Build variable names using indirect expansion
+        local dsn_var="ODBC_${conn_name}_DSN"
+        local driver_var="ODBC_${conn_name}_DRIVER"
+        local server_var="ODBC_${conn_name}_SERVER"
+        local database_var="ODBC_${conn_name}_DATABASE"
+        local user_var="ODBC_${conn_name}_USER"
+        local pass_var="ODBC_${conn_name}_PASS"
+        local query_var="ODBC_${conn_name}_QUERY"
+        
+        # Get values via indirect expansion
+        local conn_dsn="${!dsn_var:-}"
+        local conn_driver="${!driver_var:-}"
+        local conn_server="${!server_var:-}"
+        local conn_database="${!database_var:-}"
+        local conn_user="${!user_var:-}"
+        local conn_pass="${!pass_var:-}"
+        local conn_query="${!query_var:-"SELECT 1"}"
+        
+        local odbc_state="OK"
+        local odbc_detail=""
+        local safe_conn_name
+        safe_conn_name=$(html_escape "$conn_name")
+        
+        # Validate: must have either DSN or connection string components
+        if [[ -z "$conn_dsn" && ( -z "$conn_driver" || -z "$conn_server" ) ]]; then
+            odbc_state="CRITICAL"
+            odbc_detail="ODBC <code>${safe_conn_name}</code> configuration error: need ODBC_${conn_name}_DSN or (DRIVER + SERVER)"
+            check_state_change "odbc_$(sanitize_state_key "$conn_name")" "$odbc_state" "$odbc_detail"
+            continue
+        fi
+        
+        # Build connection string or use DSN
+        local conn_str=""
+        if [[ -n "$conn_dsn" ]]; then
+            # DSN-based connection
+            conn_str="${conn_dsn}"
+        else
+            # Connection string-based
+            conn_str="DRIVER={${conn_driver}};SERVER=${conn_server};"
+            [[ -n "$conn_database" ]] && conn_str+="DATABASE=${conn_database};"
+            [[ -n "$conn_user" ]] && conn_str+"UID=${conn_user};"
+            [[ -n "$conn_pass" ]] && conn_str+"PWD=${conn_pass};"
+        fi
+        
+        # Test connection using isql
+        local odbc_result
+        local odbc_exit=0
+        local start_time end_time duration_ms
+        
+        start_time=$(date +%s%3N 2>/dev/null || echo "0")
+        
+        if [[ -n "$conn_dsn" ]]; then
+            # DSN-based: isql DSN user pass -b -c';' query
+            if [[ -n "$conn_user" && -n "$conn_pass" ]]; then
+                odbc_result=$(run_with_timeout "$check_timeout" bash -c '
+                    export ODBCUSER="$1"
+                    export ODBCPASS="$2"
+                    isql "$3" "$ODBCUSER" "$ODBCPASS" -b -c ";" <<< "$4" 2>&1
+                ' _ "$conn_user" "$conn_pass" "$conn_dsn" "$conn_query" 2>&1) || odbc_exit=$?
+            else
+                odbc_result=$(run_with_timeout "$check_timeout" isql "$conn_dsn" -b -c ";" <<< "$conn_query" 2>&1) || odbc_exit=$?
+            fi
+        else
+            # Connection string-based: isql -k "connection_string" -b -c';' query
+            odbc_result=$(run_with_timeout "$check_timeout" bash -c '
+                isql -k "$1" -b -c ";" <<< "$2" 2>&1
+            ' _ "$conn_str" "$conn_query" 2>&1) || odbc_exit=$?
+        fi
+        
+        end_time=$(date +%s%3N 2>/dev/null || echo "0")
+        duration_ms=$((end_time - start_time))
+        
+        # Analyze result
+        if [[ $odbc_exit -ne 0 ]]; then
+            odbc_state="CRITICAL"
+            # Sanitize error message (remove passwords)
+            local safe_error
+            safe_error=$(echo "$odbc_result" | sed 's/PWD=[^;]*;/PWD=***/g; s/PASS=[^;]*;/PASS=***/g; s/password=[^[:space:]]*/***/gi' | head -2)
+            safe_error=$(html_escape "$safe_error")
+            odbc_detail="ODBC <code>${safe_conn_name}</code> connection failed: ${safe_error}"
+        elif [[ "$odbc_result" == *"[ISQL]"*"ERROR"* || "$odbc_result" == *"[08001]"* || "$odbc_result" == *"[HY000]"* ]]; then
+            odbc_state="CRITICAL"
+            local safe_error
+            safe_error=$(echo "$odbc_result" | sed 's/PWD=[^;]*;/PWD=***/g; s/PASS=[^;]*;/PASS=***/g' | head -2)
+            safe_error=$(html_escape "$safe_error")
+            odbc_detail="ODBC <code>${safe_conn_name}</code> query failed: ${safe_error}"
+        elif [[ $duration_ms -gt 5000 ]]; then
+            odbc_state="WARNING"
+            odbc_detail="ODBC <code>${safe_conn_name}</code> slow response: <b>${duration_ms}ms</b> (>5s)"
+        else
+            odbc_detail="ODBC <code>${safe_conn_name}</code> connected (${duration_ms}ms)"
+        fi
+        
+        # Generate state key and record state change
+        local state_key="odbc_$(sanitize_state_key "$conn_name")"
+        check_state_change "$state_key" "$odbc_state" "$odbc_detail"
+    done
+}
+
+# ===========================================================================
 # CHECK: Network Bandwidth Monitoring
 # Reads /proc/net/dev, stores previous counters in state file, computes rate
 # ===========================================================================
@@ -3427,6 +3550,7 @@ run_all_checks() {
     [[ "${ENABLE_GPU_CHECK:-false}" == "true" ]] && check_gpu
     [[ "${ENABLE_UPS_CHECK:-false}" == "true" ]] && check_ups
     [[ "${ENABLE_DATABASE_CHECKS:-false}" == "true" ]] && check_databases
+    [[ "${ENABLE_ODBC_CHECKS:-false}" == "true" ]] && check_odbc
     [[ "${ENABLE_NETWORK_CHECK:-false}" == "true" ]] && check_network_bandwidth
     [[ "${ENABLE_LOG_CHECK:-false}" == "true" ]] && check_log_patterns
     [[ "${ENABLE_INTEGRITY_CHECK:-false}" == "true" ]] && check_file_integrity
@@ -4803,6 +4927,38 @@ run_validate() {
                     fi
                 fi
             fi
+        fi
+        
+        # Validate ODBC configuration
+        if [[ "${ENABLE_ODBC_CHECKS:-false}" == "true" ]]; then
+            echo "  ON:   ODBC_CHECKS"
+            enabled=$((enabled + 1))
+            if [[ -z "${ODBC_CONNECTIONS:-}" ]]; then
+                echo "  WARN: ODBC_CHECKS enabled but ODBC_CONNECTIONS is empty"
+                warnings=$((warnings + 1))
+            else
+                if ! command -v isql &>/dev/null; then
+                    echo "  WARN: ODBC_CHECKS enabled but isql not found (install unixodbc)"
+                    warnings=$((warnings + 1))
+                fi
+                # Validate each ODBC connection
+                for conn_name in $ODBC_CONNECTIONS; do
+                    if ! is_valid_service_name "$conn_name"; then
+                        echo "  WARN: Invalid ODBC connection name '${conn_name}' (alphanumeric, underscore, hyphen, dot only)"
+                        warnings=$((warnings + 1))
+                        continue
+                    fi
+                    local dsn_var="ODBC_${conn_name}_DSN"
+                    local driver_var="ODBC_${conn_name}_DRIVER"
+                    local server_var="ODBC_${conn_name}_SERVER"
+                    if [[ -z "${!dsn_var:-}" && ( -z "${!driver_var:-}" || -z "${!server_var:-}" ) ]]; then
+                        echo "  WARN: ODBC connection '${conn_name}' needs ODBC_${conn_name}_DSN or (ODBC_${conn_name}_DRIVER + ODBC_${conn_name}_SERVER)"
+                        warnings=$((warnings + 1))
+                    fi
+                done
+            fi
+        else
+            echo "  OFF:  ODBC_CHECKS"
         fi
     else
         echo "  OFF:  DATABASE_CHECKS"

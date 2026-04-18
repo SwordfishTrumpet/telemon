@@ -51,6 +51,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Improves maintainability and ensures consistent state key format
 
 ### Added
+- **ODBC Database Monitoring** — monitor any database via unixODBC:
+  - New function `check_odbc()` monitors Microsoft SQL Server, Oracle, DB2, and more
+  - Config: `ENABLE_ODBC_CHECKS`, `ODBC_CONNECTIONS` (space-separated names)
+  - Per-connection config: `ODBC_<name>_DSN` or `ODBC_<name>_DRIVER` + `SERVER` + `DATABASE`
+  - Authentication: `ODBC_<name>_USER`, `ODBC_<name>_PASS` (passed securely via env vars)
+  - Custom test query: `ODBC_<name>_QUERY` (default: "SELECT 1")
+  - Supports DSN-based or connection string-based configurations
+  - Generates state keys: `odbc_<connection_name>`
+  - Dependencies: `unixodbc` package + database-specific ODBC drivers
+
 - **Native SMTP Support** — send email alerts directly via curl without local mailer:
   - New config options: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_TLS`
   - Supports authenticated SMTP (Gmail, SendGrid, AWS SES, etc.)

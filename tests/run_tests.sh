@@ -1816,6 +1816,64 @@ test_security_database_passwords() {
 }
 
 # ---------------------------------------------------------------------------
+# Test ODBC database check functionality
+# ---------------------------------------------------------------------------
+
+test_odbc_checks() {
+    echo ""
+    echo "Testing ODBC check configuration validation..."
+    
+    local telemon_content
+    telemon_content=$(cat "${SCRIPT_DIR}/telemon.sh")
+    
+    # Check check_odbc function exists
+    [[ "$telemon_content" == *"check_odbc()"* ]]
+    assert_true "ODBC: check_odbc() function exists"
+    
+    # Check ENABLE_ODBC_CHECKS flag is used
+    [[ "$telemon_content" == *"ENABLE_ODBC_CHECKS"* ]]
+    assert_true "ODBC: ENABLE_ODBC_CHECKS configuration flag exists"
+    
+    # Check ODBC_CONNECTIONS is used
+    [[ "$telemon_content" == *"ODBC_CONNECTIONS"* ]]
+    assert_true "ODBC: ODBC_CONNECTIONS configuration exists"
+    
+    # Check isql command is used
+    [[ "$telemon_content" == *"isql"* ]]
+    assert_true "ODBC: uses isql command for connectivity testing"
+    
+    # Check connection name validation
+    [[ "$telemon_content" == *"is_valid_service_name \"\$conn_name\""* ]]
+    assert_true "ODBC: validates connection names (security)"
+    
+    # Check state key generation uses sanitize_state_key
+    [[ "$telemon_content" == *"odbc_\$(sanitize_state_key"* ]]
+    assert_true "ODBC: uses sanitize_state_key for state keys"
+    
+    # Check password security (indirect expansion pattern)
+    [[ "$telemon_content" == *"pass_var="* && "$telemon_content" == *"conn_pass=\"\${!pass_var:-}\""* ]]
+    assert_true "ODBC: uses indirect expansion for password lookup"
+    
+    # Check password sanitization in error messages
+    [[ "$telemon_content" == *"s/PWD=[^;]*;/PWD=***/g"* ]]
+    assert_true "ODBC: sanitizes PWD from error messages"
+    [[ "$telemon_content" == *"s/PASS=[^;]*;/PASS=***/g"* ]]
+    assert_true "ODBC: sanitizes PASS from error messages"
+    
+    # Check run_with_timeout is used
+    [[ "$telemon_content" == *"run_with_timeout"* && "$telemon_content" == *"check_odbc"* ]]
+    assert_true "ODBC: uses timeout protection for connections"
+    
+    # Check validation function handles ODBC
+    [[ "$telemon_content" == *"ENABLE_ODBC_CHECKS"* && "$telemon_content" == *"isql not found"* ]]
+    assert_true "ODBC: run_validate checks for isql dependency"
+    
+    # Check connection validation (DSN or DRIVER+SERVER required)
+    [[ "$telemon_content" == *"need ODBC_\${conn_name}_DSN or"* || "$telemon_content" == *"ODBC_\${conn_name}_DRIVER"* ]]
+    assert_true "ODBC: validates connection has DSN or DRIVER+SERVER"
+}
+
+# ---------------------------------------------------------------------------
 # Test predictive exhaustion functionality
 # ---------------------------------------------------------------------------
 
@@ -2174,6 +2232,7 @@ main() {
     test_one_line_installer
     test_check_threshold_helper
     test_security_database_passwords
+    test_odbc_checks
     test_predictive_exhaustion
     test_fleet_heartbeats
     test_maintenance_windows

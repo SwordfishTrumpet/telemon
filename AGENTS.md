@@ -87,6 +87,7 @@ check_myfeature() {
   - `cron_<name>` — Cron job heartbeat (job name sanitized)
   - `fleet_<label>` — Fleet server heartbeat (server label sanitized)
   - `predict_*` — Predictive exhaustion (prefixed version of parent key, e.g., `predict_disk_root`)
+  - `odbc_<name>` — ODBC database connection (connection name sanitized via `sanitize_state_key`)
 
 ### State File Variants
 ```
@@ -322,8 +323,10 @@ check_threshold "cpu" "$load_pct" \
 | Fleet Heartbeats | `check_fleet_heartbeats` | `ENABLE_FLEET_CHECK` | heartbeat files |
 | Predictive Exhaustion | `check_prediction` | `ENABLE_PREDICTIVE_ALERTS` | awk (built-in) |
 | SQLite3 | `check_databases`¹ | `ENABLE_DATABASE_CHECKS` + `DB_SQLITE_PATHS` | sqlite3 |
+| ODBC Databases | `check_odbc` | `ENABLE_ODBC_CHECKS` + `ODBC_CONNECTIONS` | isql (unixODBC) |
 
 ¹ Part of `check_databases()` function alongside MySQL, PostgreSQL, Redis checks.
+² Supports any ODBC-compatible database (SQL Server, Oracle, DB2, etc.) via DSN or connection string.
 
 ## Alert Features
 
