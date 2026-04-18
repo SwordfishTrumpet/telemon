@@ -100,17 +100,17 @@ TELEGRAM_BOT_TOKEN="xxx" TELEGRAM_CHAT_ID="yyy" \
 
 ### Alert Channels
 
-Telemon sends alerts through up to three channels simultaneously:
+Telemon sends alerts through multiple channels simultaneously:
 
 | Channel | Config | Dependencies |
 |---------|--------|-------------|
 | **Telegram** | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | curl |
 | **Webhook** | `WEBHOOK_URL` (Slack, Discord, ntfy, n8n, etc.) | python3 |
-| **Email** | `EMAIL_TO`, `EMAIL_FROM` | sendmail or msmtp |
+| **Email** | `EMAIL_TO`, `EMAIL_FROM` + SMTP or local mailer | curl (for SMTP) or sendmail/msmtp |
 
 - **Telegram** is the primary channel. If it fails, messages are queued and retried next cycle.
 - **Webhook** sends a JSON POST to any URL. Works with Slack, Discord, ntfy, and generic endpoints. See [Webhook Payload Format](#webhook-payload-format).
-- **Email** sends plain-text via `sendmail` or `msmtp`. Header injection is prevented.
+- **Email** supports three methods: [native SMTP](#email-alerts-via-smtp) (recommended), sendmail, or msmtp. See [Email Alerts](#email-alerts) for configuration.
 
 ### Alert Intelligence
 - **State Change Detection** — Only notifies on transitions (OK ↔ WARNING ↔ CRITICAL), never repeats
@@ -637,7 +637,7 @@ server_label  timestamp  status  check_count  warn_count  crit_count  uptime_sec
 
 ### Plugin System
 
-Enable the plugin system to run custom checks from executable scripts in the `checks.d/` directory:
+Extend Telemon with custom checks via executable scripts in the `checks.d/` directory. Perfect for monitoring application-specific metrics, business logic, or services not covered by built-in checks.
 
 ```bash
 # Enable plugin system
@@ -663,7 +663,10 @@ CRITICAL|my_custom_check|Service not responding
 | `KEY` | State tracking key | Alphanumeric, underscore, hyphen, dot |
 | `DETAIL` | Human-readable message | Any text (HTML-escaped by Telemon) |
 
-**Example Plugin:**
+**Example Plugins:**
+
+<details>
+<summary><strong>Disk Usage Check</strong></summary>
 
 ```bash
 #!/usr/bin/env bash
@@ -681,12 +684,79 @@ else
     echo "OK|data_disk|Disk /data at ${USAGE}%"
 fi
 ```
+</details>
+
+<details>
+<summary><strong>HTTP Service Health</strong></summary>
+
+```bash
+#!/usr/bin/env bash
+# checks.d/api-health.sh
+
+HEALTH=$(curl -s --max-time 5 http://localhost:8080/health 2>/dev/null)
+
+if [[ -z "$HEALTH" ]]; then
+    echo "CRITICAL|api_health|API not responding"
+elif echo "$HEALTH" | grep -q '"status":"ok"'; then
+    echo "OK|api_health|API healthy"
+else
+    echo "WARNING|api_health|API degraded"
+fi
+```
+</details>
+
+<details>
+<summary><strong>Custom Log Pattern</strong></summary>
+
+```bash
+#!/usr/bin/env bash
+# checks.d/custom-log-check.sh
+
+# Check for specific errors in last 100 lines
+ERRORS=$(tail -100 /var/log/myapp.log 2>/dev/null | grep -c "FATAL" || echo "0")
+
+if [[ "$ERRORS" -gt 5 ]]; then
+    echo "CRITICAL|myapp_fatal|${ERRORS} fatal errors in myapp.log"
+elif [[ "$ERRORS" -gt 0 ]]; then
+    echo "WARNING|myapp_fatal|${ERRORS} fatal errors in myapp.log"
+else
+    echo "OK|myapp_fatal|No fatal errors"
+fi
+```
+</details>
+
+<details>
+<summary><strong>Application-Specific Check</strong> (Daemon monitoring inside Docker)</summary>
+
+```bash
+#!/usr/bin/env bash
+# checks.d/container-daemons.sh
+
+# Check individual processes inside a container
+RUNNING=$(docker top mycontainer 2>/dev/null | grep -c "my-daemon" || echo "0")
+
+if [[ "$RUNNING" -eq 0 ]]; then
+    echo "CRITICAL|container_daemon|my-daemon not running in container"
+else
+    echo "OK|container_daemon|my-daemon running ($RUNNING processes)"
+fi
+```
+</details>
+
+**Plugin Development Tips:**
+
+1. **Make it executable:** `chmod +x checks.d/my-plugin.sh`
+2. **Handle missing dependencies:** Check if commands exist before using them
+3. **Set timeouts:** Keep checks under `CHECK_TIMEOUT` (default 30s)
+4. **Output format:** Exactly one line in `STATE|KEY|DETAIL` format
+5. **Test manually:** Run `./checks.d/my-plugin.sh` before enabling
 
 **Security Notes:**
 - Plugins run with the same permissions as telemon.sh
 - Plugins are subject to `CHECK_TIMEOUT` (default: 30s)
 - Symlinks in `checks.d/` are skipped (security)
 - Invalid output (bad state or key format) is rejected with a warning
+- Sanitize any user input before including in DETAIL (HTML is escaped, but avoid injection)
 
 ### Database Health Checks
 
@@ -1057,6 +1127,88 @@ When `AUTO_RESTART_SERVICES` is configured, Telemon automatically runs `systemct
 
 If `ESCALATION_WEBHOOK_URL` is set, alerts that remain unresolved for `ESCALATION_AFTER_MIN` minutes trigger a separate webhook. Escalation fires once per key and auto-clears when the check resolves.
 
+### Email Alerts
+
+Telemon supports email alerts via three methods (in order of preference):
+
+1. **Native SMTP** (recommended) — Direct connection to SMTP server via curl
+2. **msmtp** — Lightweight SMTP relay (requires local install)
+3. **sendmail** — Local MTA (requires local install)
+
+#### Native SMTP Configuration (Recommended)
+
+No local mailer required — Telemon connects directly to your SMTP server:
+
+```bash
+# Email recipients
+EMAIL_TO="admin@example.com"
+EMAIL_FROM="telemon@server.com"
+
+# SMTP server settings
+SMTP_HOST="smtp.gmail.com"      # Your SMTP server
+SMTP_PORT="587"                 # 25, 587 (STARTTLS), or 465 (SMTPS)
+SMTP_USER="your-email@gmail.com"
+SMTP_PASS="your-app-password"   # Use app password for Gmail
+SMTP_TLS="yes"                  # Use STARTTLS (for 587) or SSL (for 465)
+```
+
+**Common SMTP Providers:**
+
+| Provider | SMTP_HOST | Port | Notes |
+|----------|-----------|------|-------|
+| **Gmail** | smtp.gmail.com | 587 | Use [App Password](https://support.google.com/accounts/answer/185833), not your regular password |
+| **SendGrid** | smtp.sendgrid.net | 587 | Use API key as password |
+| **AWS SES** | email-smtp.us-east-1.amazonaws.com | 587 | Use SES SMTP credentials |
+| **Mailgun** | smtp.mailgun.org | 587 | Domain-based credentials |
+| **Proxmox/Postfix** | mail.yourdomain.com | 587 | Your mail server |
+| **Self-hosted** | localhost | 25 | Local mail server (no auth) |
+
+**Security Features:**
+
+- ✅ TLS/SSL encryption enforced (STARTTLS on 587, SSL wrapper on 465)
+- ✅ Passwords URL-encoded to handle special characters (@, #, %, &)
+- ✅ Email validation (RFC 5322 simplified)
+- ✅ Header injection prevention (CRLF stripping)
+- ✅ Credentials redacted from logs
+- ⚠️ Warning if SMTP authentication used without TLS
+
+**Example Gmail Setup:**
+
+```bash
+EMAIL_TO="admin@example.com"
+EMAIL_FROM="alerts@gmail.com"
+SMTP_HOST="smtp.gmail.com"
+SMTP_PORT="587"
+SMTP_USER="alerts@gmail.com"
+SMTP_PASS="xxxx xxxx xxxx xxxx"  # 16-character App Password
+SMTP_TLS="yes"
+```
+
+**Testing Email:**
+
+```bash
+# Validate email configuration
+bash telemon.sh --validate
+
+# Send test email
+bash telemon.sh --test  # Sends to all configured channels including email
+```
+
+#### Local Mailer Configuration (Alternative)
+
+If you prefer using a local mail transfer agent:
+
+```bash
+# Install msmtp (recommended) or sendmail
+sudo apt install msmtp-mta    # Debian/Ubuntu
+sudo yum install msmtp         # RHEL/CentOS
+
+# Configure email
+EMAIL_TO="admin@example.com"
+EMAIL_FROM="telemon@$(hostname)"
+# Leave SMTP_HOST empty to use local mailer
+```
+
 ### Webhook Payload Format
 
 Both the alert webhook and escalation webhook send a JSON POST with `Content-Type: application/json`:
@@ -1361,17 +1513,73 @@ Schedule a daily or weekly summary by adding to crontab:
 
 ### Systemd Timer
 
-```bash
-# Enable systemd timer (created by install.sh)
-sudo systemctl enable telemon.timer
-sudo systemctl start telemon.timer
+Use systemd timer instead of cron for scheduling — ideal for containerized systems or when `crontab` is not available.
 
-# Check status
-systemctl status telemon.timer
-journalctl -u telemon -f
+**Quick Setup (via install.sh):**
+
+```bash
+# Install with systemd timer instead of cron
+curl -fsSL https://raw.githubusercontent.com/SwordfishTrumpet/telemon/main/install.sh | bash -s -- --systemd
+
+# Or for silent install
+TELEGRAM_BOT_TOKEN="xxx" TELEGRAM_CHAT_ID="yyy" \
+  curl -fsSL https://raw.githubusercontent.com/SwordfishTrumpet/telemon/main/install.sh | bash -s -- --silent --systemd
 ```
 
-See [systemd/README.md](systemd/README.md) for detailed setup and switching between cron and systemd.
+**Manual Setup:**
+
+```bash
+# User systemd (no root required) — for personal install in ~/telemon
+mkdir -p ~/.config/systemd/user/
+cp systemd/telemon.timer ~/.config/systemd/user/
+cp systemd/telemon@.service ~/.config/systemd/user/telemon.service
+
+# Edit service file to match your install path
+# Change %h/telemon/ to your actual path if different
+
+# Enable and start
+systemctl --user daemon-reload
+systemctl --user enable telemon.timer
+systemctl --user start telemon.timer
+
+# Check status
+systemctl --user status telemon.timer
+systemctl --user list-timers
+journalctl --user -u telemon -f
+```
+
+**System-wide systemd (requires root) — for /opt/telemon:**
+
+```bash
+sudo cp systemd/telemon.timer /etc/systemd/system/
+sudo cp systemd/telemon@.service /etc/systemd/system/telemon.service
+
+# Edit telemon.service:
+# - Set User=yourusername
+# - Set ExecStart=/opt/telemon/telemon.sh
+
+sudo systemctl daemon-reload
+sudo systemctl enable telemon.timer
+sudo systemctl start telemon.timer
+```
+
+**Switching from Cron to Systemd:**
+
+```bash
+# Remove cron job
+crontab -l | grep -v telemon | crontab -
+
+# Setup systemd (see above)
+```
+
+**Advantages over Cron:**
+- ✅ Works without `crontab` (container-friendly)
+- ✅ Better logging via `journalctl`
+- ✅ Dependency handling (can wait for network.target)
+- ✅ Failed job notifications
+- ✅ Native systemd integration
+
+See [systemd/README.md](systemd/README.md) for detailed reference.
 
 ### Docker
 
@@ -1385,6 +1593,104 @@ docker run -v $(pwd)/.env:/opt/telemon/.env:ro telemon
 ```
 
 The Docker setup mounts host `/proc` for system metrics and optionally the Docker socket for container monitoring. See [docker-compose.yml](docker-compose.yml) for full configuration.
+
+## Testing & Debugging
+
+### Validation
+
+```bash
+# Validate configuration (checks credentials, permissions, dependencies)
+bash telemon.sh --validate
+
+# Run validation with detailed output
+bash telemon.sh --validate --verbose
+```
+
+### Test Notifications
+
+```bash
+# Send test alerts to all configured channels
+bash telemon.sh --test
+
+# This sends a test message to:
+# - Telegram (if configured)
+# - Webhook (if configured)
+# - Email (if configured)
+```
+
+### Manual Run
+
+```bash
+# Run a full monitoring cycle manually (same as cron/systemd)
+bash telemon.sh
+
+# View the output and check for any errors
+```
+
+### Debug Logging
+
+```bash
+# Enable debug logging (more verbose)
+# Edit .env:
+LOG_LEVEL="DEBUG"
+
+# Run manually and watch detailed logs
+bash telemon.sh 2>&1 | tee /tmp/telemon-debug.log
+```
+
+### Check Specific Components
+
+```bash
+# Test Telegram only
+curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+  -d "chat_id=${TELEGRAM_CHAT_ID}" \
+  -d "text=Test message from Telemon"
+
+# Test SMTP only
+EMAIL_TO="test@example.com" EMAIL_FROM="telemon@test.com" \
+SMTP_HOST="smtp.gmail.com" SMTP_PORT="587" \
+SMTP_USER="user@gmail.com" SMTP_PASS="apppass" \
+bash telemon.sh --test
+
+# Test plugins
+bash checks.d/my-plugin.sh  # Run plugin manually
+ENABLE_PLUGINS=true bash telemon.sh --validate  # Check plugin loading
+```
+
+### View Logs
+
+```bash
+# View telemon logs
+tail -f ~/telemon/telemon.log
+
+# If using systemd
+journalctl --user -u telemon -f        # User service
+journalctl -u telemon -f               # System service
+
+# View cron logs (if using cron)
+grep telemon /var/log/syslog
+tail -f ~/telemon/telemon_cron.log
+```
+
+### Reset State
+
+```bash
+# Reset alert state (forces fresh alerts on next run)
+bash telemon-admin.sh reset-state
+
+# Useful for testing - clears all confirmation counts
+```
+
+### Common Issues
+
+| Issue | Solution |
+|-------|----------|
+| Telegram not sending | Check bot token, chat ID, internet connectivity |
+| SMTP auth fails | Verify password, check if 2FA requires app password |
+| Docker not detected | Ensure user is in `docker` group or run as root |
+| "crontab not found" | Use `--systemd` flag for systemd timer instead |
+| Plugin not loading | Check file is executable (`chmod +x`), check output format |
+| State file errors | Ensure `/tmp` is writable, check disk space |
 
 ## Requirements
 
