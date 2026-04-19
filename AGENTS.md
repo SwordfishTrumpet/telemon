@@ -275,6 +275,21 @@ echo "text" | portable_sha256
 ```
 Uses GNU `sha256sum`, BSD `shasum`, or `openssl` as fallback. Replaces the older MD5-based hashing for state key generation.
 
+**make_state_key** — Generates consistent state key hashes (replaces inline pattern):
+```bash
+local key
+key=$(make_state_key "site" "https://example.com")  # → "site_a1b2c3d4e5f6"
+```
+Creates 12-character SHA-256 prefix for state tracking. Replaces the repetitive pattern:
+```bash
+# Old pattern (repeated 6+ times in codebase):
+local key="prefix_$(printf '%s' "$value" | portable_sha256 | cut -c1-12)"
+
+# New pattern:
+local key
+key=$(make_state_key "prefix" "$value")
+```
+
 **is_valid_number** — Validates positive integers (thresholds, counts):
 ```bash
 is_valid_number "$value" || log "ERROR" "Not a number"
@@ -452,7 +467,7 @@ The test suite (`tests/run_tests.sh`) covers:
 
 | Category | Functions | Count |
 |----------|-----------|-------|
-| **Portable Helpers** | `portable_stat`, `portable_sha256` | 9 tests |
+| **Portable Helpers** | `portable_stat`, `portable_sha256`, `make_state_key` | 12 tests |
 | **Security Validators** | `is_valid_service_name`, `is_valid_hostname`, `is_safe_path`, `is_valid_email`, `is_internal_ip` | 39 tests |
 | **State Management** | `get_state_file_variants`, `sanitize_state_key`, `safe_write_state_file` | 10 tests |
 | **Utilities** | `html_escape`, `parse_date_to_epoch`, `run_with_timeout` | 10 tests |
@@ -467,7 +482,8 @@ The test suite (`tests/run_tests.sh`) covers:
 | **Fleet** | Heartbeat file format, stale detection | 12 tests |
 | **Maintenance** | `is_in_maintenance_window` schedule parsing | 7 tests |
 | **Auto-Remediation** | Service validation, state detection | 14 tests |
-| **Total** | | **273 tests** |
+| **Discovery System** | `cmd_discover`, hardware/infrastructure detection | 77 tests |
+| **Total** | | **350 tests** |
 
 ## File Conventions
 - Script: `set -euo pipefail`, `umask 077`

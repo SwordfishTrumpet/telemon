@@ -281,3 +281,15 @@ is_valid_number() {
     [[ "$1" =~ ^[0-9]+$ ]]
 }
 
+# ===========================================================================
+# Generate a state key hash for consistent key naming
+# Creates a 12-character SHA-256 hash prefix for state tracking keys
+# Usage: make_state_key "prefix" "value"
+# Example: make_state_key "site" "https://example.com" → "site_a1b2c3d4e5f6"
+# ===========================================================================
+make_state_key() {
+    local prefix="$1"
+    local value="$2"
+    printf '%s_%s' "$prefix" "$(printf '%s' "$value" | portable_sha256 | cut -c1-12)"
+}
+
