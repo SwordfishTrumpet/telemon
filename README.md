@@ -1847,7 +1847,7 @@ Telemon reads from Linux-specific interfaces: `/proc/loadavg`, `/proc/meminfo`, 
 
 ```
 telemon/
-├── telemon.sh              # Main monitoring script (~5674 lines)
+├── telemon.sh              # Main monitoring script (~6131 lines)
 ├── telemon-admin.sh        # Admin CLI (backup, restore, status, validate, logs)
 ├── checks.d/               # Plugin directory (optional custom checks)
 │   └── example-plugin.sh   # Example plugin showing output format

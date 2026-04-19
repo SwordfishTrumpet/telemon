@@ -1019,6 +1019,86 @@ test_validate_numeric() {
 }
 
 # ---------------------------------------------------------------------------
+# Test validate_numeric_or_default helper
+# ---------------------------------------------------------------------------
+
+test_validate_numeric_or_default() {
+    echo ""
+    echo "Testing validate_numeric_or_default helper..."
+    
+    # Define the function inline for testing (from lib/common.sh)
+    validate_numeric_or_default() {
+        local value="$1"
+        local description="$2"
+        local default="$3"
+        local min="${4:-}"
+        local max="${5:-}"
+        
+        if ! [[ "$1" =~ ^[0-9]+$ ]]; then
+            echo "$default"
+            return 0
+        fi
+        
+        if [[ -n "$min" ]] && [[ "$value" -lt "$min" ]]; then
+            echo "$default"
+            return 0
+        fi
+        
+        if [[ -n "$max" ]] && [[ "$value" -gt "$max" ]]; then
+            echo "$default"
+            return 0
+        fi
+        
+        echo "$value"
+    }
+    
+    # Test valid number returns itself
+    local result
+    result=$(validate_numeric_or_default "42" "test" "10")
+    assert_eq "42" "$result" "validate_numeric_or_default returns valid number unchanged"
+    
+    # Test zero is valid
+    result=$(validate_numeric_or_default "0" "test" "10")
+    assert_eq "0" "$result" "validate_numeric_or_default accepts zero"
+    
+    # Test non-numeric returns default
+    result=$(validate_numeric_or_default "abc" "test" "10")
+    assert_eq "10" "$result" "validate_numeric_or_default returns default for non-numeric"
+    
+    # Test empty returns default
+    result=$(validate_numeric_or_default "" "test" "10")
+    assert_eq "10" "$result" "validate_numeric_or_default returns default for empty"
+    
+    # Test negative returns default
+    result=$(validate_numeric_or_default "-5" "test" "10")
+    assert_eq "10" "$result" "validate_numeric_or_default returns default for negative"
+    
+    # Test decimal returns default
+    result=$(validate_numeric_or_default "3.14" "test" "10")
+    assert_eq "10" "$result" "validate_numeric_or_default returns default for decimal"
+    
+    # Test below min returns default
+    result=$(validate_numeric_or_default "3" "test" "10" 5)
+    assert_eq "10" "$result" "validate_numeric_or_default returns default when below min"
+    
+    # Test above max returns default
+    result=$(validate_numeric_or_default "15" "test" "10" "" 10)
+    assert_eq "10" "$result" "validate_numeric_or_default returns default when above max"
+    
+    # Test within range returns value
+    result=$(validate_numeric_or_default "7" "test" "10" 5 10)
+    assert_eq "7" "$result" "validate_numeric_or_default returns value when within range"
+    
+    # Test at min boundary returns value
+    result=$(validate_numeric_or_default "5" "test" "10" 5 10)
+    assert_eq "5" "$result" "validate_numeric_or_default returns value at min boundary"
+    
+    # Test at max boundary returns value
+    result=$(validate_numeric_or_default "10" "test" "10" 5 10)
+    assert_eq "10" "$result" "validate_numeric_or_default returns value at max boundary"
+}
+
+# ---------------------------------------------------------------------------
 # Test plugin system output parsing
 # ---------------------------------------------------------------------------
 
@@ -2459,6 +2539,7 @@ main() {
     test_require_file
     test_require_command
     test_validate_numeric
+    test_validate_numeric_or_default
     test_plugin_system
     test_database_checks
     test_dns_record_checks

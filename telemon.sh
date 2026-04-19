@@ -162,7 +162,7 @@ acquire_lock() {
                 old_epoch=$(echo "$lock_info" | awk '{print $2}')
                 current_epoch=$(date +%s)
                 # Validate that we have numeric values before calculating
-                if [[ "$old_pid" =~ ^[0-9]+$ && "$old_epoch" =~ ^[0-9]+$ ]]; then
+                if is_valid_number "$old_pid" && is_valid_number "$old_epoch"; then
                     lock_age=$((current_epoch - old_epoch))
                     if [[ $lock_age -gt $LOCK_TIMEOUT_SEC ]]; then
                         # Lock is stale - check if process is actually dead
@@ -200,7 +200,7 @@ acquire_lock() {
     old_epoch=$(cat "${lock_dir}/pid" 2>/dev/null | awk '{print $2}') || old_epoch=""
     
     if [[ -n "$old_pid" && -n "$old_epoch" ]]; then
-        if [[ "$old_pid" =~ ^[0-9]+$ && "$old_epoch" =~ ^[0-9]+$ ]]; then
+        if is_valid_number "$old_pid" && is_valid_number "$old_epoch"; then
             local current_epoch lock_age
             current_epoch=$(date +%s)
             lock_age=$((current_epoch - old_epoch))
@@ -1068,7 +1068,7 @@ check_cpu() {
     
     local cores
     cores=$(nproc 2>/dev/null) || cores=1
-    if ! [[ "$cores" =~ ^[0-9]+$ ]] || [[ "$cores" -lt 1 ]]; then
+    if ! is_valid_number "$cores" || [[ "$cores" -lt 1 ]]; then
         log "WARN" "check_cpu: nproc returned '${cores}', defaulting to 1"
         cores=1
     fi
@@ -1083,7 +1083,7 @@ check_cpu() {
     # Calculate load as percentage of cores (bash integer math, x100 for precision)
     local load_pct
     load_pct=$(awk -v load="$load_1m" -v cores="$cores" 'BEGIN {printf "%.0f", (load / cores) * 100}')
-    if [[ -z "$load_pct" || ! "$load_pct" =~ ^[0-9]+$ ]]; then
+    if [[ -z "$load_pct" ]] || ! is_valid_number "$load_pct"; then
         log "WARN" "check_cpu: computed load_pct '${load_pct}' is not numeric — skipping"
         return
     fi
@@ -1176,7 +1176,7 @@ check_disk() {
         local usage
         usage=$(printf '%s' "$pct" | tr -dc '0-9')  # extract digits only (strip % and any non-numeric)
         # Skip entries where df returned non-numeric usage
-        if ! [[ "$usage" =~ ^[0-9]+$ ]]; then
+        if ! is_valid_number "$usage"; then
             log "WARN" "check_disk: non-numeric usage '${pct}' for ${mountpoint} — skipping"
             continue
         fi
@@ -1212,7 +1212,7 @@ check_disk() {
             if [[ -n "$inode_pct_raw" ]]; then
                 local inode_usage
                 inode_usage=$(printf '%s' "$inode_pct_raw" | tr -dc '0-9')
-                if [[ "$inode_usage" =~ ^[0-9]+$ ]] && [[ "$inode_usage" -gt 0 ]]; then
+                if is_valid_number "$inode_usage" && [[ "$inode_usage" -gt 0 ]]; then
                     local inode_predict_key="predict_inode_$(echo "$mountpoint" | tr '/' '_' | sed 's/^_/root/')"
                     record_trend "$inode_predict_key" "$inode_usage"
                     check_prediction "$inode_predict_key" "Inode ${mountpoint}" "$inode_usage"
@@ -1245,7 +1245,7 @@ check_internet() {
         log "WARN" "check_internet: PING_TARGET '${target}' contains unsafe characters — skipping"
         return
     fi
-    if ! [[ "${PING_FAIL_THRESHOLD}" =~ ^[0-9]+$ ]]; then
+    if ! is_valid_number "${PING_FAIL_THRESHOLD}"; then
         log "WARN" "check_internet: PING_FAIL_THRESHOLD '${PING_FAIL_THRESHOLD}' is not numeric — skipping"
         return
     fi
@@ -1266,7 +1266,7 @@ check_internet() {
     ' _ "$target" "$PING_FAIL_THRESHOLD" 2>/dev/null) || ping_result=""
     
     # Validate result is numeric
-    if [[ "$ping_result" =~ ^[0-9]+$ ]]; then
+    if is_valid_number "$ping_result"; then
         fail_count="$ping_result"
     else
         log "WARN" "check_internet: ping check timed out or failed — assuming connectivity lost"
@@ -1362,7 +1362,7 @@ check_iowait() {
     fi
     
     # Validate loaded values
-    if ! [[ "$iw_prev" =~ ^[0-9]+$ && "$total_prev" =~ ^[0-9]+$ && "$prev_ts" =~ ^[0-9]+$ ]]; then
+    if ! is_valid_number "$iw_prev" || ! is_valid_number "$total_prev" || ! is_valid_number "$prev_ts"; then
         iw_prev=0; total_prev=0; prev_ts=0
     fi
     
@@ -1409,7 +1409,7 @@ check_iowait() {
 check_zombies() {
     local zombie_count
     zombie_count=$(ps aux | awk '$8 ~ /^Z/ {count++} END {print count+0}')
-    if ! [[ "$zombie_count" =~ ^[0-9]+$ ]]; then
+    if ! is_valid_number "$zombie_count"; then
         log "WARN" "check_zombies: non-numeric zombie_count '${zombie_count}' — skipping"
         return
     fi
@@ -1433,7 +1433,7 @@ check_zombies() {
 get_top_processes() {
     local count="${1:-5}"
     # Validate count is a positive integer in reasonable range
-    if ! [[ "$count" =~ ^[0-9]+$ ]] || [[ "$count" -lt 1 ]] || [[ "$count" -gt 50 ]]; then
+    if ! is_valid_number "$count" || [[ "$count" -lt 1 ]] || [[ "$count" -gt 50 ]]; then
         count=5
     fi
     local raw_cpu raw_mem
@@ -1707,9 +1707,9 @@ check_nvme_health() {
     media_errors=$(echo "$smart_out"     | awk '/Media and Data Integrity Errors:/ {gsub(/,/,""); print $NF}')
     
     # Validate numeric fields (smartctl output format varies by drive/firmware)
-    [[ -n "$pct_used" && ! "$pct_used" =~ ^[0-9]+$ ]] && pct_used=""
-    [[ -n "$temp" && ! "$temp" =~ ^[0-9]+$ ]] && temp=""
-    [[ -n "$media_errors" && ! "$media_errors" =~ ^[0-9]+$ ]] && media_errors=""
+    [[ -n "$pct_used" ]] && ! is_valid_number "$pct_used" && pct_used=""
+    [[ -n "$temp" ]] && ! is_valid_number "$temp" && temp=""
+    [[ -n "$media_errors" ]] && ! is_valid_number "$media_errors" && media_errors=""
 
     local state="OK"
     local issues=""
@@ -1813,21 +1813,21 @@ check_sites() {
         fi
 
         # Validate numeric parameters, fall back to defaults
-        if ! [[ "$expected_status" =~ ^[0-9]+$ ]]; then
+        if ! is_valid_number "$expected_status"; then
             log "WARN" "check_sites: invalid expected_status '${expected_status}' for ${url} — using default"
             expected_status="${SITE_EXPECTED_STATUS:-200}"
         elif [[ "$expected_status" -lt 100 ]] || [[ "$expected_status" -gt 599 ]]; then
             log "WARN" "check_sites: expected_status '${expected_status}' out of range (100-599) for ${url} — using default"
             expected_status="${SITE_EXPECTED_STATUS:-200}"
         fi
-        if ! [[ "$max_response_ms" =~ ^[0-9]+$ ]]; then
+        if ! is_valid_number "$max_response_ms"; then
             log "WARN" "check_sites: invalid max_response_ms '${max_response_ms}' for ${url} — using default"
             max_response_ms="${SITE_MAX_RESPONSE_MS:-10000}"
         elif [[ "$max_response_ms" -lt 1 ]]; then
             log "WARN" "check_sites: max_response_ms '${max_response_ms}' must be >= 1 for ${url} — using default"
             max_response_ms="${SITE_MAX_RESPONSE_MS:-10000}"
         fi
-        if ! [[ "$ssl_warn_days" =~ ^[0-9]+$ ]]; then
+        if ! is_valid_number "$ssl_warn_days"; then
             ssl_warn_days="${SITE_SSL_WARN_DAYS:-7}"
         fi
         
@@ -1962,7 +1962,7 @@ check_tcp_ports() {
         fi
 
         # Validate port is numeric to prevent injection
-        if ! [[ "$port" =~ ^[0-9]+$ ]]; then
+        if ! is_valid_number "$port"; then
             log "WARN" "check_tcp_ports: invalid port '${port}' in entry '${entry}' — skipping"
             continue
         fi
@@ -2098,19 +2098,19 @@ check_gpu_nvidia() {
         mem_total="${mem_total## }"; mem_total="${mem_total%% }"
         [[ -z "$idx" ]] && continue
         # Validate idx is numeric
-        if ! [[ "$idx" =~ ^[0-9]+$ ]]; then
+        if ! is_valid_number "$idx"; then
             log "WARN" "check_gpu: non-numeric GPU index '${idx}' — skipping"
             continue
         fi
         # Validate numeric fields from nvidia-smi
-        if ! [[ "$temp" =~ ^[0-9]+$ ]]; then
+        if ! is_valid_number "$temp"; then
             log "WARN" "check_gpu: GPU ${idx} returned non-numeric temperature '${temp}' — skipping"
             continue
         fi
         # Validate remaining numeric fields (defense-in-depth)
-        [[ "$util" =~ ^[0-9]+$ ]] || util="?"
-        [[ "$mem_used" =~ ^[0-9]+$ ]] || mem_used="?"
-        [[ "$mem_total" =~ ^[0-9]+$ ]] || mem_total="?"
+        is_valid_number "$util" || util="?"
+        is_valid_number "$mem_used" || mem_used="?"
+        is_valid_number "$mem_total" || mem_total="?"
         local key="gpu_${idx}"
 
         local warn="${GPU_TEMP_THRESHOLD_WARN:-80}"
@@ -2491,7 +2491,7 @@ check_databases() {
                 local repl_lag
                 repl_lag=$(run_with_timeout "$check_timeout" mysql ${mysql_opts} -e "SHOW SLAVE STATUS\G" 2>/dev/null | awk '/Seconds_Behind_Master:/ {print $2}')
                 if [[ -n "$repl_lag" && "$repl_lag" != "NULL" ]]; then
-                    if [[ "$repl_lag" =~ ^[0-9]+$ ]]; then
+                    if is_valid_number "$repl_lag"; then
                         if [[ "$repl_lag" -gt 300 ]]; then
                             mysql_state="CRITICAL"
                             mysql_detail="MySQL <b>${mysql_host}:${mysql_port}</b> replication lag: <b>${repl_lag}s</b> (>5 min)"
@@ -2887,7 +2887,7 @@ check_network_bandwidth() {
         read -r prev_rx prev_tx prev_ts < "$net_state_file" 2>/dev/null || true
     fi
     # Validate loaded values are numeric (defense against corrupt state file)
-    if ! [[ "$prev_rx" =~ ^[0-9]+$ && "$prev_tx" =~ ^[0-9]+$ && "$prev_ts" =~ ^[0-9]+$ ]]; then
+    if ! is_valid_number "$prev_rx" || ! is_valid_number "$prev_tx" || ! is_valid_number "$prev_ts"; then
         log "WARN" "check_network_bandwidth: corrupt net state file — resetting baseline"
         prev_rx=0 prev_tx=0 prev_ts=0
     fi
@@ -3477,7 +3477,7 @@ check_fleet_heartbeats() {
         fi
 
         # Validate timestamp is numeric
-        if ! [[ "$hb_timestamp" =~ ^[0-9]+$ ]]; then
+        if ! is_valid_number "$hb_timestamp"; then
             log "WARN" "Fleet: invalid heartbeat file format: ${filename}"
             continue
         fi
@@ -3494,7 +3494,7 @@ check_fleet_heartbeats() {
         else
             safe_status="unknown"
         fi
-        if [[ "${hb_check_count:-}" =~ ^[0-9]+$ ]]; then
+        if is_valid_number "${hb_check_count:-}"; then
             safe_count="$hb_check_count"
         else
             safe_count="?"
@@ -4360,7 +4360,7 @@ is_in_maintenance_window() {
         local end_m="${end_time##*:}"
 
         # Validate time components are numeric before arithmetic
-        if ! [[ "$start_h" =~ ^[0-9]+$ && "$start_m" =~ ^[0-9]+$ && "$end_h" =~ ^[0-9]+$ && "$end_m" =~ ^[0-9]+$ ]]; then
+        if ! is_valid_number "$start_h" || ! is_valid_number "$start_m" || ! is_valid_number "$end_h" || ! is_valid_number "$end_m"; then
             log "WARN" "Invalid MAINT_SCHEDULE entry: '${entry}' — skipping"
             continue
         fi
@@ -4733,7 +4733,7 @@ run_validate() {
             if [[ -z "$cp_host" || -z "$cp_port" || "$cp_host" == "$cp_port" ]]; then
                 echo "  FAIL: Invalid CRITICAL_PORTS entry '${entry}' (expected host:port)"
                 errors=$((errors + 1))
-            elif ! [[ "$cp_port" =~ ^[0-9]+$ ]]; then
+            elif ! is_valid_number "$cp_port"; then
                 echo "  FAIL: Invalid port in CRITICAL_PORTS entry '${entry}' (not numeric)"
                 errors=$((errors + 1))
             elif [[ "$cp_port" -lt 1 || "$cp_port" -gt 65535 ]]; then
@@ -5311,7 +5311,7 @@ run_validate() {
 
     # ALERT_COOLDOWN_SEC
     local acs="${ALERT_COOLDOWN_SEC:-900}"
-    if ! [[ "$acs" =~ ^[0-9]+$ ]]; then
+    if ! is_valid_number "$acs"; then
         echo "  FAIL: ALERT_COOLDOWN_SEC '${acs}' must be a non-negative integer"
         errors=$((errors + 1))
     else
@@ -5587,7 +5587,7 @@ run_digest() {
                 fleet_fname=$(basename "$fleet_file")
                 local fl_label fl_ts fl_status fl_count _
                 IFS=$'\t' read -r fl_label fl_ts fl_status fl_count _ < "$fleet_file" 2>/dev/null || continue
-                [[ "$fl_ts" =~ ^[0-9]+$ ]] || continue
+                is_valid_number "$fl_ts" || continue
                 local fl_age=$(( fleet_now - fl_ts ))
                 local fl_age_min=$(( fl_age / 60 ))
                 local fl_emoji="&#128994;"
@@ -5605,7 +5605,7 @@ run_digest() {
                 else
                     fl_safe_status="?"
                 fi
-                if [[ "${fl_count:-}" =~ ^[0-9]+$ ]]; then
+                if is_valid_number "${fl_count:-}"; then
                     fl_safe_count="$fl_count"
                 else
                     fl_safe_count="?"
