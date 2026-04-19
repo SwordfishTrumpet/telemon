@@ -5,6 +5,22 @@
 # Sourced by helper scripts. Not executed directly.
 # =============================================================================
 
+# ===========================================================================
+# Fallback log function — used when common.sh is sourced by standalone scripts
+# that don't have access to telemon.sh's log() function. Writes to stderr
+# with timestamp and level prefix.
+# Usage: log "LEVEL" "message"
+# ===========================================================================
+if ! type log &>/dev/null; then
+    log() {
+        local level="${1:-INFO}"
+        local message="${2:-}"
+        local timestamp
+        timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+        echo "[${timestamp}] [${level}] ${message}" >&2
+    }
+fi
+
 # Load .env configuration if present, set sensible defaults
 load_telemon_env() {
     if [[ -z "${SCRIPT_DIR:-}" ]]; then
