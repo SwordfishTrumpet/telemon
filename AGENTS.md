@@ -343,6 +343,12 @@ validate_numeric "$value" "description" [min] [max] || return
 ```
 Validates positive integers with optional min/max bounds. Rejects floats and negatives.
 
+**validate_numeric_or_default** — Validation helper with automatic default fallback:
+```bash
+my_var=$(validate_numeric_or_default "$value" "description" "default" [min] [max])
+```
+Combines `is_valid_number` check with default assignment. Returns the validated value if valid, otherwise returns the default. Useful for configuration parsing with fallback values.
+
 ## Configuration
 
 All configuration lives in `.env`. Key principles:
@@ -473,7 +479,7 @@ The test suite (`tests/run_tests.sh`) covers:
 | **Utilities** | `html_escape`, `parse_date_to_epoch`, `run_with_timeout` | 10 tests |
 | **Core Logic** | `is_valid_number`, `linear_regression`, `check_state_change` | 13 tests |
 | **Logging** | `log`, `rotate_logs` | 9 tests |
-| **Validation Helpers** | `require_file`, `require_command`, `validate_numeric` | 12 tests |
+| **Validation Helpers** | `require_file`, `require_command`, `validate_numeric`, `validate_numeric_or_default` | 23 tests |
 | **Threshold Helper** | `check_threshold` | 8 tests |
 | **Plugin System** | `check_plugins` | 8 tests |
 | **Database Checks** | `check_databases` (MySQL, PostgreSQL, Redis, SQLite3) | 23 tests |
@@ -483,7 +489,7 @@ The test suite (`tests/run_tests.sh`) covers:
 | **Maintenance** | `is_in_maintenance_window` schedule parsing | 7 tests |
 | **Auto-Remediation** | Service validation, state detection | 14 tests |
 | **Discovery System** | `cmd_discover`, hardware/infrastructure detection | 77 tests |
-| **Total** | | **350 tests** |
+| **Total** | | **361 tests** |
 
 ## File Conventions
 - Script: `set -euo pipefail`, `umask 077`

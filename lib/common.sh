@@ -271,6 +271,41 @@ validate_numeric() {
 }
 
 # ===========================================================================
+# Validate numeric and set default if invalid
+# Combines is_valid_number check with default assignment
+# Usage: validate_numeric_or_default "$value" "description" "default_value" [min] [max]
+# Returns: valid numeric value (or default) on stdout, returns 0 always
+# Example: my_var=$(validate_numeric_or_default "$input" "timeout" "30" 1 300)
+# ===========================================================================
+validate_numeric_or_default() {
+    local value="$1"
+    local description="$2"
+    local default="$3"
+    local min="${4:-}"
+    local max="${5:-}"
+    
+    if ! is_valid_number "$value"; then
+        log "WARN" "validate_numeric_or_default: ${description} '${value}' is not numeric — using default ${default}"
+        echo "$default"
+        return 0
+    fi
+    
+    if [[ -n "$min" ]] && [[ "$value" -lt "$min" ]]; then
+        log "WARN" "validate_numeric_or_default: ${description} ${value} is below minimum ${min} — using default ${default}"
+        echo "$default"
+        return 0
+    fi
+    
+    if [[ -n "$max" ]] && [[ "$value" -gt "$max" ]]; then
+        log "WARN" "validate_numeric_or_default: ${description} ${value} exceeds maximum ${max} — using default ${default}"
+        echo "$default"
+        return 0
+    fi
+    
+    echo "$value"
+}
+
+# ===========================================================================
 # Validation helper — check if value is a valid positive integer
 # Intentionally rejects floats; all Telemon thresholds are integers by design
 # Usage: is_valid_number "$value" || log "ERROR" "Not a number"
