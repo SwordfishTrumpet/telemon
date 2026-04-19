@@ -56,6 +56,14 @@ validate_env_security() {
         fi
     fi
     
+    # Validate LOG_FILE doesn't contain command substitution or dangerous patterns
+    if [[ -n "${LOG_FILE:-}" ]]; then
+        if [[ "$LOG_FILE" =~ [\`\$\;\|\&\<\>] ]]; then
+            echo "ERROR: LOG_FILE contains dangerous characters — refusing to start" >&2
+            ((errors++))
+        fi
+    fi
+    
     # Validate TELEGRAM_BOT_TOKEN format (should be digits:alphanumeric)
     if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
         if [[ ! "$TELEGRAM_BOT_TOKEN" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]]; then
@@ -79,7 +87,7 @@ validate_env_security() {
     
     # Validate SMTP_PORT is numeric
     if [[ -n "${SMTP_PORT:-}" ]]; then
-        if [[ ! "$SMTP_PORT" =~ ^[0-9]+$ ]] || [[ "$SMTP_PORT" -lt 1 ]] || [[ "$SMTP_PORT" -gt 65535 ]]; then
+        if ! is_valid_number "$SMTP_PORT" || [[ "$SMTP_PORT" -lt 1 ]] || [[ "$SMTP_PORT" -gt 65535 ]]; then
             echo "ERROR: SMTP_PORT must be a valid port number (1-65535)" >&2
             ((errors++))
         fi
@@ -87,7 +95,7 @@ validate_env_security() {
     
     # Validate MAX_ALERT_QUEUE_SIZE is numeric
     if [[ -n "${MAX_ALERT_QUEUE_SIZE:-}" ]]; then
-        if [[ ! "$MAX_ALERT_QUEUE_SIZE" =~ ^[0-9]+$ ]]; then
+        if ! is_valid_number "$MAX_ALERT_QUEUE_SIZE"; then
             echo "WARN: MAX_ALERT_QUEUE_SIZE should be numeric (bytes)" >&2
             MAX_ALERT_QUEUE_SIZE="1048576"  # Reset to default
         fi
@@ -95,7 +103,7 @@ validate_env_security() {
     
     # Validate MAX_ALERT_QUEUE_AGE is numeric
     if [[ -n "${MAX_ALERT_QUEUE_AGE:-}" ]]; then
-        if [[ ! "$MAX_ALERT_QUEUE_AGE" =~ ^[0-9]+$ ]]; then
+        if ! is_valid_number "$MAX_ALERT_QUEUE_AGE"; then
             echo "WARN: MAX_ALERT_QUEUE_AGE should be numeric (seconds)" >&2
             MAX_ALERT_QUEUE_AGE="86400"  # Reset to default
         fi
@@ -543,7 +551,7 @@ ALERTS=""
 # Alert cooldown: minimum seconds between alerts for the same key (default: 15 min)
 ALERT_COOLDOWN_SEC="${ALERT_COOLDOWN_SEC:-900}"
 # Ensure ALERT_COOLDOWN_SEC is numeric (defense-in-depth)
-if ! [[ "$ALERT_COOLDOWN_SEC" =~ ^[0-9]+$ ]]; then
+if ! is_valid_number "$ALERT_COOLDOWN_SEC"; then
     log "WARN" "ALERT_COOLDOWN_SEC '${ALERT_COOLDOWN_SEC}' is not numeric — defaulting to 900"
     ALERT_COOLDOWN_SEC=900
 fi
@@ -1006,22 +1014,22 @@ check_threshold() {
     local warn_detail="${7:-}"
     local crit_detail="${8:-}"
     
-    # Validate numeric inputs
-    if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+    # Validate numeric inputs using standardized helper
+    if ! is_valid_number "$value"; then
         log "WARN" "check_threshold: value '${value}' is not numeric for key '${key}'"
         value=0
     fi
-    if ! [[ "$warn" =~ ^[0-9]+$ ]]; then
+    if ! is_valid_number "$warn"; then
         log "WARN" "check_threshold: warn threshold '${warn}' is not numeric for key '${key}'"
         warn=100
     fi
-    if ! [[ "$crit" =~ ^[0-9]+$ ]]; then
+    if ! is_valid_number "$crit"; then
         log "WARN" "check_threshold: crit threshold '${crit}' is not numeric for key '${key}'"
         crit=100
     fi
     
     # Default warn_detail and crit_detail if not provided
-    [[ -z "$warn_detail" ]] && warn_detail="$crit_detail"
+    [[ -z "$warn_detail" ]] && warn_detail="${crit_detail:-}"
     [[ -z "$crit_detail" ]] && crit_detail="$warn_detail"
     
     local state="OK"
@@ -1824,8 +1832,8 @@ check_sites() {
         fi
         
         # Hash-based key for state file (avoids collisions from regex sanitization)
-        # Use awk to extract hash portably (GNU md5sum: "hash  file", BSD md5: "hash")
-        local key="site_$(printf '%s' "$url" | portable_sha256 | cut -c1-12)"
+        local key
+        key=$(make_state_key "site" "$url")
         
         local state="OK"
         local detail=""
@@ -1968,7 +1976,8 @@ check_tcp_ports() {
         local safe_host
         safe_host=$(html_escape "$host")
         # Hash-based key to avoid collisions from sanitization (e.g., host-1 vs host.1)
-        local key="port_$(printf '%s' "${entry}" | portable_sha256 | cut -c1-12)"
+        local key
+        key=$(make_state_key "port" "$entry")
         local state="OK"
         local detail="TCP port <code>${safe_host}:${port}</code> is reachable"
 
@@ -2645,7 +2654,8 @@ check_databases() {
                 fi
 
                 # Generate state key from path hash (consistent with integrity/drift patterns)
-                local sqlite_key="sqlite_$(printf '%s' "$db_path" | portable_sha256 | cut -c1-12)"
+                local sqlite_key
+                sqlite_key=$(make_state_key "sqlite" "$db_path")
                 local sqlite_state="OK"
                 local sqlite_detail=""
                 local safe_db_name
@@ -2979,7 +2989,8 @@ check_log_patterns() {
         logname=$(basename "$logfile")
         local safe_logname
         safe_logname=$(html_escape "$logname")
-        local key="log_$(printf '%s' "$logfile" | portable_sha256 | cut -c1-12)"
+        local key
+        key=$(make_state_key "log" "$logfile")
 
         local state="OK"
         local detail="Log <code>${safe_logname}</code>: no matching patterns"
@@ -3030,7 +3041,8 @@ check_file_integrity() {
 
         new_checksums+="${filepath}=${current_sum}"$'\n'
 
-        local key="integrity_$(printf '%s' "$filepath" | portable_sha256 | cut -c1-12)"
+        local key
+        key=$(make_state_key "integrity" "$filepath")
         local fname
         fname=$(basename "$filepath")
 
@@ -3242,7 +3254,8 @@ check_drift_detection() {
         new_meta+="${filepath}=${current_meta}"$'\n'
 
         # Compute state key
-        local key="drift_$(printf '%s' "$filepath" | portable_sha256 | cut -c1-12)"
+        local key
+        key=$(make_state_key "drift" "$filepath")
         local fname
         fname=$(basename "$filepath")
         local safe_fname
@@ -4092,7 +4105,7 @@ NOCHECKS
             esac
 
             # Escape HTML in detail
-            detail=$(printf '%s' "$detail" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g')
+            detail=$(html_escape "$detail")
 
             cat >> "$tmp_file" << ROW
                     <tr class="check-row" data-status="${state}">
