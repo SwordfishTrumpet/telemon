@@ -1431,6 +1431,12 @@ check_zombies() {
 # Returns: formatted string for alerts
 # ===========================================================================
 get_top_processes() {
+    # Graceful skip if ps is not available (minimal containers)
+    if ! command -v ps &>/dev/null; then
+        echo ""
+        return
+    fi
+
     local count="${1:-5}"
     # Validate count is a positive integer in reasonable range
     if ! is_valid_number "$count" || [[ "$count" -lt 1 ]] || [[ "$count" -gt 50 ]]; then

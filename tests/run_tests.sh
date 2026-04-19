@@ -139,6 +139,11 @@ test_portable_stat() {
     bad_mtime=$(portable_stat mtime "/nonexistent/file/12345")
     assert_eq "0" "$bad_mtime" "portable_stat returns 0 for nonexistent file"
     
+    # Test invalid format (TEST-003)
+    local bad_format
+    bad_format=$(portable_stat "invalid_format" "$tmpfile")
+    assert_eq "" "$bad_format" "portable_stat returns empty string for invalid format"
+    
     # Cleanup
     rm -f "$tmpfile"
 }
@@ -151,13 +156,13 @@ test_portable_sha256() {
     
     # Test that we get a consistent hash
     local hash1 hash2
-    hash1=$(echo "test" | portable_sha256)
-    hash2=$(echo "test" | portable_sha256)
+    hash1=$(printf '%s' "test" | portable_sha256)
+    hash2=$(printf '%s' "test" | portable_sha256)
     assert_eq "$hash1" "$hash2" "portable_sha256 produces consistent results"
     
     # Test that different inputs produce different outputs
     local hash3
-    hash3=$(echo "different" | portable_sha256)
+    hash3=$(printf '%s' "different" | portable_sha256)
     [[ "$hash1" != "$hash3" ]]
     assert_true "portable_sha256 produces different hashes for different inputs"
     
@@ -367,6 +372,23 @@ test_get_state_file_variants() {
     local with_lock
     with_lock=$(get_state_file_variants false true)
     assert_contains "$with_lock" "${STATE_FILE}.lock" "get_state_file_variants includes lock when requested"
+    
+    # Edge case tests (TEST-002)
+    # Test with all parameters true
+    local all_true
+    all_true=$(get_state_file_variants true true true)
+    assert_contains "$all_true" "${STATE_FILE}" "get_state_file_variants includes main when all_true"
+    assert_contains "$all_true" "${STATE_FILE}.lock" "get_state_file_variants includes lock when all_true"
+    assert_contains "$all_true" "${STATE_FILE}.drift.baseline" "get_state_file_variants includes drift baseline when all_true"
+    
+    # Test with all parameters false
+    local all_false
+    all_false=$(get_state_file_variants false false false)
+    # Check that main state file (without extension) is not present - match space or end
+    [[ "$all_false" != *"${STATE_FILE} "* ]] && [[ "$all_false" != "${STATE_FILE}" ]]
+    assert_true "get_state_file_variants excludes main state file when all_false"
+    [[ "$all_false" != *"${STATE_FILE}.lock"* ]]
+    assert_true "get_state_file_variants excludes lock when all_false"
 }
 
 # ---------------------------------------------------------------------------
@@ -956,6 +978,12 @@ test_require_file() {
     ! require_file "/etc/../etc/passwd" "unsafe file" 2>/dev/null
     assert_true "require_file rejects unsafe path with .."
     
+    # Test with unreadable file (TEST-001)
+    chmod 000 "$tmpfile"
+    ! require_file "$tmpfile" "unreadable file" 2>/dev/null
+    assert_true "require_file rejects unreadable file"
+    chmod 644 "$tmpfile"  # Restore permissions for cleanup
+    
     # Cleanup
     rm -f "$tmpfile"
 }
@@ -1016,41 +1044,33 @@ test_validate_numeric() {
     # Test decimal
     ! validate_numeric "3.14" "test value" 2>/dev/null
     assert_true "validate_numeric rejects decimal"
+    
+    # Boundary value tests (TEST-004)
+    # Test exactly at min boundary
+    validate_numeric "5" "test value" 5 10
+    assert_true "validate_numeric accepts value exactly at min boundary"
+    
+    # Test exactly at max boundary
+    validate_numeric "10" "test value" 5 10
+    assert_true "validate_numeric accepts value exactly at max boundary"
+    
+    # Test just below min boundary
+    ! validate_numeric "4" "test value" 5 10 2>/dev/null
+    assert_true "validate_numeric rejects value just below min boundary"
+    
+    # Test just above max boundary
+    ! validate_numeric "11" "test value" 5 10 2>/dev/null
+    assert_true "validate_numeric rejects value just above max boundary"
 }
 
 # ---------------------------------------------------------------------------
 # Test validate_numeric_or_default helper
+# Note: This tests the actual function from lib/common.sh (sourced at line 23)
 # ---------------------------------------------------------------------------
 
 test_validate_numeric_or_default() {
     echo ""
     echo "Testing validate_numeric_or_default helper..."
-    
-    # Define the function inline for testing (from lib/common.sh)
-    validate_numeric_or_default() {
-        local value="$1"
-        local description="$2"
-        local default="$3"
-        local min="${4:-}"
-        local max="${5:-}"
-        
-        if ! [[ "$1" =~ ^[0-9]+$ ]]; then
-            echo "$default"
-            return 0
-        fi
-        
-        if [[ -n "$min" ]] && [[ "$value" -lt "$min" ]]; then
-            echo "$default"
-            return 0
-        fi
-        
-        if [[ -n "$max" ]] && [[ "$value" -gt "$max" ]]; then
-            echo "$default"
-            return 0
-        fi
-        
-        echo "$value"
-    }
     
     # Test valid number returns itself
     local result

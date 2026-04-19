@@ -1250,7 +1250,7 @@ cmd_discover() {
     local hw_output
     hw_output=$(detect_hardware)
     local hw_suggestions
-    hw_suggestions=$(detect_hardware | grep -A 1000 "^ENABLE_\|^#" || true)
+    hw_suggestions=$(echo "$hw_output" | grep -A 1000 "^ENABLE_\|^#" || true)
     # Print only the info part (lines before suggestions)
     echo -e "$(echo "$hw_output" | grep -B 1000 "^ENABLE_" | head -n -1 || echo "$hw_output")"
     suggestions+="$hw_suggestions"
