@@ -7,7 +7,7 @@ Telemon is a single-file Bash monitoring script (`telemon.sh`) that tracks syste
 ## Architecture
 
 ```
-telemon.sh          — Main script (~3500 lines), all checks + dispatch
+telemon.sh          — Main script (~6100 lines), all checks + dispatch
 lib/common.sh       — Shared helpers for admin utilities
 telemon-admin.sh    — Admin CLI (backup, restore, status, reset, fleet-status)
 .env                — Configuration (NEVER commit — contains secrets)
@@ -188,6 +188,33 @@ suggestions+=$'\n\n'
    - Don't search filesystem for files (privacy/security risk)
    - Only detect via standard system commands
 
+### Alert Aggregation (Default Behavior)
+
+Telemon automatically aggregates all alerts into a single message per monitoring cycle:
+
+1. **During checks**: Each `check_state_change()` call appends to the `ALERTS` variable
+2. **At cycle end**: `main()` bundles all alerts into one Telegram/webhook/email message
+3. **Result**: If 3 issues confirm simultaneously, you get 1 message with all 3 issues
+
+**Example aggregated alert:**
+```
+&#128421; [web-prod-01] System Vital Alert
+April 23, 2025 14:30 UTC
+
+Summary: 1 critical | 2 warning | 15 healthy
+-----------------------------
+
+&#128308; disk_root: 94% full (threshold: 90%)
+&#128992; cpu: load 85% of 4 cores
+&#128992; swap: 45% used
+```
+
+**Why this matters:**
+- Cascading failures (e.g., Docker dies → containers die → apps fail) generate **1 alert**, not 10
+- Confirmation count acts as a natural aggregation window — issues occurring together confirm together
+- Recovery messages also aggregate ("3 issues resolved" in single notification)
+- No configuration needed — this is hardcoded behavior that cannot be disabled (by design)
+
 ### Alert Dispatch Chain
 ```
 dispatch_with_retry() → send_telegram() + send_webhook() + send_email()
@@ -347,7 +374,21 @@ Validates positive integers with optional min/max bounds. Rejects floats and neg
 ```bash
 my_var=$(validate_numeric_or_default "$value" "description" "default" [min] [max])
 ```
-Combines `is_valid_number` check with default assignment. Returns the validated value if valid, otherwise returns the default. Useful for configuration parsing with fallback values.
+Combines `is_valid_number` check with default assignment. Returns the validated value via stdout if valid; otherwise returns the default value. Useful for configuration parsing with fallback values.
+
+Features:
+- Validates that input is a positive integer (via `is_valid_number`)
+- Returns default if input is non-numeric, empty, negative, or a float
+- Returns default if input is below `min` or above `max` (when specified)
+- Returns valid input unchanged if it passes all checks
+- Always returns 0 (use command substitution to capture output)
+
+Example:
+```bash
+timeout=$(validate_numeric_or_default "$CHECK_TIMEOUT" "CHECK_TIMEOUT" "30" 1 300)
+# If CHECK_TIMEOUT is unset/invalid: timeout=30
+# If CHECK_TIMEOUT=60: timeout=60
+```
 
 ## Configuration
 
@@ -489,7 +530,7 @@ The test suite (`tests/run_tests.sh`) covers:
 | **Maintenance** | `is_in_maintenance_window` schedule parsing | 7 tests |
 | **Auto-Remediation** | Service validation, state detection | 14 tests |
 | **Discovery System** | `cmd_discover`, hardware/infrastructure detection | 77 tests |
-| **Total** | | **361 tests** |
+| **Total** | | **372 tests** |
 
 ## File Conventions
 - Script: `set -euo pipefail`, `umask 077`
