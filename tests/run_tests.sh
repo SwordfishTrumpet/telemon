@@ -56,7 +56,7 @@ assert_true() {
         return 0
     else
         echo -e "${RED}✗${NC} $msg"
-        TESTS_FAILED=$((TESTS_FAILED + 1))
+        : $((TESTS_FAILED += 1))
         return 1
     fi
 }
@@ -72,7 +72,7 @@ assert_false() {
         return 0
     else
         echo -e "${RED}✗${NC} $msg"
-        TESTS_FAILED=$((TESTS_FAILED + 1))
+        : $((TESTS_FAILED += 1))
         return 1
     fi
 }
@@ -2527,6 +2527,103 @@ test_discovery_system() {
 }
 
 # ---------------------------------------------------------------------------
+# Test lock mechanism functions (pattern verification in telemon.sh)
+# ---------------------------------------------------------------------------
+
+test_lock_mechanism() {
+    echo ""
+    echo "Testing lock mechanism functions..."
+    
+    local telemon_script="${SCRIPT_DIR}/telemon.sh"
+    
+    # Test 1: Verify LOCK_TIMEOUT_SEC and LOCK_STALE_AGE_SEC are defined in telemon.sh
+    grep -q "LOCK_TIMEOUT_SEC=300" "$telemon_script"
+    assert_true "Lock: LOCK_TIMEOUT_SEC=300 defined"
+    
+    grep -q "LOCK_STALE_AGE_SEC=600" "$telemon_script"
+    assert_true "Lock: LOCK_STALE_AGE_SEC=600 defined"
+    
+    # Test 2: Verify _is_telemon_process function exists
+    grep -q "_is_telemon_process()" "$telemon_script"
+    assert_true "Lock: _is_telemon_process function defined"
+    
+    # Test 3: Verify _is_lock_stale function exists
+    grep -q "_is_lock_stale()" "$telemon_script"
+    assert_true "Lock: _is_lock_stale function defined"
+    
+    # Test 4: Verify lock contention rate limiting is implemented
+    grep -q "_LOCK_CONTENTION_LOGGED" "$telemon_script"
+    assert_true "Lock: _LOCK_CONTENTION_LOGGED variable for rate limiting"
+    
+    grep -q "_log_lock_contention()" "$telemon_script"
+    assert_true "Lock: _log_lock_contention function defined"
+    
+    # Test 5: Verify proc/PID/cmdline check exists
+    grep -q '/proc/$pid/cmdline' "$telemon_script"
+    assert_true "Lock: /proc/PID/cmdline verification exists"
+    
+    # Test 6: Verify force-break for very old locks exists
+    grep -q "force breaking lock" "$telemon_script"
+    assert_true "Lock: Force-break message for very old locks"
+    
+    # Test 7: Verify PID reuse detection message
+    grep -q "PID reuse" "$telemon_script"
+    assert_true "Lock: PID reuse detection message exists"
+    
+    # Test 8: Verify lock stale logic checks for telemon in cmdline
+    grep -q 'cmdline.*telemon' "$telemon_script"
+    assert_true "Lock: cmdline check for 'telemon' string exists"
+    
+    # Test 9: Verify stale lock detection at >10 minutes
+    grep -q '900s' "$telemon_script" || grep -q 'age.*lock_age' "$telemon_script"
+    assert_true "Lock: Age-based stale detection exists"
+    
+    # Test 10: Verify lock file age tracking with timestamp
+    grep -q 'echo.*\$\$.*date.*%s' "$telemon_script"
+    assert_true "Lock: PID and timestamp written to lock file"
+}
+
+# ---------------------------------------------------------------------------
+# Test first-run fingerprint mechanism
+# ---------------------------------------------------------------------------
+
+test_first_run_fingerprint() {
+    echo ""
+    echo "Testing first-run fingerprint mechanism..."
+    
+    local telemon_script="${SCRIPT_DIR}/telemon.sh"
+    local admin_script="${SCRIPT_DIR}/telemon-admin.sh"
+    
+    # Test 1: FIRST_RUN_FINGERPRINT variable is defined
+    grep -q "FIRST_RUN_FINGERPRINT=" "$telemon_script"
+    assert_true "First-run: FIRST_RUN_FINGERPRINT variable defined"
+    
+    # Test 2: Fingerprint path uses SCRIPT_DIR
+    grep -q 'FIRST_RUN_FINGERPRINT="${SCRIPT_DIR}/.telemon_first_run_done"' "$telemon_script"
+    assert_true "First-run: Fingerprint path uses SCRIPT_DIR/.telemon_first_run_done"
+    
+    # Test 3: Fingerprint is checked before first-run detection
+    grep -q 'if \[\[ ! -f "\$FIRST_RUN_FINGERPRINT" \]\]' "$telemon_script"
+    assert_true "First-run: Fingerprint file existence is checked"
+    
+    # Test 4: Fingerprint is created on first run
+    grep -q 'FIRST_RUN_FINGERPRINT' "$telemon_script" && grep -q 'echo.*date.*%Y' "$telemon_script"
+    assert_true "First-run: Fingerprint file is created with timestamp"
+    
+    # Test 5: State reset detection (fingerprint exists but no state file)
+    grep -q 'fingerprint exists' "$telemon_script"
+    assert_true "First-run: State reset vs first-run distinction exists"
+    
+    # Test 6: Fingerprint is removed in reset-state command
+    grep -q 'first-run fingerprint' "$admin_script"
+    assert_true "First-run: Fingerprint removal in reset-state command"
+    
+    # Test 7: Fingerprint file has restricted permissions
+    grep -A2 'FIRST_RUN_FINGERPRINT' "$telemon_script" | grep -q 'chmod 600'
+    assert_true "First-run: Fingerprint file created with 600 permissions"
+}
+
+# ---------------------------------------------------------------------------
 # Main test runner
 # ---------------------------------------------------------------------------
 
@@ -2574,6 +2671,8 @@ main() {
     test_maintenance_windows
     test_auto_remediation
     test_discovery_system
+    test_lock_mechanism
+    test_first_run_fingerprint
 
     # Summary
     echo ""

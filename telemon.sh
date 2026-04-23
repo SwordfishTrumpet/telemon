@@ -120,6 +120,13 @@ validate_env_security
 SERVER_LABEL="${SERVER_LABEL:-$(hostname)}"
 
 # ---------------------------------------------------------------------------
+# First-run fingerprint file — persists across state file changes
+# Used to prevent duplicate bootstrap messages when STATE_FILE location changes
+# or state file is temporarily removed (e.g., log rotation cleanup)
+# ---------------------------------------------------------------------------
+FIRST_RUN_FINGERPRINT="${SCRIPT_DIR}/.telemon_first_run_done"
+
+# ---------------------------------------------------------------------------
 # Maintenance window — skip monitoring if flag file exists
 # Create:  touch /tmp/telemon_maint
 # Remove:  rm /tmp/telemon_maint
@@ -137,11 +144,53 @@ chmod 600 "$LOG_FILE" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Lock file to prevent overlapping runs
-# Uses flock (from util-linux) if available, falls back to PID file
-# Includes stale lock detection based on timestamp
+# Uses flock (util-linux) if available, falls back to PID file
+# Includes stale lock detection based on timestamp and process verification
 # ---------------------------------------------------------------------------
 LOCK_FILE="${STATE_FILE:-/tmp/telemon_sys_alert_state}.lock"
-LOCK_TIMEOUT_SEC=300  # Consider locks older than 5 minutes as stale
+LOCK_TIMEOUT_SEC=300       # Consider locks older than 5 minutes as stale
+LOCK_STALE_AGE_SEC=600     # Force break locks older than 10 minutes regardless of PID
+
+# Track if we've logged a lock contention message to reduce spam
+_LOCK_CONTENTION_LOGGED=false
+
+# Verify that a PID is actually a telemon process (not just any process)
+# SECURITY: Prevents PID reuse attacks where another process gets the same PID
+_is_telemon_process() {
+    local pid="$1"
+    # Check if /proc/PID/cmdline exists and contains "telemon"
+    if [[ -f "/proc/$pid/cmdline" ]]; then
+        local cmdline
+        cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || echo "")
+        [[ "$cmdline" == *"telemon"* ]]
+        return $?
+    fi
+    # If we can't verify, assume it's not telemon (safer)
+    return 1
+}
+
+# Check if lock is stale based on age (force break very old locks)
+_is_lock_stale() {
+    local lock_age="$1"
+    # If lock is >10 minutes old, consider it stale regardless of PID status
+    [[ $lock_age -gt $LOCK_STALE_AGE_SEC ]]
+}
+
+# Log lock contention message with rate limiting
+# Uses DEBUG level after first occurrence to reduce log spam
+_log_lock_contention() {
+    local message="$1"
+    if [[ "$_LOCK_CONTENTION_LOGGED" == "false" ]]; then
+        # First occurrence - log as WARN
+        echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] $message" >&2
+        _LOCK_CONTENTION_LOGGED=true
+    else
+        # Subsequent occurrences - only log if DEBUG level is enabled
+        # We can't use the log() function here yet (not defined), so we
+        # write to a separate debug log or suppress entirely
+        : # Suppress to reduce spam - user can check with 'ps aux | grep telemon'
+    fi
+}
 
 acquire_lock() {
     # Try flock first (most reliable)
@@ -149,7 +198,7 @@ acquire_lock() {
         # Write our PID and timestamp to lock file for stale detection
         # Do this before trying flock so other processes can check age
         echo "$$ $(date +%s)" > "$LOCK_FILE" 2>/dev/null || true
-        
+
         # Open file descriptor for lock file
         exec 200>"$LOCK_FILE"
         if ! flock -n 200 2>/dev/null; then
@@ -164,10 +213,35 @@ acquire_lock() {
                 # Validate that we have numeric values before calculating
                 if is_valid_number "$old_pid" && is_valid_number "$old_epoch"; then
                     lock_age=$((current_epoch - old_epoch))
+                    # Check if lock is very old (>10 min) - force break regardless of PID
+                    if _is_lock_stale "$lock_age"; then
+                        echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] Stale lock detected (age ${lock_age}s > ${LOCK_STALE_AGE_SEC}s) - force breaking lock" >&2
+                        flock -u 200 2>/dev/null || true
+                        exec 200>&- 2>/dev/null || true
+                        rm -f "$LOCK_FILE"
+                        # Re-try once
+                        echo "$$ $(date +%s)" > "$LOCK_FILE" 2>/dev/null || true
+                        exec 200>"$LOCK_FILE"
+                        if flock -n 200 2>/dev/null; then
+                            return 0
+                        fi
+                    fi
                     if [[ $lock_age -gt $LOCK_TIMEOUT_SEC ]]; then
-                        # Lock is stale - check if process is actually dead
+                        # Lock is stale based on age - verify process is dead AND is actually telemon
                         if ! kill -0 "$old_pid" 2>/dev/null; then
                             echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] Stale lock detected (PID $old_pid not running, age ${lock_age}s) - breaking lock" >&2
+                            flock -u 200 2>/dev/null || true
+                            exec 200>&- 2>/dev/null || true
+                            rm -f "$LOCK_FILE"
+                            # Re-try once
+                            echo "$$ $(date +%s)" > "$LOCK_FILE" 2>/dev/null || true
+                            exec 200>"$LOCK_FILE"
+                            if flock -n 200 2>/dev/null; then
+                                return 0
+                            fi
+                        elif ! _is_telemon_process "$old_pid"; then
+                            # PID exists but is NOT a telemon process (PID reuse)
+                            echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] Stale lock detected (PID $old_pid is not telemon - possible PID reuse, age ${lock_age}s) - breaking lock" >&2
                             flock -u 200 2>/dev/null || true
                             exec 200>&- 2>/dev/null || true
                             rm -f "$LOCK_FILE"
@@ -181,12 +255,12 @@ acquire_lock() {
                     fi
                 fi
             fi
-            echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] Another instance is running - exiting" >&2
+            _log_lock_contention "Another instance is running - exiting"
             exit 0
         fi
         return 0
     fi
-    
+
     # Fallback: atomic mkdir-based lock (avoids TOCTOU race with PID file)
     local lock_dir="${LOCK_FILE}.d"
     if mkdir "$lock_dir" 2>/dev/null; then
@@ -198,12 +272,21 @@ acquire_lock() {
     local old_pid old_epoch
     old_pid=$(cat "${lock_dir}/pid" 2>/dev/null | awk '{print $1}') || old_pid=""
     old_epoch=$(cat "${lock_dir}/pid" 2>/dev/null | awk '{print $2}') || old_epoch=""
-    
+
     if [[ -n "$old_pid" && -n "$old_epoch" ]]; then
         if is_valid_number "$old_pid" && is_valid_number "$old_epoch"; then
             local current_epoch lock_age
             current_epoch=$(date +%s)
             lock_age=$((current_epoch - old_epoch))
+            # Check if lock is very old (>10 min) - force break regardless of PID
+            if _is_lock_stale "$lock_age"; then
+                echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] Stale lock detected (age ${lock_age}s > ${LOCK_STALE_AGE_SEC}s) - force breaking lock" >&2
+                rm -rf "$lock_dir"
+                if mkdir "$lock_dir" 2>/dev/null; then
+                    echo "$$ $(date +%s)" > "${lock_dir}/pid"
+                    return 0
+                fi
+            fi
             if [[ $lock_age -gt $LOCK_TIMEOUT_SEC ]] && ! kill -0 "$old_pid" 2>/dev/null; then
                 echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] Stale lock detected (PID $old_pid not running, age ${lock_age}s) - breaking lock" >&2
                 rm -rf "$lock_dir"
@@ -211,10 +294,18 @@ acquire_lock() {
                     echo "$$ $(date +%s)" > "${lock_dir}/pid"
                     return 0
                 fi
+            elif [[ $lock_age -gt $LOCK_TIMEOUT_SEC ]] && ! _is_telemon_process "$old_pid"; then
+                # PID exists but is NOT a telemon process (PID reuse)
+                echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] Stale lock detected (PID $old_pid is not telemon - possible PID reuse, age ${lock_age}s) - breaking lock" >&2
+                rm -rf "$lock_dir"
+                if mkdir "$lock_dir" 2>/dev/null; then
+                    echo "$$ $(date +%s)" > "${lock_dir}/pid"
+                    return 0
+                fi
             fi
         fi
-        if kill -0 "$old_pid" 2>/dev/null; then
-            echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] Another instance (PID $old_pid) is running - exiting" >&2
+        if kill -0 "$old_pid" 2>/dev/null && _is_telemon_process "$old_pid"; then
+            _log_lock_contention "Another instance (PID $old_pid) is running - exiting"
             exit 0
         fi
     fi
@@ -225,7 +316,7 @@ acquire_lock() {
         return 0
     fi
     # Lost the race to another instance that just started
-    echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] Another instance acquired lock - exiting" >&2
+    _log_lock_contention "Another instance acquired lock - exiting"
     exit 0
 }
 
@@ -6020,9 +6111,20 @@ main() {
     # Validate configuration thresholds
     validate_thresholds
 
+    # First-run detection: use fingerprint file to prevent duplicate bootstrap messages
+    # State file may be moved/deleted (e.g., migration, cleanup), but fingerprint persists
     local is_first_run=false
-    if [[ ! -f "$STATE_FILE" ]]; then
+    if [[ ! -f "$FIRST_RUN_FINGERPRINT" ]]; then
+        # No fingerprint found — this is truly a first run
         is_first_run=true
+        # Create fingerprint file to mark first run as done
+        echo "$(date '+%Y-%m-%d %H:%M:%S')" > "$FIRST_RUN_FINGERPRINT" 2>/dev/null || true
+        chmod 600 "$FIRST_RUN_FINGERPRINT" 2>/dev/null || true
+        log "INFO" "First run detected (fingerprint created) - using immediate alerts (confirmation=1)"
+    elif [[ ! -f "$STATE_FILE" ]]; then
+        # Has fingerprint but no state file — state was reset but not first install
+        # Log at DEBUG level only to avoid confusion
+        log "DEBUG" "State file missing but fingerprint exists — treating as state reset, not first run"
     fi
 
     load_state
@@ -6031,7 +6133,6 @@ main() {
     local saved_confirm_count="${CONFIRMATION_COUNT:-3}"
     if [[ "$is_first_run" == "true" ]]; then
         CONFIRMATION_COUNT=1
-        log "INFO" "First run detected - using immediate alerts (confirmation=1)"
     fi
 
     # Reset per-run globals to prevent stale data from previous cycles
