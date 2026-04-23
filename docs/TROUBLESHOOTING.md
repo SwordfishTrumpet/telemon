@@ -175,40 +175,86 @@ logrotate -d /etc/logrotate.d/telemon
 
 ### 7. "Another instance is running" Warning
 
-**Symptoms:** Log shows warning about overlapping runs.
+**Symptoms:** Log shows warning about overlapping runs repeatedly. This is the most common cause of monitoring outages.
+
+**Understanding Log Files:**
+Telemon uses two log files:
+- **`telemon.log`** — Main log file with all monitoring activity (respects `LOG_LEVEL` and `LOG_MAX_SIZE_MB`)
+- **`telemon_cron.log`** — Captures stderr from cron invocations (lock contention messages)
+
+When lock contention occurs, messages go to `telemon_cron.log` via stderr. This bypasses normal log rotation, which can cause disk space issues if not addressed.
+
+**Automatic Recovery (Enhanced in v2.x):**
+Telemon includes multi-layered stale lock detection:
+
+1. **Process Verification**: Checks `/proc/$PID/cmdline` to verify the lock holder is actually telemon (prevents PID reuse issues)
+2. **Age-based Detection**: Locks older than 5 minutes where the process is dead are automatically broken
+3. **Force-break Old Locks**: Locks older than 10 minutes are force-broken regardless of PID status
+
+You'll see log messages like:
+```
+[WARN] Stale lock detected (PID 12345 not running, age 360s) - breaking lock
+[WARN] Stale lock detected (PID 12345 is not telemon - possible PID reuse, age 600s) - breaking lock
+[WARN] Stale lock detected (age 900s > 600s) - force breaking lock
+```
 
 **Diagnosis:**
 ```bash
 # Check for stuck processes
-ps aux | grep telemon.sh
+ps aux | grep telemon.sh | grep -v grep
 
-# Check lock file
-ls -la /tmp/telemon_sys_alert_state.lock
+# Check lock file location and age
+LOCK_FILE="${STATE_FILE:-/tmp/telemon_sys_alert_state}.lock"
+ls -la "$LOCK_FILE"
+cat "$LOCK_FILE"  # Shows: PID timestamp
 
-# Check lock age (if file exists)
-cat /tmp/telemon_sys_alert_state.lock
-```
+# Check lock directory (fallback method)
+ls -la "${LOCK_FILE}.d/"
+cat "${LOCK_FILE}.d/pid" 2>/dev/null
 
-**Automatic Recovery:**
-Telemon now includes automatic stale lock detection. If a lock is older than 5 minutes (300 seconds) and the holding process is no longer running, Telemon will automatically break the stale lock and continue. You'll see a log message like:
-```
-[WARN] Stale lock detected (PID 12345 not running, age 360s) - breaking lock
+# Calculate lock age
+read -r pid epoch < "$LOCK_FILE"
+echo "Lock age: $(( $(date +%s) - epoch )) seconds"
+
+# Check if process is actually telemon
+[[ -f "/proc/$pid/cmdline" ]] && tr '\0' ' ' < "/proc/$pid/cmdline"
 ```
 
 **Manual Solution (if automatic detection fails):**
 ```bash
-# Remove stale lock
-rm /tmp/telemon_sys_alert_state.lock
-rm -rf /tmp/telemon_sys_alert_state.lock.d
+# Method 1: Use the admin utility (recommended)
+bash telemon-admin.sh reset-state
 
-# If process is stuck, kill it
-kill -9 <PID>
+# Method 2: Manual cleanup
+LOCK_FILE="${STATE_FILE:-/tmp/telemon_sys_alert_state}.lock"
+rm -f "$LOCK_FILE"
+rm -rf "${LOCK_FILE}.d"
+
+# Method 3: Kill stuck process (if still running)
+kill -9 <PID>  # Use PID from lock file
+rm -f "$LOCK_FILE"
 ```
 
 **Prevention:**
-- Ensure Telemon runs with appropriate timeout values
+- Ensure Telemon runs with appropriate `CHECK_TIMEOUT` values (default: 30s)
 - Check that the system has sufficient resources (CPU, memory)
-- Review logs for any checks that may be hanging
+- Review logs for any checks that may be hanging (`bash telemon-admin.sh logs 100`)
+- Consider increasing cron interval if checks consistently take >5 minutes
+- For critical systems, monitor `telemon_cron.log` for lock patterns:
+  ```bash
+  # Alert if >10 lock contention messages in last hour
+  grep -c "Another instance is running" telemon_cron.log
+  ```
+
+**Lock File Locations:**
+| File | Purpose |
+|------|---------|
+| `${STATE_FILE}.lock` | Main lock file (flock-based) |
+| `${STATE_FILE}.lock.d/` | Fallback lock directory (mkdir-based) |
+| `${STATE_FILE}.lock.d/pid` | PID and timestamp for stale detection |
+
+**Note on Log Spam:**
+Before v2.x, every lock contention was logged at WARN level, creating thousands of duplicate messages. Current versions use rate-limited logging - the first contention is logged, subsequent messages are suppressed to reduce disk usage.
 
 ### 8. First Run Issues
 

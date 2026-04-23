@@ -300,20 +300,30 @@ validate_numeric_or_default() {
     local min="${4:-}"
     local max="${5:-}"
     
+    # Internal helper to safely log warnings (handles cases where log() isn't available)
+    _vnd_log_warn() {
+        local msg="$1"
+        if type log &>/dev/null; then
+            log "WARN" "$msg"
+        else
+            echo "[WARN] $msg" >&2
+        fi
+    }
+    
     if ! is_valid_number "$value"; then
-        log "WARN" "validate_numeric_or_default: ${description} '${value}' is not numeric — using default ${default}"
+        _vnd_log_warn "validate_numeric_or_default: ${description} '${value}' is not numeric — using default ${default}"
         echo "$default"
         return 0
     fi
     
     if [[ -n "$min" ]] && [[ "$value" -lt "$min" ]]; then
-        log "WARN" "validate_numeric_or_default: ${description} ${value} is below minimum ${min} — using default ${default}"
+        _vnd_log_warn "validate_numeric_or_default: ${description} ${value} is below minimum ${min} — using default ${default}"
         echo "$default"
         return 0
     fi
     
     if [[ -n "$max" ]] && [[ "$value" -gt "$max" ]]; then
-        log "WARN" "validate_numeric_or_default: ${description} ${value} exceeds maximum ${max} — using default ${default}"
+        _vnd_log_warn "validate_numeric_or_default: ${description} ${value} exceeds maximum ${max} — using default ${default}"
         echo "$default"
         return 0
     fi

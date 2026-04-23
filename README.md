@@ -39,7 +39,7 @@ TELEGRAM_BOT_TOKEN="xxx" TELEGRAM_CHAT_ID="yyy" \
 | **Stateful Alert Tracking** | Only alerts on *state changes* (OK→WARNING→CRITICAL). Confirmation count + per-key cooldowns prevent false alarms and spam. |
 | **Self-Managing** | Self-rotating logs, automatic stale lock cleanup, retry queues for failed alerts. Runs indefinitely without maintenance. |
 | **Security-First** | Secrets never passed on command lines, input validation, SSRF protection, atomic file writes with symlink protection, HTML escaping. |
-| **Battle-Tested** | 372 automated tests, portable across GNU Linux and BSD, handles edge cases (hung commands, overlapping runs, flapping checks). |
+| **Battle-Tested** | 391 automated tests, portable across GNU Linux and BSD, handles edge cases (hung commands, overlapping runs, flapping checks). |
 | **Auto-Discovery** | Scans your system and suggests configuration for detected hardware, services, databases, and applications. |
 | **Enterprise Features** | Fleet monitoring (multi-server), predictive resource exhaustion, config drift detection, audit logging, auto-remediation, maintenance windows. |
 
@@ -1020,6 +1020,31 @@ LOG_LEVEL="DEBUG"
 
 # Run manually
 bash telemon.sh 2>&1 | tee /tmp/telemon-debug.log
+```
+
+### Understanding Log Files
+
+Telemon produces two log files with different purposes:
+
+| Log File | Purpose | Rotation | Level Control |
+|----------|---------|----------|---------------|
+| `telemon.log` | Main monitoring activity, check results, alerts | Self-rotating (`LOG_MAX_SIZE_MB`) | Respects `LOG_LEVEL` setting |
+| `telemon_cron.log` | Cron stderr output, lock contention messages | **Not rotated** — managed by cron | Only WARN/ERROR from lock mechanism |
+
+**Why two log files?**
+- `telemon.log` is written via the `log()` function with level filtering and rotation
+- `telemon_cron.log` captures stderr from cron, including early-stage messages before the `log()` function is available (e.g., lock contention)
+
+**Managing log growth:**
+```bash
+# Check log sizes
+ls -lh telemon*.log
+
+# Truncate cron log if it grows too large
+> telemon_cron.log
+
+# Enable logrotate (system-level)
+sudo cp telemon-logrotate.conf /etc/logrotate.d/telemon
 ```
 
 ### Reset State

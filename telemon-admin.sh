@@ -439,6 +439,13 @@ cmd_reset_state() {
         echo "  ✓ Removed: drift.baseline"
     fi
     
+    # Remove first-run fingerprint to trigger new bootstrap message
+    local fingerprint_file="${SCRIPT_DIR}/.telemon_first_run_done"
+    if [[ -f "$fingerprint_file" ]]; then
+        rm -f "$fingerprint_file"
+        echo "  ✓ Removed: first-run fingerprint"
+    fi
+    
     echo ""
     echo -e "${GREEN}State reset complete.${NC}"
     echo "Next run will treat all checks as new (bootstrap message will be sent)."
