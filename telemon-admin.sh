@@ -984,7 +984,94 @@ detect_infrastructure() {
         local pve_ver
         pve_ver=$(pveversion 2>/dev/null || echo "Proxmox VE")
         infra_info+="${GREEN}✓${NC} Proxmox VE detected: $pve_ver"
-        infra_info+=$'\n\n'
+        infra_info+=$'\n'
+
+        # Discover VMs
+        if _cmd_exists qm; then
+            local vm_count vm_running vm_stopped
+            vm_count=$(qm list 2>/dev/null | tail -n +2 | wc -l || echo "0")
+            vm_running=$(qm list 2>/dev/null | grep -c "running" || echo "0")
+            vm_stopped=$((vm_count - vm_running))
+            if [[ "$vm_count" -gt 0 ]]; then
+                infra_info+="  ${GREEN}✓${NC} Virtual machines: $vm_count total ($vm_running running, $vm_stopped stopped)"
+                infra_info+=$'\n'
+
+                # Generate guest list suggestion
+                local vm_ids
+                vm_ids=$(qm list 2>/dev/null | awk 'NR>1 {print "vm:"$1}' | tr '\n' ' ')
+                if [[ -n "$vm_ids" ]]; then
+                    infra_suggestions+="# Proxmox VE guest monitoring"
+                    infra_suggestions+=$'\n'
+                    infra_suggestions+="ENABLE_PROXMOX_GUESTS=true"
+                    infra_suggestions+=$'\n'
+                    infra_suggestions+="CRITICAL_PROXMOX_GUESTS=\"$vm_ids"
+                fi
+            fi
+        fi
+
+        # Discover LXCs
+        if _cmd_exists pct; then
+            local ct_count ct_running ct_stopped
+            ct_count=$(pct list 2>/dev/null | tail -n +2 | wc -l || echo "0")
+            ct_running=$(pct list 2>/dev/null | grep -c "running" || echo "0")
+            ct_stopped=$((ct_count - ct_running))
+            if [[ "$ct_count" -gt 0 ]]; then
+                infra_info+="  ${GREEN}✓${NC} Linux containers: $ct_count total ($ct_running running, $ct_stopped stopped)"
+                infra_info+=$'\n'
+
+                local ct_ids
+                ct_ids=$(pct list 2>/dev/null | awk 'NR>1 {print "ct:"$1}' | tr '\n' ' ')
+                infra_suggestions+=" $ct_ids\""
+                infra_suggestions+=$'\n'
+                infra_suggestions+="# Leave empty to auto-discover all guests, or customize:"
+                infra_suggestions+=$'\n'
+                infra_suggestions+="# CRITICAL_PROXMOX_GUESTS=\"vm:100 ct:101 vm:201\""
+                infra_suggestions+=$'\n\n'
+            fi
+        fi
+
+        # Discover storage pools
+        if _cmd_exists pvesm; then
+            local pool_count
+            pool_count=$(pvesm status 2>/dev/null | tail -n +2 | wc -l || echo "0")
+            if [[ "$pool_count" -gt 0 ]]; then
+                infra_info+="  ${GREEN}✓${NC} Storage pools: $pool_count"
+                infra_info+=$'\n'
+                infra_suggestions+="# Proxmox storage monitoring"
+                infra_suggestions+=$'\n'
+                infra_suggestions+="ENABLE_PROXMOX_STORAGE=true"
+                infra_suggestions+=$'\n'
+                infra_suggestions+="PROXMOX_STORAGE_WARN=85"
+                infra_suggestions+=$'\n'
+                infra_suggestions+="PROXMOX_STORAGE_CRIT=95"
+                infra_suggestions+=$'\n\n'
+            fi
+        fi
+
+        # Check for cluster configuration
+        if [[ -f /etc/pve/corosync.conf ]]; then
+            infra_info+="  ${GREEN}✓${NC} Cluster configured"
+            infra_info+=$'\n'
+            infra_suggestions+="# Proxmox cluster monitoring"
+            infra_suggestions+=$'\n'
+            infra_suggestions+="ENABLE_PROXMOX_CLUSTER=true"
+            infra_suggestions+=$'\n\n'
+        else
+            infra_info+="  ${NC}  Standalone node (no cluster)"
+            infra_info+=$'\n'
+        fi
+
+        # Task monitoring
+        if _cmd_exists pvesh; then
+            infra_suggestions+="# Proxmox task monitoring"
+            infra_suggestions+=$'\n'
+            infra_suggestions+="ENABLE_PROXMOX_TASKS=true"
+            infra_suggestions+=$'\n'
+            infra_suggestions+="PROXMOX_TASK_MINUTES=60"
+            infra_suggestions+=$'\n\n'
+        fi
+
+        infra_info+=$'\n'
     fi
     
     # KVM/QEMU
