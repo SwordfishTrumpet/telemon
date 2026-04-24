@@ -1173,7 +1173,7 @@ check_cpu() {
 
     # Calculate load as percentage of cores (bash integer math, x100 for precision)
     local load_pct
-    load_pct=$(awk -v load="$load_1m" -v cores="$cores" 'BEGIN {printf "%.0f", (load / cores) * 100}')
+    load_pct=$(awk -v ld="$load_1m" -v cores="$cores" 'BEGIN {printf "%.0f", (ld / cores) * 100}')
     if [[ -z "$load_pct" ]] || ! is_valid_number "$load_pct"; then
         log "WARN" "check_cpu: computed load_pct '${load_pct}' is not numeric — skipping"
         return
