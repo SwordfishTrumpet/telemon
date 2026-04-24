@@ -3887,7 +3887,8 @@ check_proxmox_tasks() {
     local task_crit="${PROXMOX_TASK_CRIT:-1}"
 
     local failed_tasks
-    failed_tasks=$(run_with_timeout "$CHECK_TIMEOUT" pvesh get "/cluster/tasks" 2>/dev/null | grep -c "FAILED\|ERROR" || echo "0")
+    failed_tasks=$(run_with_timeout "$CHECK_TIMEOUT" pvesh get "/cluster/tasks" --output-format json 2>/dev/null | grep -c "FAILED\|ERROR" || echo "0")
+    failed_tasks=$(echo "$failed_tasks" | head -1 | tr -d '\n')
 
     if [[ "$failed_tasks" -ge "$task_crit" ]]; then
         check_state_change "proxmox_tasks" "CRITICAL" "<b>${failed_tasks}</b> failed task(s) in task log"
