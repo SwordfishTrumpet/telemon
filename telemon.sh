@@ -138,8 +138,8 @@ if [[ -f "$MAINT_FLAG_FILE" ]]; then
 fi
 
 # Ensure log directory exists and log file has restrictive permissions
-mkdir -p "$(dirname "$LOG_FILE")"
-touch "$LOG_FILE"
+mkdir -p "$(dirname "${LOG_FILE:-${SCRIPT_DIR}/telemon.log}")"
+touch "${LOG_FILE:-${SCRIPT_DIR}/telemon.log}"
 chmod 600 "$LOG_FILE" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
@@ -1281,12 +1281,12 @@ check_disk() {
         local state="OK"
         local detail="Disk ${safe_mount}: ${pct} used (${safe_fs})"
 
-        if (( usage >= DISK_THRESHOLD_CRIT )); then
+        if (( usage >= ${DISK_THRESHOLD_CRIT:-90} )); then
             state="CRITICAL"
-            detail="Disk <b>${safe_mount}</b>: <b>${pct}</b> used on ${safe_fs} (threshold: ${DISK_THRESHOLD_CRIT}%)"
-        elif (( usage >= DISK_THRESHOLD_WARN )); then
+            detail="Disk <b>${safe_mount}</b>: <b>${pct}</b> used on ${safe_fs} (threshold: ${DISK_THRESHOLD_CRIT:-90}%)"
+        elif (( usage >= ${DISK_THRESHOLD_WARN:-85} )); then
             state="WARNING"
-            detail="Disk <b>${safe_mount}</b>: <b>${pct}</b> used on ${safe_fs} (threshold: ${DISK_THRESHOLD_WARN}%)"
+            detail="Disk <b>${safe_mount}</b>: <b>${pct}</b> used on ${safe_fs} (threshold: ${DISK_THRESHOLD_WARN:-85}%)"
         fi
 
         check_state_change "$key" "$state" "$detail"
@@ -4329,7 +4329,7 @@ send_heartbeat() {
 # Alert Retry/Queue
 # If dispatch fails, queue to a file and retry on next cycle
 # ===========================================================================
-ALERT_QUEUE_FILE="${STATE_FILE}.queue"
+ALERT_QUEUE_FILE="${STATE_FILE:-/tmp/telemon_sys_alert_state}.queue"
 
 dispatch_with_retry() {
     local message="$1"
@@ -5937,7 +5937,7 @@ EOF
     else
         # Log the actual error for debugging (but sanitize credentials)
         local sanitized_error
-        sanitized_error=$(echo "$curl_output" | grep -E "(^< [0-9]|^curl:|Failed|Could not|Error|timeout|refused|resolve)" | tail -3 | sed 's/'"$smtp_pass"'/***/g')
+        sanitized_error=$(echo "$curl_output" | grep -E "(^< [0-9]|^curl:|Failed|Could not|Error|timeout|refused|resolve)" | tail -3 | sed "s|$smtp_pass|***|g")
         log "WARN" "Email delivery failed via SMTP ${smtp_host}:${smtp_port}: ${sanitized_error:-"Unknown error (exit $curl_exit)"}"
         return 1
     fi
