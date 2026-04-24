@@ -586,7 +586,11 @@ validate_thresholds() {
     [[ "${ENABLE_NETWORK_CHECK:-false}" == "true" ]] && { check_threshold_pair "NETWORK" "${NETWORK_THRESHOLD_WARN:-800}" "${NETWORK_THRESHOLD_CRIT:-950}" || has_errors=true; }
     [[ "${ENABLE_UPS_CHECK:-false}" == "true" ]] && { check_threshold_pair "UPS" "${UPS_THRESHOLD_WARN:-30}" "${UPS_THRESHOLD_CRIT:-10}" "true" || has_errors=true; }
     [[ "${ENABLE_NVME_CHECK:-false}" == "true" ]] && { check_threshold_pair "NVME_TEMP" "${NVME_TEMP_THRESHOLD_WARN:-70}" "${NVME_TEMP_THRESHOLD_CRIT:-80}" || has_errors=true; }
-    
+
+    # Proxmox VE thresholds
+    [[ "${ENABLE_PROXMOX_STORAGE:-false}" == "true" ]] && { check_threshold_pair "PROXMOX_STORAGE" "${PROXMOX_STORAGE_WARN:-85}" "${PROXMOX_STORAGE_CRIT:-95}" || has_errors=true; }
+    [[ "${ENABLE_PROXMOX_TASKS:-false}" == "true" ]] && { check_threshold_pair "PROXMOX_TASK" "${PROXMOX_TASK_WARN:-0}" "${PROXMOX_TASK_CRIT:-1}" || has_errors=true; }
+
     # Validate SQLite size thresholds if database checks are enabled and SQLite paths are configured
     if [[ "${ENABLE_DATABASE_CHECKS:-false}" == "true" ]] && [[ -n "${DB_SQLITE_PATHS:-}" ]]; then
         local sqlite_warn="${DB_SQLITE_SIZE_THRESHOLD_WARN:-0}"
@@ -3636,6 +3640,265 @@ check_fleet_heartbeats() {
 }
 
 # ===========================================================================
+# PROXMOX VE CHECKS
+# ===========================================================================
+# Proxmox VE native monitoring — checks guests, storage pools, cluster health,
+# and failed tasks using native Proxmox CLI tools (qm, pct, pvesm, pvecm, pvesh).
+# Gracefully skips if Proxmox tools are not installed (non-Proxmox systems).
+
+# ===========================================================================
+# Proxmox Guest Monitor (VMs and LXCs)
+# Auto-discovers all guests via qm/pct list and checks their running status.
+# CRITICAL_PROXMOX_GUESTS: override to check only specific guest IDs (space-separated).
+# If empty, checks ALL guests.
+# ===========================================================================
+check_proxmox_guests() {
+    if ! command -v qm &>/dev/null && ! command -v pct &>/dev/null; then
+        log "INFO" "proxmox_guests: Proxmox tools (qm/pct) not found — skipping (not a Proxmox host)"
+        return
+    fi
+
+    local guest_list="${CRITICAL_PROXMOX_GUESTS:-}"
+    local all_ok=true
+    local total_guests=0
+    local running_guests=0
+    local stopped_guests=0
+
+    # Auto-discover all guests if no specific list provided
+    if [[ -z "$guest_list" ]]; then
+        local discovered=""
+        if command -v qm &>/dev/null; then
+            discovered=$(qm list 2>/dev/null | awk 'NR>1 {print "vm:"$1}')
+        fi
+        if command -v pct &>/dev/null; then
+            discovered="$discovered $(pct list 2>/dev/null | awk 'NR>1 {print "ct:"$1}')"
+        fi
+        guest_list="$discovered"
+    fi
+
+    [[ -z "$(echo "$guest_list" | tr -d ' ')" ]] && { log "INFO" "proxmox_guests: No guests found — skipping"; return; }
+
+    for guest_entry in $guest_list; do
+        local guest_type="${guest_entry%%:*}"
+        local guest_id="${guest_entry##*:}"
+        local guest_name=""
+
+        total_guests=$((total_guests + 1))
+
+        if [[ "$guest_type" == "vm" ]]; then
+            local vm_status
+            vm_status=$(run_with_timeout "$CHECK_TIMEOUT" qm status "$guest_id" 2>/dev/null | grep -oP 'status: \K\w+' || echo "unknown")
+            guest_name=$(run_with_timeout "$CHECK_TIMEOUT" qm config "$guest_id" 2>/dev/null | grep -oP '^name: \K.*' || echo "VM-$guest_id")
+
+            if [[ "$vm_status" == "running" ]]; then
+                running_guests=$((running_guests + 1))
+                check_state_change "proxmox_vm_${guest_id}" "OK" "VM <code>$(html_escape "$guest_name")</code> ($guest_id) is running"
+            elif [[ "$vm_status" == "paused" ]]; then
+                all_ok=false
+                check_state_change "proxmox_vm_${guest_id}" "WARNING" "VM <code>$(html_escape "$guest_name")</code> ($guest_id) is <b>PAUSED</b>"
+            elif [[ "$vm_status" == "stopped" ]]; then
+                all_ok=false
+                stopped_guests=$((stopped_guests + 1))
+                check_state_change "proxmox_vm_${guest_id}" "CRITICAL" "VM <code>$(html_escape "$guest_name")</code> ($guest_id) is <b>STOPPED</b>"
+            else
+                all_ok=false
+                check_state_change "proxmox_vm_${guest_id}" "WARNING" "VM <code>$(html_escape "$guest_name")</code> ($guest_id) status: <b>${vm_status}</b>"
+            fi
+        elif [[ "$guest_type" == "ct" ]]; then
+            local ct_status
+            ct_status=$(run_with_timeout "$CHECK_TIMEOUT" pct status "$guest_id" 2>/dev/null | grep -oP 'status: \K\w+' || echo "unknown")
+            guest_name=$(run_with_timeout "$CHECK_TIMEOUT" pct config "$guest_id" 2>/dev/null | grep -oP '^hostname: \K.*' || echo "CT-$guest_id")
+
+            if [[ "$ct_status" == "running" ]]; then
+                running_guests=$((running_guests + 1))
+                check_state_change "proxmox_ct_${guest_id}" "OK" "LXC <code>$(html_escape "$guest_name")</code> ($guest_id) is running"
+            elif [[ "$ct_status" == "stopped" ]]; then
+                all_ok=false
+                stopped_guests=$((stopped_guests + 1))
+                check_state_change "proxmox_ct_${guest_id}" "CRITICAL" "LXC <code>$(html_escape "$guest_name")</code> ($guest_id) is <b>STOPPED</b>"
+            else
+                all_ok=false
+                check_state_change "proxmox_ct_${guest_id}" "WARNING" "LXC <code>$(html_escape "$guest_name")</code> ($guest_id) status: <b>${ct_status}</b>"
+            fi
+        fi
+    done
+
+    # Summary check for the overall guest health
+    if $all_ok; then
+        check_state_change "proxmox_guests" "OK" "All $total_guests guests running ($running_guests VMs/CTs)"
+    elif [[ "$stopped_guests" -gt 0 ]]; then
+        check_state_change "proxmox_guests" "CRITICAL" "<b>$stopped_guests</b> guests stopped ($running_guests/$total_guests running)"
+    else
+        check_state_change "proxmox_guests" "WARNING" "$total_guests guests: $running_guests running, some in non-running state"
+    fi
+}
+
+# ===========================================================================
+# Proxmox Storage Pool Monitor
+# Checks all Proxmox storage pools via pvesm status.
+# PROXMOX_STORAGE_WARN / PROXMOX_STORAGE_CRIT: capacity thresholds (%)
+# PROXMOX_STORAGE_IGNORE: space-separated pool names to exclude
+# ===========================================================================
+check_proxmox_storage() {
+    if ! command -v pvesm &>/dev/null; then
+        log "INFO" "proxmox_storage: pvesm not found — skipping (not a Proxmox host)"
+        return
+    fi
+
+    local warn="${PROXMOX_STORAGE_WARN:-85}"
+    local crit="${PROXMOX_STORAGE_CRIT:-95}"
+    local ignore_list="${PROXMOX_STORAGE_IGNORE:-}"
+    local all_ok=true
+
+    local pools
+    pools=$(run_with_timeout "$CHECK_TIMEOUT" pvesm status 2>/dev/null)
+    if [[ -z "$pools" ]]; then
+        log "WARN" "proxmox_storage: pvesm returned no output — skipping"
+        return
+    fi
+
+    local pool_count=0
+    local warn_count=0
+    local crit_count=0
+
+    while IFS= read -r line; do
+        # Skip header
+        [[ "$line" =~ ^Name ]] && continue
+        [[ -z "$line" ]] && continue
+
+        local name type active usage
+        name=$(echo "$line" | awk '{print $1}')
+        type=$(echo "$line" | awk '{print $2}')
+        active=$(echo "$line" | awk '{print $3}')
+        usage=$(echo "$line" | awk '{print $7}' | tr -d '%')
+
+        # Skip ignored pools
+        if [[ -n "$ignore_list" ]]; then
+            local skip=false
+            for ign in $ignore_list; do
+                [[ "$name" == "$ign" ]] && skip=true
+            done
+            $skip && continue
+        fi
+
+        pool_count=$((pool_count + 1))
+        local key
+        key=$(sanitize_state_key "pvesm_${name}")
+
+        # Check if pool is not active
+        if [[ "$active" != "active" && "$active" != "yes" ]]; then
+            all_ok=false
+            check_state_change "$key" "CRITICAL" "Storage <code>$(html_escape "$name")</code> ($type) is <b>INACTIVE</b>"
+            continue
+        fi
+
+        # Skip capacity check for non-percentage pools
+        if [[ -z "$usage" || ! "$usage" =~ ^[0-9]+$ ]]; then
+            check_state_change "$key" "OK" "Storage <code>$(html_escape "$name")</code> ($type) active"
+            continue
+        fi
+
+        if [[ "$usage" -ge "$crit" ]]; then
+            all_ok=false
+            crit_count=$((crit_count + 1))
+            check_state_change "$key" "CRITICAL" "Storage <code>$(html_escape "$name")</code> ($type) at <b>${usage}%</b> (threshold: ${crit}%)"
+        elif [[ "$usage" -ge "$warn" ]]; then
+            all_ok=false
+            warn_count=$((warn_count + 1))
+            check_state_change "$key" "WARNING" "Storage <code>$(html_escape "$name")</code> ($type) at <b>${usage}%</b> (threshold: ${warn}%)"
+        else
+            check_state_change "$key" "OK" "Storage <code>$(html_escape "$name")</code> ($type) at ${usage}%"
+        fi
+    done < <(echo "$pools")
+
+    if $all_ok; then
+        check_state_change "proxmox_storage" "OK" "All $pool_count storage pools healthy"
+    else
+        local msg="$pool_count pools: "
+        [[ "$crit_count" -gt 0 ]] && msg+="<b>$crit_count critical</b>"
+        [[ "$crit_count" -gt 0 && "$warn_count" -gt 0 ]] && msg+=", "
+        [[ "$warn_count" -gt 0 ]] && msg+="<b>$warn_count warning</b>"
+        check_state_change "proxmox_storage" "CRITICAL" "$msg"
+    fi
+}
+
+# ===========================================================================
+# Proxmox Cluster Health Monitor
+# Checks cluster quorum status, node count, and corosync health.
+# Only runs if /etc/pve/corosync.conf exists (cluster is configured).
+# Gracefully reports OK on standalone nodes.
+# ===========================================================================
+check_proxmox_cluster() {
+    if ! command -v pvecm &>/dev/null; then
+        log "INFO" "proxmox_cluster: pvecm not found — skipping"
+        return
+    fi
+
+    # Check if cluster is actually configured
+    if [[ ! -f /etc/pve/corosync.conf ]]; then
+        check_state_change "proxmox_cluster" "OK" "Standalone node (no cluster configured)"
+        return
+    fi
+
+    # Check corosync service
+    if systemctl is-active --quiet corosync 2>/dev/null; then
+        local quorum_info
+        quorum_info=$(run_with_timeout "$CHECK_TIMEOUT" pvecm status 2>/dev/null || echo "")
+
+        if [[ -z "$quorum_info" ]]; then
+            check_state_change "proxmox_cluster" "WARNING" "Cluster configured but pvecm status returned no output"
+            return
+        fi
+
+        local quorum_votes node_count
+        # Extract quorum and node count from pvecm status output
+        quorum_votes=$(echo "$quorum_info" | grep -i "quorum" | grep -v "Expected" | head -1 | grep -oP '\d+' || echo "0")
+        local expected_votes
+        expected_votes=$(echo "$quorum_info" | grep -i "expected" | grep -oP '\d+' || echo "0")
+        node_count=$(echo "$quorum_info" | grep -ic "node name" || echo "0")
+
+        if [[ -z "$quorum_votes" || "$quorum_votes" == "0" ]]; then
+            check_state_change "proxmox_cluster" "CRITICAL" "Cluster <b>NO QUORUM</b> (votes: ${quorum_votes:-0}/${expected_votes:-?}, nodes: ${node_count:-0})"
+        elif [[ "$expected_votes" -gt 0 && "$quorum_votes" -lt "$expected_votes" ]]; then
+            check_state_change "proxmox_cluster" "WARNING" "Cluster degraded: <b>${quorum_votes}/${expected_votes}</b> votes, ${node_count} nodes"
+        else
+            check_state_change "proxmox_cluster" "OK" "Cluster healthy (${quorum_votes}/${expected_votes} votes, ${node_count} nodes)"
+        fi
+    else
+        check_state_change "proxmox_cluster" "CRITICAL" "Cluster configured but <b>corosync is not running</b>"
+    fi
+}
+
+# ===========================================================================
+# Proxmox Task Monitor
+# Checks for failed tasks in the recent task log via pvesh.
+# PROXMOX_TASK_MINUTES: how far back to check (default: 60 minutes)
+# PROXMOX_TASK_WARN: warning threshold for failed tasks (default: 0)
+# PROXMOX_TASK_CRIT: critical threshold for failed tasks (default: 1)
+# ===========================================================================
+check_proxmox_tasks() {
+    if ! command -v pvesh &>/dev/null; then
+        log "INFO" "proxmox_tasks: pvesh not found — skipping"
+        return
+    fi
+
+    local task_minutes="${PROXMOX_TASK_MINUTES:-60}"
+    local task_warn="${PROXMOX_TASK_WARN:-0}"
+    local task_crit="${PROXMOX_TASK_CRIT:-1}"
+
+    local failed_tasks
+    failed_tasks=$(run_with_timeout "$CHECK_TIMEOUT" pvesh get "/cluster/tasks" 2>/dev/null | grep -c "FAILED\|ERROR" || echo "0")
+
+    if [[ "$failed_tasks" -ge "$task_crit" ]]; then
+        check_state_change "proxmox_tasks" "CRITICAL" "<b>${failed_tasks}</b> failed task(s) in task log"
+    elif [[ "$failed_tasks" -ge "$task_warn" ]]; then
+        check_state_change "proxmox_tasks" "WARNING" "<b>${failed_tasks}</b> failed task(s) in task log"
+    else
+        check_state_change "proxmox_tasks" "OK" "No failed tasks detected"
+    fi
+}
+
+# ===========================================================================
 # Run all enabled checks (single source of truth)
 # Called by both main() and run_digest() to avoid duplication
 # ===========================================================================
@@ -3667,6 +3930,11 @@ run_all_checks() {
     [[ "${ENABLE_DRIFT_DETECTION:-false}" == "true" ]] && check_drift_detection
     [[ "${ENABLE_CRON_CHECK:-false}" == "true" ]] && check_cron_jobs
     [[ "${ENABLE_FLEET_CHECK:-false}" == "true" ]] && check_fleet_heartbeats
+    # Proxmox VE native checks
+    [[ "${ENABLE_PROXMOX_GUESTS:-false}" == "true" ]] && check_proxmox_guests
+    [[ "${ENABLE_PROXMOX_STORAGE:-false}" == "true" ]] && check_proxmox_storage
+    [[ "${ENABLE_PROXMOX_CLUSTER:-false}" == "true" ]] && check_proxmox_cluster
+    [[ "${ENABLE_PROXMOX_TASKS:-false}" == "true" ]] && check_proxmox_tasks
     [[ "${ENABLE_PLUGINS:-false}" == "true" ]] && check_plugins
 }
 
@@ -4626,6 +4894,8 @@ run_validate() {
         ENABLE_TCP_PORT_CHECK ENABLE_TEMP_CHECK ENABLE_DNS_CHECK \
         ENABLE_GPU_CHECK ENABLE_UPS_CHECK ENABLE_NETWORK_CHECK \
         ENABLE_LOG_CHECK ENABLE_INTEGRITY_CHECK ENABLE_CRON_CHECK \
+        ENABLE_PROXMOX_GUESTS ENABLE_PROXMOX_STORAGE \
+        ENABLE_PROXMOX_CLUSTER ENABLE_PROXMOX_TASKS \
         ENABLE_FLEET_CHECK ENABLE_HEARTBEAT ENABLE_PROMETHEUS_EXPORT \
         ENABLE_JSON_STATUS ENABLE_PREDICTIVE_ALERTS ENABLE_DRIFT_DETECTION \
         ENABLE_PLUGINS ENABLE_DATABASE_CHECKS ENABLE_DNS_RECORD_CHECK \
@@ -4946,6 +5216,23 @@ run_validate() {
             done
         fi
     fi
+
+    # Proxmox VE checks
+    for pmx_check in PROXMOX_GUESTS:qm/pct PROXMOX_STORAGE:pvesm PROXMOX_CLUSTER:pvecm PROXMOX_TASKS:pvesh; do
+        local pmx_ck="${pmx_check%%:*}"
+        local pmx_dep="${pmx_check##*:}"
+        local pmx_var="ENABLE_${pmx_ck}"
+        if [[ "${!pmx_var:-false}" == "true" ]]; then
+            echo "  ON:   ${pmx_ck} (${pmx_dep})"
+            enabled=$((enabled + 1))
+            # Validate dependencies for Proxmox checks
+            if ! _cmd_exists "$pmx_dep" 2>/dev/null && ! command -v "$pmx_dep" &>/dev/null; then
+                echo "        ⚠ ${pmx_dep} not found — will skip on non-Proxmox systems"
+            fi
+        else
+            echo "  OFF:  ${pmx_ck}"
+        fi
+    done
 
     # Plugin system validation
     if [[ "${ENABLE_PLUGINS:-false}" == "true" ]]; then
