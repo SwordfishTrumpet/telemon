@@ -1622,8 +1622,9 @@ check_failed_systemd_services() {
         log "WARN" "check_failed_systemd_services: systemctl timed out or failed — skipping"
         return
     }
-    failed_services=$(echo "$systemctl_output" | awk 'NF > 0 {print $1}' || true)
-    
+    # Filter out "not-found" ghost units (units systemd knows about but files don't exist)
+    failed_services=$(echo "$systemctl_output" | awk 'NF > 0 && $2 != "not-found" {print $1}' || true)
+
     if [[ -n "$failed_services" ]]; then
         local count
         count=$(echo "$failed_services" | wc -l)
