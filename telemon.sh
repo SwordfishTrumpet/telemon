@@ -1706,7 +1706,7 @@ check_pm2_processes() {
     if ! command -v pm2 &>/dev/null; then
         # Try common paths
         pm2_bin=""
-        for candidate in "${HOME}/.npm-global/bin/pm2" /usr/local/bin/pm2 /usr/bin/pm2; do
+        for candidate in "${HOME}/.local/bin/pm2" "${HOME}/.npm-global/bin/pm2" /usr/local/bin/pm2 /usr/bin/pm2; do
             if [[ -x "$candidate" ]]; then
                 pm2_bin="$candidate"
                 break
