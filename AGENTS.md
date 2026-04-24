@@ -530,7 +530,9 @@ The test suite (`tests/run_tests.sh`) covers:
 | **Maintenance** | `is_in_maintenance_window` schedule parsing | 7 tests |
 | **Auto-Remediation** | Service validation, state detection | 14 tests |
 | **Discovery System** | `cmd_discover`, hardware/infrastructure detection | 77 tests |
-| **Total** | | **372 tests** |
+| **Lock Mechanism** | `_is_telemon_process`, `_is_lock_stale`, rate limiting | 12 tests |
+| **First-Run Fingerprint** | Fingerprint file, state reset detection | 7 tests |
+| **Total** | | **391 tests** |
 
 ## File Conventions
 - Script: `set -euo pipefail`, `umask 077`
