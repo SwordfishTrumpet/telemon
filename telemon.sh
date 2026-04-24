@@ -4607,23 +4607,9 @@ dispatch_with_retry() {
     export TELEMON_HOSTNAME
     TELEMON_HOSTNAME="$(hostname)"
 
-    # First try to send any queued alerts from previous failures
-    if [[ -f "$ALERT_QUEUE_FILE" ]]; then
-        local queued_msg
-        queued_msg=$(cat "$ALERT_QUEUE_FILE" 2>/dev/null)
-        if [[ -n "$queued_msg" ]]; then
-            log "DEBUG" "Retrying queued alert from previous cycle"
-            # Try all channels - remove queue only if Telegram succeeds (primary)
-            if send_telegram "$queued_msg" 2>/dev/null; then
-                send_webhook "$queued_msg" || true
-                send_email "$queued_msg" || true
-                rm -f "$ALERT_QUEUE_FILE"
-                log "DEBUG" "Queued alert delivered successfully"
-            fi
-        fi
-    fi
+    # Note: Queued alert retry is handled in send_alerts() before this function is called
 
-    # Now try to send the current message to all channels
+    # Try to send the current message to all channels
     # Track individual channel failures for proper retry logic
     local telegram_ok="false"
     local webhook_ok="false"
@@ -6451,6 +6437,23 @@ main() {
 
     # Send heartbeat (dead man's switch)
     send_heartbeat
+
+    # Retry any queued alerts from previous failed deliveries (independent of new alerts)
+    if [[ -f "$ALERT_QUEUE_FILE" ]]; then
+        local queued_msg
+        queued_msg=$(cat "$ALERT_QUEUE_FILE" 2>/dev/null)
+        if [[ -n "$queued_msg" ]]; then
+            log "DEBUG" "Retrying queued alert from previous cycle"
+            if send_telegram "$queued_msg" 2>/dev/null; then
+                send_webhook "$queued_msg" || true
+                send_email "$queued_msg" || true
+                rm -f "$ALERT_QUEUE_FILE"
+                log "INFO" "Queued alert delivered successfully"
+            else
+                log "WARN" "Queued alert retry failed — will retry next cycle"
+            fi
+        fi
+    fi
 
     # Build summary counts
     local crit_count=0 warn_count=0 ok_count=0
