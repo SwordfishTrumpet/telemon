@@ -12,6 +12,10 @@ state
 *.log
 /var/log/
 
+# Runtime marker files
+.telemon_first_run_done
+*.lock
+
 # Temp files
 *.tmp
 *.swp
