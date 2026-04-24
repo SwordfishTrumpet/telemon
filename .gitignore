@@ -1,0 +1,36 @@
+# Telemon — .gitignore
+# Exclude secrets and generated files from version control
+
+# Secret credentials
+.env
+
+# State files (per-machine state, not tracked)
+state
+*.state
+
+# Logs
+*.log
+/var/log/
+
+# Temp files
+*.tmp
+*.swp
+*.swo
+*~
+
+# Backup files
+*.backup.*
+
+# IDE / editor
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
+
+# Test artifacts
+test-results/
+bats-report.xml
+
+# Node (if future JS tooling added)
+node_modules/
