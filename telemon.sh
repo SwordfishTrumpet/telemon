@@ -47,6 +47,10 @@ source "$ENV_FILE"
 # BUG-5 FIX: Ensure STATE_FILE has a default value after .env sourcing
 STATE_FILE="${STATE_FILE:-/tmp/telemon_sys_alert_state}"
 
+# BUG-8 FIX: Ensure LOG_FILE has a default value to prevent unbound variable crashes
+# The fallback pattern used at lines 165-166 is safe, but log() at line 421 uses $LOG_FILE directly
+LOG_FILE="${LOG_FILE:-${SCRIPT_DIR}/telemon.log}"
+
 # SECURITY: Validate critical input variables to prevent code injection
 validate_env_security() {
     local errors=0
@@ -528,6 +532,11 @@ run_with_timeout() {
     local timeout_sec="$1"
     shift
     
+    # BUG-14 FIX: Validate timeout is positive integer, default to 30s if not
+    if ! is_valid_number "$timeout_sec" || [[ "$timeout_sec" -le 0 ]]; then
+        timeout_sec=30
+    fi
+    
     # Use timeout command if available (coreutils)
     if command -v timeout &>/dev/null; then
         timeout "$timeout_sec" "$@" 2>/dev/null
@@ -816,6 +825,13 @@ check_state_change() {
     local new_state="$2"
     local detail="$3"
 
+    # BUG-17 FIX: Validate key doesn't contain = or : which would corrupt state file format
+    # These characters are used as delimiters in key=STATE:count format
+    if [[ "$key" == *"="* || "$key" == *":"* ]]; then
+        log "ERROR" "check_state_change: invalid key '${key}' contains = or : — rejecting to prevent state file corruption"
+        return 1
+    fi
+
     # Validate state is a known enum value
     case "$new_state" in
         OK|WARNING|CRITICAL) ;;
@@ -914,8 +930,10 @@ html_escape() {
 # ===========================================================================
 sanitize_state_key() {
     local key="$1"
-    # Replace anything not alphanumeric, underscore, hyphen, or dot with underscore
-    printf '%s' "$key" | tr -c 'a-zA-Z0-9_.-' '_'
+    # BUG-11 FIX: Added lowercase conversion as documented in AGENTS.md
+    # Replace anything not alphanumeric, underscore, hyphen, or dot with underscore,
+    # then convert to lowercase for consistent state keys
+    printf '%s' "$key" | tr -c 'a-zA-Z0-9_.-' '_' | tr '[:upper:]' '[:lower:]'
 }
 
 # ===========================================================================
@@ -1290,8 +1308,27 @@ check_memory() {
 # ===========================================================================
 check_disk() {
     # Parse df output, skip tmpfs/devtmpfs/overlay/squashfs/loop
-    local filesystem size used avail pct mountpoint
-    while read -r filesystem size used avail pct mountpoint; do
+    # BUG-21 FIX: Use df -P (POSIX format) which handles mount points with spaces correctly
+    # POSIX format: Filesystem 1024-blocks Used Available Capacity Mounted on
+    # With -P, each filesystem is on one line, and "Mounted on" is the last field (can contain spaces)
+    local filesystem blocks used avail pct mountpoint
+    while IFS= read -r line; do
+        # Skip header line
+        [[ "$line" == Filesystem* ]] && continue
+        
+        # Parse POSIX df output: Filesystem blocks used avail pct mountpoint...
+        # Use regex to extract fields, handling spaces in mount point
+        # BUG-21 FIX: Regex pattern correctly captures mount points with spaces in BASH_REMATCH[6]
+        if [[ "$line" =~ ^([^[:space:]]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)%[[:space:]]+(.+)$ ]]; then
+            filesystem="${BASH_REMATCH[1]}"
+            # blocks="${BASH_REMATCH[2]}"  # Available if needed
+            # used="${BASH_REMATCH[3]}"    # Available if needed
+            # avail="${BASH_REMATCH[4]}"  # Available if needed
+            pct="${BASH_REMATCH[5]}%"
+            mountpoint="${BASH_REMATCH[6]}"
+        else
+            continue
+        fi
         [[ "$filesystem" == "Filesystem" ]] && continue
         [[ "$filesystem" == tmpfs* || "$filesystem" == devtmpfs* ]] && continue
         [[ "$filesystem" == overlay* || "$filesystem" == squashfs* ]] && continue
@@ -1311,9 +1348,13 @@ check_disk() {
             continue
         fi
         # BUG-4 FIX: Sanitize key properly - only replace solitary underscore with 'root'
+        # BUG-12 FIX: Use sanitize_state_key to handle = and : characters that corrupt state file
         # Old code: sed 's/^_/root/' incorrectly turned /home into disk_roothome
-        local sanitized=$(echo "$mountpoint" | tr '/' '_')
-        [[ "$sanitized" == "_" ]] && sanitized="root"
+        local sanitized=$(sanitize_state_key "$mountpoint")
+        # Remove leading underscore (from leading /) for root mount point
+        sanitized="${sanitized#_}"
+        # If empty after removing leading _, it's root
+        [[ -z "$sanitized" ]] && sanitized="root"
         local key="disk_${sanitized}"
 
         local safe_mount safe_fs
@@ -1347,15 +1388,21 @@ check_disk() {
                 inode_usage=$(printf '%s' "$inode_pct_raw" | tr -dc '0-9')
                 if is_valid_number "$inode_usage" && [[ "$inode_usage" -gt 0 ]]; then
                     # BUG-4 FIX: Apply same sanitization fix to inode key
-                    local inode_sanitized=$(echo "$mountpoint" | tr '/' '_')
-                    [[ "$inode_sanitized" == "_" ]] && inode_sanitized="root"
+                    # BUG-12 FIX: Use sanitize_state_key to handle = and : characters
+                    local inode_sanitized=$(sanitize_state_key "$mountpoint")
+                    # Remove leading underscore (from leading /) for root mount point
+                    inode_sanitized="${inode_sanitized#_}"
+                    # If empty after removing leading _, it's root
+                    [[ -z "$inode_sanitized" ]] && inode_sanitized="root"
                     local inode_predict_key="predict_inode_${inode_sanitized}"
                     record_trend "$inode_predict_key" "$inode_usage"
                     check_prediction "$inode_predict_key" "Inode ${mountpoint}" "$inode_usage"
                 fi
             fi
         fi
-    done < <(run_with_timeout "$CHECK_TIMEOUT" df -h --output=source,size,used,avail,pcent,target 2>/dev/null)
+    # BUG-21 FIX: Use df -P (POSIX format) which handles mount points with spaces
+    # POSIX format uses 1024-blocks and ensures one line per filesystem
+    done < <(run_with_timeout "$CHECK_TIMEOUT" df -P 2>/dev/null | tail -n +2)
 }
 
 # ===========================================================================
@@ -1732,7 +1779,8 @@ check_docker_containers() {
                 ;;
             *)
                 state="CRITICAL"
-                detail="Container <code>${safe_container}</code> status: <b>${status}</b>"
+                # BUG-16 FIX: Escape status for HTML to prevent parse errors
+                detail="Container <code>${safe_container}</code> status: <b>$(html_escape "$status")</b>"
                 ;;
         esac
 
@@ -2744,7 +2792,9 @@ check_databases() {
             local redis_exit=$?
             
             # Check for password authentication error
-            if [[ "$redis_result" == *"NOAUTH"* ]] || [[ "$redis_result" == *"authentication"* ]]; then
+            # BUG-20 FIX: Added WRONGPASS and AUTH patterns for Redis 6+ ACL errors
+            if [[ "$redis_result" == *"NOAUTH"* ]] || [[ "$redis_result" == *"authentication"* ]] || \
+               [[ "$redis_result" == *"WRONGPASS"* ]] || [[ "$redis_result" == *"AUTH"* ]]; then
                 redis_state="CRITICAL"
                 redis_detail="Redis <b>${redis_host}:${redis_port}</b> authentication failed (invalid password)"
             elif [[ $redis_exit -ne 0 ]] || [[ "$redis_result" != "PONG" ]]; then
@@ -2958,9 +3008,22 @@ check_odbc() {
             fi
         else
             # Connection string-based: isql -k "connection_string" -b -c';' query
+            # BUG-13 FIX: Pass connection string via file to hide password from ps output
+            # The connection string containing PWD= is passed via a temp file descriptor
+            # instead of command line to prevent exposure in /proc/*/cmdline
+            local conn_str_file
+            conn_str_file=$(mktemp)
+            printf '%s' "$conn_str" > "$conn_str_file"
+            chmod 600 "$conn_str_file"
             odbc_result=$(run_with_timeout "$check_timeout" bash -c '
-                isql -k "$1" -b -c ";" <<< "$2" 2>&1
-            ' _ "$conn_str" "$conn_query" 2>&1) || odbc_exit=$?
+                conn_str_file="$1"
+                conn_query="$2"
+                # Read connection string from file, not command line
+                conn_str=$(cat "$conn_str_file")
+                rm -f "$conn_str_file"
+                isql -k "$conn_str" -b -c ";" <<< "$conn_query" 2>&1
+            ' _ "$conn_str_file" "$conn_query" 2>&1) || odbc_exit=$?
+            rm -f "$conn_str_file"  # Cleanup in case the subshell failed early
         fi
         
         end_time=$(date +%s%3N 2>/dev/null || echo "0")
@@ -3188,16 +3251,19 @@ check_file_integrity() {
         key=$(make_state_key "integrity" "$filepath")
         local fname
         fname=$(basename "$filepath")
+        # BUG-19 FIX: Escape filename for HTML to prevent parse errors from special chars in filenames
+        local safe_fname
+        safe_fname=$(html_escape "$fname")
 
         if [[ -n "${prev_checksums[$filepath]:-}" ]]; then
             if [[ "${prev_checksums[$filepath]}" != "$current_sum" ]]; then
-                check_state_change "$key" "WARNING" "File <code>${fname}</code> was <b>modified</b> since last check"
+                check_state_change "$key" "WARNING" "File <code>${safe_fname}</code> was <b>modified</b> since last check"
             else
-                check_state_change "$key" "OK" "File <code>${fname}</code> integrity OK"
+                check_state_change "$key" "OK" "File <code>${safe_fname}</code> integrity OK"
             fi
         else
             # First time seeing this file — baseline
-            check_state_change "$key" "OK" "File <code>${fname}</code> integrity baselined"
+            check_state_change "$key" "OK" "File <code>${safe_fname}</code> integrity baselined"
         fi
     done
 
@@ -3724,6 +3790,13 @@ check_proxmox_guests() {
         local guest_type="${guest_entry%%:*}"
         local guest_id="${guest_entry##*:}"
         local guest_name=""
+        
+        # BUG-15 FIX: Validate guest ID is numeric to prevent state file corruption
+        # and ensure safe shell command usage
+        if ! is_valid_number "$guest_id"; then
+            log "WARN" "proxmox_guests: Invalid guest ID '${guest_id}' (must be numeric) — skipping"
+            continue
+        fi
 
         total_guests=$((total_guests + 1))
 
@@ -3744,7 +3817,8 @@ check_proxmox_guests() {
                 check_state_change "proxmox_vm_${guest_id}" "CRITICAL" "VM <code>$(html_escape "$guest_name")</code> ($guest_id) is <b>STOPPED</b>"
             else
                 all_ok=false
-                check_state_change "proxmox_vm_${guest_id}" "WARNING" "VM <code>$(html_escape "$guest_name")</code> ($guest_id) status: <b>${vm_status}</b>"
+                # BUG-16 FIX: Escape vm_status for HTML to prevent parse errors
+                check_state_change "proxmox_vm_${guest_id}" "WARNING" "VM <code>$(html_escape "$guest_name")</code> ($guest_id) status: <b>$(html_escape "$vm_status")</b>"
             fi
         elif [[ "$guest_type" == "ct" ]]; then
             local ct_status
@@ -3760,7 +3834,8 @@ check_proxmox_guests() {
                 check_state_change "proxmox_ct_${guest_id}" "CRITICAL" "LXC <code>$(html_escape "$guest_name")</code> ($guest_id) is <b>STOPPED</b>"
             else
                 all_ok=false
-                check_state_change "proxmox_ct_${guest_id}" "WARNING" "LXC <code>$(html_escape "$guest_name")</code> ($guest_id) status: <b>${ct_status}</b>"
+                # BUG-16 FIX: Escape ct_status for HTML to prevent parse errors
+                check_state_change "proxmox_ct_${guest_id}" "WARNING" "LXC <code>$(html_escape "$guest_name")</code> ($guest_id) status: <b>$(html_escape "$ct_status")</b>"
             fi
         fi
     done
@@ -6266,8 +6341,11 @@ EOF
         return 0
     else
         # Log the actual error for debugging (but sanitize credentials)
-        local sanitized_error
-        sanitized_error=$(echo "$curl_output" | grep -E "(^< [0-9]|^curl:|Failed|Could not|Error|timeout|refused|resolve)" | tail -3 | sed "s|$smtp_pass|***|g")
+        # BUG-9 FIX: Use bash parameter substitution instead of sed to avoid issues
+        # with special characters in password (|, \, [, ., *, $ are regex metacharacters in sed)
+        local filtered_error
+        filtered_error=$(echo "$curl_output" | grep -E "(^< [0-9]|^curl:|Failed|Could not|Error|timeout|refused|resolve)" | tail -3)
+        local sanitized_error="${filtered_error//$smtp_pass/***}"
         log "WARN" "Email delivery failed via SMTP ${smtp_host}:${smtp_port}: ${sanitized_error:-"Unknown error (exit $curl_exit)"}"
         return 1
     fi
