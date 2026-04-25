@@ -84,14 +84,25 @@ set_env_value() {
 }
 
 # Set a plain value (for booleans/simple values without quotes)
+# BUG-10 FIX: Validate value is strictly "true" or "false" to prevent sed injection
+# This function is only used for boolean flags, so we validate the input
 set_env_value_plain() {
     local env_file="$1"
     local key="$2"
     local value="$3"
     
+    # Validate that value is a safe boolean (prevents sed injection via special chars)
+    if [[ "$value" != "true" && "$value" != "false" && "$value" != "auto" ]]; then
+        log_error "Invalid value for ${key}: must be 'true', 'false', or 'auto' (got: '${value}')"
+        return 1
+    fi
+    
     if grep -q "^${key}=" "$env_file" 2>/dev/null; then
-        # Key exists - update it
-        sed -i "s/^${key}=.*/${key}=${value}/" "$env_file"
+        # Key exists - update it using awk (safe for all characters)
+        awk -v k="$key" -v v="$value" 'BEGIN{FS=OFS="="} $1 == k {
+            print k, v
+            next
+        } 1' "$env_file" > "${env_file}.tmp" && mv "${env_file}.tmp" "$env_file"
     else
         # Key does not exist - append it
         echo "${key}=${value}" >> "$env_file"

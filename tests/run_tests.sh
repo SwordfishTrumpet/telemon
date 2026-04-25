@@ -2636,6 +2636,76 @@ test_first_run_fingerprint() {
 }
 
 # ---------------------------------------------------------------------------
+# Test Bug Fixes (2026-04-25 batch)
+# ---------------------------------------------------------------------------
+
+test_bug_fixes_2026_04_25() {
+    echo ""
+    echo "Testing bug fixes from 2026-04-25 batch..."
+    
+    local telemon_script="${SCRIPT_DIR}/telemon.sh"
+    local install_script="${SCRIPT_DIR}/install.sh"
+    local admin_script="${SCRIPT_DIR}/telemon-admin.sh"
+    
+    # BUG-8: LOG_FILE default value
+    grep -q 'BUG-8 FIX' "$telemon_script" && \
+    grep -q 'LOG_FILE="\${LOG_FILE:-' "$telemon_script"
+    assert_true "BUG-8: LOG_FILE has default value to prevent unbound variable"
+    
+    # BUG-9: SMTP password sanitization uses bash parameter substitution
+    grep -q 'BUG-9 FIX' "$telemon_script" && \
+    grep -q 'sanitized_error="\${filtered_error//' "$telemon_script"
+    assert_true "BUG-9: SMTP password sanitization uses bash substitution not sed"
+    
+    # BUG-10: install.sh validates values before sed
+    grep -q 'BUG-10 FIX' "$install_script" && \
+    grep -q 'if \[\[ "\$value" != "true" && "\$value" != "false"' "$install_script"
+    assert_true "BUG-10: install.sh validates boolean values before sed"
+    
+    # BUG-11: sanitize_state_key includes lowercase conversion
+    grep -q 'BUG-11 FIX' "$telemon_script"
+    assert_true "BUG-11: sanitize_state_key converts to lowercase"
+    
+    # BUG-12: disk mount sanitization uses sanitize_state_key
+    grep -q 'BUG-12 FIX' "$telemon_script"
+    assert_true "BUG-12: disk mount sanitization uses sanitize_state_key"
+    
+    # BUG-14: run_with_timeout validates timeout
+    grep -q 'BUG-14 FIX' "$telemon_script" && \
+    grep -q 'if ! is_valid_number "\$timeout_sec"' "$telemon_script"
+    assert_true "BUG-14: run_with_timeout validates timeout is positive"
+    
+    # BUG-15: Proxmox guest ID validation
+    grep -q 'BUG-15 FIX' "$telemon_script" && \
+    grep -q 'if ! is_valid_number "\$guest_id"' "$telemon_script"
+    assert_true "BUG-15: Proxmox guest ID validated as numeric"
+    
+    # BUG-16: Proxmox/Docker status HTML escaping
+    grep -q 'BUG-16 FIX' "$telemon_script"
+    assert_true "BUG-16: Proxmox vm_status is HTML-escaped"
+    
+    # BUG-17: check_state_change key validation
+    grep -q 'BUG-17 FIX' "$telemon_script" && \
+    grep -q 'if \[\[ "\$key" == \*"="\* || "\$key" == \*":"\* \]\]' "$telemon_script"
+    assert_true "BUG-17: check_state_change validates key for = and :"
+    
+    # BUG-19: File integrity HTML escaping
+    grep -q 'BUG-19 FIX' "$telemon_script" && \
+    grep -q 'safe_fname=.*html_escape.*"\$fname"' "$telemon_script"
+    assert_true "BUG-19: File integrity filename is HTML-escaped"
+    
+    # BUG-20: Redis WRONGPASS pattern
+    grep -q 'BUG-20 FIX' "$telemon_script" && \
+    grep -q 'WRONGPASS' "$telemon_script"
+    assert_true "BUG-20: Redis check includes WRONGPASS pattern"
+    
+    # BUG-21: check_disk uses df -P
+    grep -q 'BUG-21 FIX' "$telemon_script" && \
+    grep -q 'df -P' "$telemon_script"
+    assert_true "BUG-21: check_disk uses df -P for POSIX format"
+}
+
+# ---------------------------------------------------------------------------
 # Main test runner
 # ---------------------------------------------------------------------------
 
@@ -2685,6 +2755,7 @@ main() {
     test_discovery_system
     test_lock_mechanism
     test_first_run_fingerprint
+    test_bug_fixes_2026_04_25
 
     # Summary
     echo ""
