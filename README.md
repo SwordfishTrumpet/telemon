@@ -1,10 +1,7 @@
 # Telemon
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![CI](https://github.com/SwordfishTrumpet/telemon/workflows/CI/badge.svg)](https://github.com/SwordfishTrumpet/telemon/actions)
 [![GitHub release](https://img.shields.io/github/v/release/SwordfishTrumpet/telemon)](https://github.com/SwordfishTrumpet/telemon/releases)
-[![GitHub stars](https://img.shields.io/github/stars/SwordfishTrumpet/telemon?style=social)](https://github.com/SwordfishTrumpet/telemon/stargazers)
-[![GitHub issues](https://img.shields.io/github/issues/SwordfishTrumpet/telemon)](https://github.com/SwordfishTrumpet/telemon/issues)
 
 > **Lightweight, self-managing system health monitor with intelligent alerts. Zero maintenance. Zero spam.**
 
@@ -39,7 +36,7 @@ TELEGRAM_BOT_TOKEN="xxx" TELEGRAM_CHAT_ID="yyy" \
 | **Stateful Alert Tracking** | Only alerts on *state changes* (OK→WARNING→CRITICAL). Confirmation count + per-key cooldowns prevent false alarms and spam. |
 | **Self-Managing** | Self-rotating logs, automatic stale lock cleanup, retry queues for failed alerts. Runs indefinitely without maintenance. |
 | **Security-First** | Secrets never passed on command lines, input validation, SSRF protection, atomic file writes with symlink protection, HTML escaping. |
-| **Battle-Tested** | 391 automated tests, portable across GNU Linux and BSD, handles edge cases (hung commands, overlapping runs, flapping checks). |
+| **Battle-Tested** | Portable across GNU Linux and BSD, handles edge cases (hung commands, overlapping runs, flapping checks). |
 | **Auto-Discovery** | Scans your system and suggests configuration for detected hardware, services, databases, and applications. |
 | **Enterprise Features** | Fleet monitoring (multi-server), predictive resource exhaustion, config drift detection, audit logging, auto-remediation, maintenance windows. |
 
@@ -1111,13 +1108,9 @@ curl -X POST "https://api.telegram.org/bot<TOKEN>/sendMessage" \
 
 ## Documentation
 
-- [README.md](README.md) — This file
-- [docs/QUICKREF.md](docs/QUICKREF.md) — Quick reference card
-- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — Troubleshooting guide
-- [systemd/README.md](systemd/README.md) — Systemd setup
-- [CONTRIBUTING.md](CONTRIBUTING.md) — Contribution guidelines
-- [CHANGELOG.md](CHANGELOG.md) — Version history
-- [AGENTS.md](AGENTS.md) — Coding agent guidelines
+- [Quick Reference](docs/QUICKREF.md) — Command cheat sheet
+- [Troubleshooting Guide](docs/TROUBLESHOOTING.md) — Common issues and solutions
+- [Systemd Setup](systemd/README.md) — Running with systemd instead of cron
 
 ---
 
