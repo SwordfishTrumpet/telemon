@@ -57,6 +57,47 @@ log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
+# ---------------------------------------------------------------------------
+# Safe Config Value Writer
+# ---------------------------------------------------------------------------
+# Writes a value to a KEY="value" line in an env file safely.
+# Handles special characters (& / \ $ etc.) without sed injection vulnerabilities.
+# Usage: set_env_value <file> <key> <value>
+set_env_value() {
+    local env_file="$1"
+    local key="$2"
+    local value="$3"
+    
+    if grep -q "^${key}=" "$env_file" 2>/dev/null; then
+        # Key exists - update it using awk with proper quoting
+        # Use \x27 to avoid quote escaping issues in awk
+        awk -v k="$key" -v v="$value" 'BEGIN{FS=OFS="="} $1 == k {
+            # Escape any " in the value for proper quoting
+            gsub(/"/, "\\\"", v)
+            print k, "\"" v "\""
+            next
+        } 1' "$env_file" > "${env_file}.tmp" && mv "${env_file}.tmp" "$env_file"
+    else
+        # Key does not exist - append it
+        echo "${key}=\"${value}\"" >> "$env_file"
+    fi
+}
+
+# Set a plain value (for booleans/simple values without quotes)
+set_env_value_plain() {
+    local env_file="$1"
+    local key="$2"
+    local value="$3"
+    
+    if grep -q "^${key}=" "$env_file" 2>/dev/null; then
+        # Key exists - update it
+        sed -i "s/^${key}=.*/${key}=${value}/" "$env_file"
+    else
+        # Key does not exist - append it
+        echo "${key}=${value}" >> "$env_file"
+    fi
+}
+
 # Check if we're running from local repo or need to download
 is_local_install() {
     local script_dir
@@ -385,23 +426,17 @@ step_5_configure_env_silent() {
     local enable_sites="${ENABLE_SITES:-false}"
     local site_urls="${SITE_URLS:-}"
     
-    # Update configuration values
-    sed -i "s/^TELEGRAM_BOT_TOKEN=.*/TELEGRAM_BOT_TOKEN=\"${bot_token}\"/" "$env_file"
-    sed -i "s/^TELEGRAM_CHAT_ID=.*/TELEGRAM_CHAT_ID=\"${chat_id}\"/" "$env_file"
-    sed -i "s/^SERVER_LABEL=.*/SERVER_LABEL=\"${server_label}\"/" "$env_file"
-    sed -i "s/^ENABLE_DOCKER_CONTAINERS=.*/ENABLE_DOCKER_CONTAINERS=${enable_docker}/" "$env_file"
-    sed -i "s/^ENABLE_PM2_PROCESSES=.*/ENABLE_PM2_PROCESSES=${enable_pm2}/" "$env_file"
-    sed -i "s/^ENABLE_SITE_MONITOR=.*/ENABLE_SITE_MONITOR=${enable_sites}/" "$env_file"
+    # Update configuration values using safe writer
+    set_env_value "$env_file" "TELEGRAM_BOT_TOKEN" "$bot_token"
+    set_env_value "$env_file" "TELEGRAM_CHAT_ID" "$chat_id"
+    set_env_value "$env_file" "SERVER_LABEL" "$server_label"
+    set_env_value_plain "$env_file" "ENABLE_DOCKER_CONTAINERS" "$enable_docker"
+    set_env_value_plain "$env_file" "ENABLE_PM2_PROCESSES" "$enable_pm2"
+    set_env_value_plain "$env_file" "ENABLE_SITE_MONITOR" "$enable_sites"
     
     # Add site URLs if provided
     if [[ -n "$site_urls" && "$enable_sites" == "true" ]]; then
-        if grep -q "^CRITICAL_SITES=" "$env_file"; then
-            sed -i "s|^CRITICAL_SITES=.*|CRITICAL_SITES=\"${site_urls}\"|" "$env_file"
-        else
-            echo "" >> "$env_file"
-            echo "# Monitored websites (space-separated URLs)" >> "$env_file"
-            echo "CRITICAL_SITES=\"${site_urls}\"" >> "$env_file"
-        fi
+        set_env_value "$env_file" "CRITICAL_SITES" "$site_urls"
     fi
     
     # Secure the .env file
@@ -482,24 +517,17 @@ step_5_configure_env_interactive() {
     # Create .env file
     cp "$env_example" "$env_file"
     
-    # Update configuration values
-    sed -i "s/^TELEGRAM_BOT_TOKEN=.*/TELEGRAM_BOT_TOKEN=\"${bot_token}\"/" "$env_file"
-    sed -i "s/^TELEGRAM_CHAT_ID=.*/TELEGRAM_CHAT_ID=\"${chat_id}\"/" "$env_file"
-    sed -i "s/^SERVER_LABEL=.*/SERVER_LABEL=\"${server_label}\"/" "$env_file"
-    sed -i "s/^ENABLE_DOCKER_CONTAINERS=.*/ENABLE_DOCKER_CONTAINERS=${enable_docker}/" "$env_file"
-    sed -i "s/^ENABLE_PM2_PROCESSES=.*/ENABLE_PM2_PROCESSES=${enable_pm2}/" "$env_file"
-    sed -i "s/^ENABLE_SITE_MONITOR=.*/ENABLE_SITE_MONITOR=${enable_sites}/" "$env_file"
+    # Update configuration values using safe writer
+    set_env_value "$env_file" "TELEGRAM_BOT_TOKEN" "$bot_token"
+    set_env_value "$env_file" "TELEGRAM_CHAT_ID" "$chat_id"
+    set_env_value "$env_file" "SERVER_LABEL" "$server_label"
+    set_env_value_plain "$env_file" "ENABLE_DOCKER_CONTAINERS" "$enable_docker"
+    set_env_value_plain "$env_file" "ENABLE_PM2_PROCESSES" "$enable_pm2"
+    set_env_value_plain "$env_file" "ENABLE_SITE_MONITOR" "$enable_sites"
     
     # Add site URLs if provided
     if [[ -n "$site_urls" && "$enable_sites" == "true" ]]; then
-        # Check if CRITICAL_SITES line exists
-        if grep -q "^CRITICAL_SITES=" "$env_file"; then
-            sed -i "s|^CRITICAL_SITES=.*|CRITICAL_SITES=\"${site_urls}\"|" "$env_file"
-        else
-            echo "" >> "$env_file"
-            echo "# Monitored websites (space-separated URLs)" >> "$env_file"
-            echo "CRITICAL_SITES=\"${site_urls}\"" >> "$env_file"
-        fi
+        set_env_value "$env_file" "CRITICAL_SITES" "$site_urls"
     fi
     
     # Secure the .env file

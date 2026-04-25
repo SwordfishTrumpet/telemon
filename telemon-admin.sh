@@ -65,6 +65,7 @@ cmd_backup() {
     fi
     
     # Backup state and all related files
+    # Note: get_state_file_variants returns space-separated list — disable shellcheck SC2046
     # shellcheck disable=SC2046
     for file in $(get_state_file_variants true false false); do
         if [[ -f "$file" ]]; then
@@ -202,15 +203,43 @@ cmd_restore() {
         exit 0
     fi
     
-    # Restore files (with symlink protection)
+    # Helper: Atomic file copy with symlink protection (prevents TOCTOU race)
+    _atomic_copy_with_protection() {
+        local src="$1"
+        local dst="$2"
+        # Check for symlink at destination before writing (prevents TOCTOU)
+        if [[ -L "$dst" ]]; then
+            echo -e "${RED}ERROR: $dst is a symlink — refusing to restore (possible attack)${NC}"
+            return 1
+        fi
+        # Create temp file next to destination
+        local tmp_dst
+        tmp_dst=$(mktemp "${dst}.XXXXXX") || { echo -e "${RED}ERROR: Failed to create temp file for ${dst}${NC}"; return 1; }
+        # Copy content to temp file
+        if ! cp -p "$src" "$tmp_dst" 2>/dev/null; then
+            rm -f "$tmp_dst"
+            echo -e "${RED}ERROR: Failed to copy to temp file for ${dst}${NC}"
+            return 1
+        fi
+        chmod 600 "$tmp_dst" 2>/dev/null || true
+        # Atomic move with -T (refuses to follow symlinks at destination)
+        if ! mv -T "$tmp_dst" "$dst" 2>/dev/null; then
+            # Fallback for non-GNU mv: check for symlink, then plain mv
+            if [[ -L "$dst" ]]; then
+                rm -f "$tmp_dst"
+                echo -e "${RED}ERROR: $dst is a symlink — refusing to restore (possible attack)${NC}"
+                return 1
+            fi
+            mv "$tmp_dst" "$dst" || { rm -f "$tmp_dst"; echo -e "${RED}ERROR: Failed to write ${dst}${NC}"; return 1; }
+        fi
+        return 0
+    }
+
+    # Restore files (with symlink protection via atomic move)
     if [[ -f "${backup_path}/.env" ]]; then
         # Validate syntax before restoring
         if ! bash -n "${backup_path}/.env" 2>/dev/null; then
             echo -e "${RED}ERROR: Backup .env has syntax errors — aborting restore${NC}"
-            exit 1
-        fi
-        if [[ -L "$ENV_FILE" ]]; then
-            echo -e "${RED}ERROR: $ENV_FILE is a symlink — refusing to restore (possible attack)${NC}"
             exit 1
         fi
         # Backup current config before overwriting
@@ -220,21 +249,20 @@ cmd_restore() {
             chmod 600 "$backup_current"
             echo "  ✓ Current .env backed up to: $(basename "$backup_current")"
         fi
-        cp -p "${backup_path}/.env" "$ENV_FILE"
-        chmod 600 "$ENV_FILE"
-        echo "  ✓ Configuration restored"
+        if _atomic_copy_with_protection "${backup_path}/.env" "$ENV_FILE"; then
+            echo "  ✓ Configuration restored"
+        else
+            exit 1
+        fi
     fi
-    
-    # Restore state and all related files (with symlink protection)
+
+    # Restore state and all related files (with symlink protection via atomic move)
+    # Note: get_state_file_variants returns space-separated list — disable shellcheck SC2046
     # shellcheck disable=SC2046
     for file in $(get_state_file_variants true false false); do
         local basename_file
         basename_file=$(basename "$file")
         if [[ -f "${backup_path}/${basename_file}" ]]; then
-            if [[ -L "$file" ]]; then
-                echo -e "${RED}ERROR: $file is a symlink — refusing to restore (possible attack)${NC}"
-                exit 1
-            fi
             # Validate main state file format (key=STATE:count per line)
             if [[ "$file" == "$STATE_FILE" ]]; then
                 local invalid_lines=0
@@ -248,11 +276,14 @@ cmd_restore() {
                     echo -e "${YELLOW}WARN: State file has ${invalid_lines} line(s) with unexpected format${NC}"
                 fi
             fi
-            cp -p "${backup_path}/${basename_file}" "$file"
-            echo "  ✓ ${basename_file} restored"
+            if _atomic_copy_with_protection "${backup_path}/${basename_file}" "$file"; then
+                echo "  ✓ ${basename_file} restored"
+            else
+                exit 1
+            fi
         fi
     done
-    
+
     # Restore drift detection baseline directory
     local drift_basename="$(basename "$STATE_FILE").drift.baseline"
     if [[ -d "${backup_path}/${drift_basename}" ]]; then
@@ -260,17 +291,18 @@ cmd_restore() {
             echo -e "${RED}ERROR: ${STATE_FILE}.drift.baseline is a symlink — refusing to restore${NC}"
             exit 1
         fi
+        # For directories: remove existing, then copy (can't use atomic mv -T easily for dirs)
+        rm -rf "${STATE_FILE}.drift.baseline"
         cp -r "${backup_path}/${drift_basename}" "${STATE_FILE}.drift.baseline"
         echo "  ✓ drift.baseline restored"
     fi
-    
+
     if [[ -f "${backup_path}/$(basename "$LOG_FILE")" ]]; then
-        if [[ -L "$LOG_FILE" ]]; then
-            echo -e "${RED}ERROR: $LOG_FILE is a symlink — refusing to restore${NC}"
+        if _atomic_copy_with_protection "${backup_path}/$(basename "$LOG_FILE")" "$LOG_FILE"; then
+            echo "  ✓ Log file restored"
+        else
             exit 1
         fi
-        cp -p "${backup_path}/$(basename "$LOG_FILE")" "$LOG_FILE"
-        echo "  ✓ Log file restored"
     fi
     
     echo ""
@@ -683,6 +715,10 @@ cmd_fleet_status() {
 # Helper: Check if a systemd service is active
 _systemd_is_active() {
     local service="$1"
+    # Guard: skip on non-systemd systems (systemctl not available)
+    if ! command -v systemctl &>/dev/null; then
+        return 1
+    fi
     systemctl is-active "$service" &>/dev/null
 }
 
@@ -695,7 +731,8 @@ _cmd_exists() {
 _get_total_memory_gb() {
     local mem_kb
     mem_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
-    echo $((mem_kb / 1024 / 1024))
+    # Use awk for floating point precision (avoids integer truncation of 3.5GB → 3GB)
+    awk "BEGIN {printf \"%.1f\", $mem_kb/1024/1024}"
 }
 
 # Helper: Get CPU core count

@@ -2598,29 +2598,41 @@ test_first_run_fingerprint() {
     grep -q "FIRST_RUN_FINGERPRINT=" "$telemon_script"
     assert_true "First-run: FIRST_RUN_FINGERPRINT variable defined"
     
-    # Test 2: Fingerprint path uses SCRIPT_DIR
-    grep -q 'FIRST_RUN_FINGERPRINT="${SCRIPT_DIR}/.telemon_first_run_done"' "$telemon_script"
-    assert_true "First-run: Fingerprint path uses SCRIPT_DIR/.telemon_first_run_done"
+    # Test 2: Fingerprint path uses SCRIPT_DIR as primary location (with fallback support)
+    # BUG-3 FIX: Now uses _determine_fingerprint_location() for fallback locations
+    grep -q '_determine_fingerprint_location' "$telemon_script" && \
+    grep -q 'primary="${SCRIPT_DIR}/.telemon_first_run_done"' "$telemon_script"
+    assert_true "First-run: Fingerprint path uses SCRIPT_DIR/.telemon_first_run_done as primary"
     
-    # Test 3: Fingerprint is checked before first-run detection
+    # Test 3: Fingerprint has fallback locations (HOME and /tmp)
+    grep -q 'fallback_home="${HOME}/.telemon_first_run_done"' "$telemon_script" && \
+    grep -q 'fallback_tmp="/tmp/.telemon_first_run_done"' "$telemon_script"
+    assert_true "First-run: Fingerprint has fallback locations (HOME and /tmp)"
+    
+    # Test 4: Fingerprint is checked before first-run detection
     grep -q 'if \[\[ ! -f "\$FIRST_RUN_FINGERPRINT" \]\]' "$telemon_script"
     assert_true "First-run: Fingerprint file existence is checked"
     
-    # Test 4: Fingerprint is created on first run
+    # Test 5: Fingerprint is created on first run
     grep -q 'FIRST_RUN_FINGERPRINT' "$telemon_script" && grep -q 'echo.*date.*%Y' "$telemon_script"
     assert_true "First-run: Fingerprint file is created with timestamp"
     
-    # Test 5: State reset detection (fingerprint exists but no state file)
+    # Test 6: State reset detection (fingerprint exists but no state file)
     grep -q 'fingerprint exists' "$telemon_script"
     assert_true "First-run: State reset vs first-run distinction exists"
     
-    # Test 6: Fingerprint is removed in reset-state command
+    # Test 7: Fingerprint is removed in reset-state command
     grep -q 'first-run fingerprint' "$admin_script"
     assert_true "First-run: Fingerprint removal in reset-state command"
     
-    # Test 7: Fingerprint file has restricted permissions
+    # Test 8: Fingerprint file has restricted permissions
     grep -A2 'FIRST_RUN_FINGERPRINT' "$telemon_script" | grep -q 'chmod 600'
     assert_true "First-run: Fingerprint file created with 600 permissions"
+    
+    # Test 9: BUG-3 FIX - Fingerprint creation logs warning on failure
+    grep -q 'Failed to create first-run fingerprint' "$telemon_script" && \
+    grep -q 'log "WARN"' "$telemon_script"
+    assert_true "First-run: Fingerprint creation failure is logged as WARNING"
 }
 
 # ---------------------------------------------------------------------------

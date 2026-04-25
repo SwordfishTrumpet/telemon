@@ -44,6 +44,9 @@ fi
 # shellcheck source=/dev/null
 source "$ENV_FILE"
 
+# BUG-5 FIX: Ensure STATE_FILE has a default value after .env sourcing
+STATE_FILE="${STATE_FILE:-/tmp/telemon_sys_alert_state}"
+
 # SECURITY: Validate critical input variables to prevent code injection
 validate_env_security() {
     local errors=0
@@ -123,8 +126,29 @@ SERVER_LABEL="${SERVER_LABEL:-$(hostname)}"
 # First-run fingerprint file — persists across state file changes
 # Used to prevent duplicate bootstrap messages when STATE_FILE location changes
 # or state file is temporarily removed (e.g., log rotation cleanup)
+# BUG-3 FIX: Try multiple fallback locations if SCRIPT_DIR is not writable
 # ---------------------------------------------------------------------------
-FIRST_RUN_FINGERPRINT="${SCRIPT_DIR}/.telemon_first_run_done"
+_determine_fingerprint_location() {
+    local primary="${SCRIPT_DIR}/.telemon_first_run_done"
+    local fallback_home="${HOME}/.telemon_first_run_done"
+    local fallback_tmp="/tmp/.telemon_first_run_done"
+    
+    # Test if we can write to SCRIPT_DIR (primary location)
+    if [[ -d "$SCRIPT_DIR" && -w "$SCRIPT_DIR" ]]; then
+        echo "$primary"
+        return
+    fi
+    
+    # Try HOME as fallback
+    if [[ -d "$HOME" && -w "$HOME" ]]; then
+        echo "$fallback_home"
+        return
+    fi
+    
+    # Fall back to /tmp (least persistent but always writable)
+    echo "$fallback_tmp"
+}
+FIRST_RUN_FINGERPRINT="$(_determine_fingerprint_location)"
 
 # ---------------------------------------------------------------------------
 # Maintenance window — skip monitoring if flag file exists
@@ -359,8 +383,14 @@ migrate_state_file() {
         
         if [[ -n "$persistent_dir" && -d "$persistent_dir" && -w "$persistent_dir" ]]; then
             local new_state="${persistent_dir}/.telemon_state"
-            # Copy state atomically
-            if cp "$current_state" "$new_state" 2>/dev/null && chmod 600 "$new_state" 2>/dev/null; then
+            # BUG-1 FIX: Only migrate if persistent copy doesn't exist yet
+            # Prevents overwriting newer state on every run
+            if [[ -f "$new_state" ]]; then
+                # Persistent state exists - use it instead of migrating
+                # Note: log() not available here yet, use lib/common.sh log
+                log "DEBUG" "Persistent state file exists at ${new_state} - using existing state"
+                export STATE_FILE="$new_state"
+            elif cp "$current_state" "$new_state" 2>/dev/null && chmod 600 "$new_state" 2>/dev/null; then
                 log "INFO" "State file auto-migrated from /tmp to persistent location: ${new_state}"
                 log "INFO" "Update STATE_FILE in .env to: STATE_FILE=\"${new_state}\" to prevent re-alerts on reboot"
                 # Update runtime variable (but not the config file)
@@ -369,7 +399,9 @@ migrate_state_file() {
         fi
     fi
 }
-migrate_state_file
+
+# BUG-9 FIX: migrate_state_file() call moved to AFTER log() function definition
+# (was previously called at line 372 before log() existed, causing messages to use lib/common.sh only)
 
 # ---------------------------------------------------------------------------
 # Logging helper — respects LOG_LEVEL (DEBUG < INFO < WARN < ERROR)
@@ -388,6 +420,9 @@ log() {
     fi
     echo "$(date '+%Y-%m-%d %H:%M:%S') [${level}] $*" | tee -a "$LOG_FILE"
 }
+
+# BUG-9 FIX: Call migrate_state_file() AFTER log() function is defined
+migrate_state_file
 
 # ===========================================================================
 # AUDIT LOGGING: Structured JSON audit logs for security and compliance
@@ -1275,8 +1310,11 @@ check_disk() {
             log "WARN" "check_disk: non-numeric usage '${pct}' for ${mountpoint} — skipping"
             continue
         fi
-        # Sanitize key: replace / with _ for state file
-        local key="disk_$(echo "$mountpoint" | tr '/' '_' | sed 's/^_/root/')"
+        # BUG-4 FIX: Sanitize key properly - only replace solitary underscore with 'root'
+        # Old code: sed 's/^_/root/' incorrectly turned /home into disk_roothome
+        local sanitized=$(echo "$mountpoint" | tr '/' '_')
+        [[ "$sanitized" == "_" ]] && sanitized="root"
+        local key="disk_${sanitized}"
 
         local safe_mount safe_fs
         safe_mount=$(html_escape "$mountpoint")
@@ -1308,7 +1346,10 @@ check_disk() {
                 local inode_usage
                 inode_usage=$(printf '%s' "$inode_pct_raw" | tr -dc '0-9')
                 if is_valid_number "$inode_usage" && [[ "$inode_usage" -gt 0 ]]; then
-                    local inode_predict_key="predict_inode_$(echo "$mountpoint" | tr '/' '_' | sed 's/^_/root/')"
+                    # BUG-4 FIX: Apply same sanitization fix to inode key
+                    local inode_sanitized=$(echo "$mountpoint" | tr '/' '_')
+                    [[ "$inode_sanitized" == "_" ]] && inode_sanitized="root"
+                    local inode_predict_key="predict_inode_${inode_sanitized}"
                     record_trend "$inode_predict_key" "$inode_usage"
                     check_prediction "$inode_predict_key" "Inode ${mountpoint}" "$inode_usage"
                 fi
@@ -6406,10 +6447,13 @@ main() {
     if [[ ! -f "$FIRST_RUN_FINGERPRINT" ]]; then
         # No fingerprint found — this is truly a first run
         is_first_run=true
-        # Create fingerprint file to mark first run as done
-        echo "$(date '+%Y-%m-%d %H:%M:%S')" > "$FIRST_RUN_FINGERPRINT" 2>/dev/null || true
-        chmod 600 "$FIRST_RUN_FINGERPRINT" 2>/dev/null || true
-        log "INFO" "First run detected (fingerprint created) - using immediate alerts (confirmation=1)"
+        # BUG-3 FIX: Create fingerprint with proper error handling
+        if echo "$(date '+%Y-%m-%d %H:%M:%S')" > "$FIRST_RUN_FINGERPRINT" 2>/dev/null; then
+            chmod 600 "$FIRST_RUN_FINGERPRINT" 2>/dev/null || true
+            log "INFO" "First run detected (fingerprint created at ${FIRST_RUN_FINGERPRINT}) - using immediate alerts (confirmation=1)"
+        else
+            log "WARN" "Failed to create first-run fingerprint at ${FIRST_RUN_FINGERPRINT} - will retry on next run"
+        fi
     elif [[ ! -f "$STATE_FILE" ]]; then
         # Has fingerprint but no state file — state was reset but not first install
         # Log at DEBUG level only to avoid confusion

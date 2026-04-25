@@ -1,7 +1,7 @@
 # Telemon Dockerfile
 # Builds a containerized version of Telemon for monitoring from within Docker
 
-FROM alpine:3.19
+FROM alpine:3.22
 
 # Install required packages
 RUN apk add --no-cache \
