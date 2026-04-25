@@ -62,7 +62,7 @@ check_myfeature() {
 - Key patterns used in checks:
   - `cpu` — CPU load
   - `mem` — Memory usage
-  - `disk_<mount>` — Disk space (mount sanitized: `/` → `root`, `/home` → `_home`)
+  - `disk_<mount>` — Disk space (mount sanitized: `/` → `root`, `/home` → `_home`, etc.; see BUG-4 in TODO.md)
   - `swap` — Swap usage
   - `iowait` — I/O wait
   - `zombies` — Zombie processes
@@ -92,6 +92,8 @@ check_myfeature() {
 ### State File Variants
 ```
 ${STATE_FILE}              — Main state (key=STATE:count)
+${STATE_FILE}.lock         — Lock file (PID timestamp for stale detection)
+${STATE_FILE}.lock.d       — Lock directory (fallback PID-based locking)
 ${STATE_FILE}.cooldown     — Alert rate-limit timestamps (key=epoch)
 ${STATE_FILE}.detail       — State detail text (key=detail_html)
 ${STATE_FILE}.queue        — Queued alerts on Telegram failure
@@ -317,6 +319,19 @@ local key
 key=$(make_state_key "prefix" "$value")
 ```
 
+**sanitize_state_key** — Strips non-alphanumeric characters from state keys:
+```bash
+local safe_name
+safe_name=$(sanitize_state_key "My Service.Name")  # → "my_service_name"
+```
+Uses `tr -c 'a-zA-Z0-9_.-' '_' | tr '[:upper:]' '[:lower:]'` to produce safe state keys. Replaces inline `tr -c` patterns used throughout the codebase for consistent state key sanitization.
+
+**safe_write_state_file** — Atomic state file write with symlink protection:
+```bash
+safe_write_state_file "$file" "$content"
+```
+Creates temp file with `mktemp`, writes content, sets 600 permissions, then atomically moves via `mv -T` (GNU) or with explicit symlink check (BSD fallback). Protects against TOCTOU races and symlink attacks on state files.
+
 **is_valid_number** — Validates positive integers (thresholds, counts):
 ```bash
 is_valid_number "$value" || log "ERROR" "Not a number"
@@ -470,6 +485,10 @@ check_threshold "cpu" "$load_pct" \
 | Predictive Exhaustion | `check_prediction` | `ENABLE_PREDICTIVE_ALERTS` | awk (built-in) |
 | SQLite3 | `check_databases`¹ | `ENABLE_DATABASE_CHECKS` + `DB_SQLITE_PATHS` | sqlite3 |
 | ODBC Databases | `check_odbc` | `ENABLE_ODBC_CHECKS` + `ODBC_CONNECTIONS` | isql (unixODBC) |
+| DNS Records | `check_dns_records` | `ENABLE_DNS_RECORD_CHECK` + `DNS_CHECK_RECORDS` | dig/nslookup/host |
+| Audit Logging | `write_audit_log` | `ENABLE_AUDIT_LOGGING` + `AUDIT_LOG_FILE` | built-in |
+| Status Page | `generate_status_page` | `--generate-status-page` (CLI flag) | built-in |
+| Proxmox Guests | `check_proxmox_guests` | `ENABLE_PROXMOX_CHECK` + `PROXMOX_GUESTS` | qm (Proxmox VE) |
 
 ¹ Part of `check_databases()` function alongside MySQL, PostgreSQL, Redis checks.
 ² Supports any ODBC-compatible database (SQL Server, Oracle, DB2, etc.) via DSN or connection string.
@@ -494,7 +513,7 @@ check_threshold "cpu" "$load_pct" \
 | Heartbeat | `ENABLE_HEARTBEAT`, `HEARTBEAT_MODE`, `HEARTBEAT_URL` |
 | Fleet Monitoring | `ENABLE_FLEET_CHECK`, `FLEET_HEARTBEAT_DIR`, `FLEET_EXPECTED_SERVERS`, `FLEET_STALE_THRESHOLD_MIN`, `FLEET_CRITICAL_MULTIPLIER` |
 | Log Rotation | `LOG_MAX_SIZE_MB` (default: 10), `LOG_MAX_BACKUPS` (default: 5) |
-| Predictive Alerts | `ENABLE_PREDICTIVE_ALERTS`, `PREDICT_HORIZON_HOURS`, `PREDICT_DATAPOINTS`, `PREDICT_MIN_DATAPOINTS` |
+| Predictive Alerts | `ENABLE_PREDICTIVE_ALERTS`, `PREDICT_HORIZON_HOURS`, `PREDICT_HYSTERESIS_HOURS`, `PREDICT_DATAPOINTS`, `PREDICT_MIN_DATAPOINTS` |
 | Config Drift | `ENABLE_DRIFT_DETECTION`, `DRIFT_WATCH_FILES`, `DRIFT_IGNORE_PATTERN`, `DRIFT_MAX_DIFF_LINES`, `DRIFT_SENSITIVE_FILES` |
 
 ## Testing
@@ -532,7 +551,7 @@ The test suite (`tests/run_tests.sh`) covers:
 | **Discovery System** | `cmd_discover`, hardware/infrastructure detection | 77 tests |
 | **Lock Mechanism** | `_is_telemon_process`, `_is_lock_stale`, rate limiting | 12 tests |
 | **First-Run Fingerprint** | Fingerprint file, state reset detection | 7 tests |
-| **Total** | | **391 tests** |
+| **Total** | | **393 tests** |
 
 ## File Conventions
 - Script: `set -euo pipefail`, `umask 077`
