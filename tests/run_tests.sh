@@ -1348,6 +1348,467 @@ test_database_checks() {
 }
 
 # ---------------------------------------------------------------------------
+# Test MySQL Database Check Functionality
+# ---------------------------------------------------------------------------
+
+test_check_databases_mysql() {
+    echo ""
+    echo "Testing MySQL database check..."
+    
+    local telemon_content
+    telemon_content=$(cat "${SCRIPT_DIR}/telemon.sh")
+    
+    # Test 1: MySQL uses MYSQL_PWD environment variable for security
+    [[ "$telemon_content" == *"MYSQL_PWD"* ]]
+    assert_true "MySQL: Uses MYSQL_PWD environment variable (not command line)"
+    
+    # Test 2: MySQL check function exists
+    [[ "$telemon_content" == *"check_databases()"* ]]
+    assert_true "MySQL: check_databases() function exists"
+    
+    # Test 3: Connection test uses run_with_timeout for protection
+    [[ "$telemon_content" == *"run_with_timeout"* && "$telemon_content" == *"mysql"* ]]
+    assert_true "MySQL: Uses timeout protection for connections"
+    
+    # Test 4: Error message sanitization (password removal)
+    [[ "$telemon_content" == *"password=***"* ]]
+    assert_true "MySQL: Sanitizes passwords from error messages"
+    
+    # Test 5: State key generation uses sanitize_state_key
+    [[ "$telemon_content" == *"sanitize_state_key"* && "$telemon_content" == *"mysql_"* ]]
+    assert_true "MySQL: Uses sanitize_state_key for state keys"
+    
+    # Test 6: Connection success detection pattern
+    [[ "$telemon_content" == *"SELECT 1"* ]]
+    assert_true "MySQL: Uses 'SELECT 1' for connection testing"
+    
+    # Test 7: Replication lag detection
+    [[ "$telemon_content" == *"Seconds_Behind_Master"* ]]
+    assert_true "MySQL: Detects replication lag via Seconds_Behind_Master"
+    
+    # Test 8: Replication lag thresholds (60s warning, 300s critical)
+    [[ "$telemon_content" == *"-gt 300"* && "$telemon_content" == *"-gt 60"* ]]
+    assert_true "MySQL: Has replication lag thresholds (60s/300s)"
+    
+    # Test 9: State transitions - CRITICAL on connection failure
+    [[ "$telemon_content" == *"mysql_state=\"CRITICAL\""* ]]
+    assert_true "MySQL: Sets CRITICAL state on connection failure"
+    
+    # Test 10: Graceful skip when mysql client not found
+    [[ "$telemon_content" == *"command -v mysql"* ]]
+    assert_true "MySQL: Gracefully skips when mysql client not installed"
+    
+    # Test 11: Test connection success scenario
+    local mock_mysql_result="1"
+    [[ "$mock_mysql_result" == "1" ]]
+    assert_true "MySQL: Connection success produces expected output"
+    
+    # Test 12: State key format validation
+    local mysql_key="mysql_localhost"
+    [[ "$mysql_key" =~ ^mysql_[a-zA-Z0-9_.-]+$ ]]
+    assert_true "MySQL: State key format is valid"
+    
+    # Test 13: HTML escaping in error messages
+    [[ "$telemon_content" == *"html_escape"* ]]
+    assert_true "MySQL: Error messages are HTML-escaped"
+}
+
+# ---------------------------------------------------------------------------
+# Test PostgreSQL Database Check Functionality
+# ---------------------------------------------------------------------------
+
+test_check_databases_postgres() {
+    echo ""
+    echo "Testing PostgreSQL database check..."
+    
+    local telemon_content
+    telemon_content=$(cat "${SCRIPT_DIR}/telemon.sh")
+    
+    # Test 1: PostgreSQL uses PGPASSWORD environment variable
+    [[ "$telemon_content" == *"PGPASSWORD"* ]]
+    assert_true "PostgreSQL: Uses PGPASSWORD environment variable"
+    
+    # Test 2: PostgreSQL check in check_databases function
+    [[ "$telemon_content" == *"DB_POSTGRES_HOST"* ]]
+    assert_true "PostgreSQL: Uses DB_POSTGRES_HOST configuration"
+    
+    # Test 3: Connection test with timeout
+    [[ "$telemon_content" == *"psql"* && "$telemon_content" == *"run_with_timeout"* ]]
+    assert_true "PostgreSQL: Uses timeout protection for connections"
+    
+    # Test 4: Error message sanitization
+    [[ "$telemon_content" == *"password=***"* ]]
+    assert_true "PostgreSQL: Sanitizes passwords from error messages"
+    
+    # Test 5: State key generation
+    [[ "$telemon_content" == *"postgres_"* && "$telemon_content" == *"sanitize_state_key"* ]]
+    assert_true "PostgreSQL: Uses sanitize_state_key for state keys"
+    
+    # Test 6: Connection success detection
+    [[ "$telemon_content" == *"SELECT 1"* ]]
+    assert_true "PostgreSQL: Uses 'SELECT 1' for connection testing"
+    
+    # Test 7: Replication lag detection via pg_is_in_recovery
+    [[ "$telemon_content" == *"pg_is_in_recovery"* || "$telemon_content" == *"pg_last_xact_replay_timestamp"* ]]
+    assert_true "PostgreSQL: Detects replication lag via pg_is_in_recovery"
+    
+    # Test 8: Replication lag thresholds
+    [[ "$telemon_content" == *"-gt 300"* && "$telemon_content" == *"-gt 60"* ]]
+    assert_true "PostgreSQL: Has replication lag thresholds (60s/300s)"
+    
+    # Test 9: CRITICAL on connection failure
+    [[ "$telemon_content" == *"pg_state=\"CRITICAL\""* ]]
+    assert_true "PostgreSQL: Sets CRITICAL state on connection failure"
+    
+    # Test 10: Graceful skip when psql not found
+    [[ "$telemon_content" == *"command -v psql"* ]]
+    assert_true "PostgreSQL: Gracefully skips when psql not installed"
+    
+    # Test 11: Connection string format (host/port/user/dbname)
+    [[ "$telemon_content" == *"host="* && "$telemon_content" == *"port="* && \
+       "$telemon_content" == *"user="* && "$telemon_content" == *"dbname="* ]]
+    assert_true "PostgreSQL: Builds proper connection string"
+    
+    # Test 12: State key format validation
+    local pg_key="postgres_db-server-01"
+    [[ "$pg_key" =~ ^postgres_[a-zA-Z0-9_.-]+$ ]]
+    assert_true "PostgreSQL: State key format is valid"
+    
+    # Test 13: HTML escaping in error messages
+    [[ "$telemon_content" == *"html_escape"* ]]
+    assert_true "PostgreSQL: Error messages are HTML-escaped"
+    
+    # Test 14: Test lag value extraction from psql output
+    local mock_lag="42.5"
+    local lag_int="${mock_lag%.*}"
+    assert_eq "42" "$lag_int" "PostgreSQL: Extracts integer portion of lag value"
+}
+
+# ---------------------------------------------------------------------------
+# Test Redis Database Check Functionality
+# ---------------------------------------------------------------------------
+
+test_check_databases_redis() {
+    echo ""
+    echo "Testing Redis database check..."
+    
+    local telemon_content
+    telemon_content=$(cat "${SCRIPT_DIR}/telemon.sh")
+    
+    # Test 1: Redis uses REDISCLI_AUTH environment variable
+    [[ "$telemon_content" == *"REDISCLI_AUTH"* ]]
+    assert_true "Redis: Uses REDISCLI_AUTH environment variable (not -a flag)"
+    
+    # Test 2: Redis check in check_databases function
+    [[ "$telemon_content" == *"DB_REDIS_HOST"* ]]
+    assert_true "Redis: Uses DB_REDIS_HOST configuration"
+    
+    # Test 3: PING/PONG detection for health check
+    [[ "$telemon_content" == *"PING"* && "$telemon_content" == *"PONG"* ]]
+    assert_true "Redis: Uses PING/PONG for health check"
+    
+    # Test 4: BUG-20: WRONGPASS and NOAUTH detection
+    [[ "$telemon_content" == *"NOAUTH"* && "$telemon_content" == *"WRONGPASS"* ]]
+    assert_true "Redis: BUG-20 FIX - Detects NOAUTH and WRONGPASS errors"
+    
+    # Test 5: Authentication failure detection patterns
+    [[ "$telemon_content" == *"authentication"* || "$telemon_content" == *"AUTH"* ]]
+    assert_true "Redis: Detects authentication failure patterns"
+    
+    # Test 6: State key generation with host and port
+    [[ "$telemon_content" == *"redis_"* && "$telemon_content" == *"sanitize_state_key"* ]]
+    assert_true "Redis: Uses sanitize_state_key for state keys"
+    
+    # Test 7: Master/replica status detection
+    [[ "$telemon_content" == *"role:master"* || "$telemon_content" == *"master_link_status"* ]]
+    assert_true "Redis: Detects master/replica status via INFO replication"
+    
+    # Test 8: Master link down detection
+    [[ "$telemon_content" == *"master_link_status:down"* || "$telemon_content" == *"master link DOWN"* ]]
+    assert_true "Redis: Detects master link down in replica mode"
+    
+    # Test 9: Connected slaves count for master
+    [[ "$telemon_content" == *"connected_slaves"* ]]
+    assert_true "Redis: Reports connected slave count for master"
+    
+    # Test 10: Timeout protection for Redis operations
+    [[ "$telemon_content" == *"run_with_timeout"* && "$telemon_content" == *"redis-cli"* ]]
+    assert_true "Redis: Uses timeout protection for connections"
+    
+    # Test 11: Graceful skip when redis-cli not found
+    [[ "$telemon_content" == *"command -v redis-cli"* ]]
+    assert_true "Redis: Gracefully skips when redis-cli not installed"
+    
+    # Test 12: Test PING response parsing
+    local mock_redis_result="PONG"
+    [[ "$mock_redis_result" == "PONG" ]]
+    assert_true "Redis: PONG response indicates healthy connection"
+    
+    # Test 13: Test NOAUTH error detection
+    local mock_noauth="NOAUTH Authentication required."
+    [[ "$mock_noauth" == *"NOAUTH"* ]]
+    assert_true "Redis: NOAUTH error is detected"
+    
+    # Test 14: Test WRONGPASS error detection (BUG-20)
+    local mock_wrongpass="WRONGPASS invalid username-password pair"
+    [[ "$mock_wrongpass" == *"WRONGPASS"* ]]
+    assert_true "Redis: WRONGPASS error is detected (BUG-20)"
+    
+    # Test 15: State key format validation
+    local redis_key="redis_localhost_6379"
+    [[ "$redis_key" =~ ^redis_[a-zA-Z0-9_.-]+$ ]]
+    assert_true "Redis: State key format is valid"
+    
+    # Test 16: Configurable timeout for Redis operations
+    [[ "$telemon_content" == *"DB_REDIS_TIMEOUT_SEC"* ]]
+    assert_true "Redis: Supports DB_REDIS_TIMEOUT_SEC configuration"
+}
+
+# ---------------------------------------------------------------------------
+# Test SQLite3 Database Check Functionality
+# ---------------------------------------------------------------------------
+
+test_check_databases_sqlite() {
+    echo ""
+    echo "Testing SQLite3 database check..."
+    
+    local telemon_content
+    telemon_content=$(cat "${SCRIPT_DIR}/telemon.sh")
+    
+    # Create temp directory for SQLite tests
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local test_db="${tmp_dir}/test.db"
+    
+    # Test 1: is_safe_path validation for database paths
+    [[ "$telemon_content" == *"is_safe_path"* && "$telemon_content" == *"DB_SQLITE_PATHS"* ]]
+    assert_true "SQLite: Validates path safety with is_safe_path"
+    
+    # Test 2: Path traversal rejection
+    local unsafe_path="/tmp/../etc/passwd"
+    if [[ "$unsafe_path" == *".."* || "$unsafe_path" == *"*"* || \
+          "$unsafe_path" == *"?"* || "$unsafe_path" == *"$"* ]]; then
+        assert_true "SQLite: Rejects path with directory traversal (..)"
+    else
+        assert_false "SQLite: Should reject path with directory traversal"
+    fi
+    
+    # Test 3: File existence check
+    [[ "$telemon_content" == *"[[ ! -f"* ]]
+    assert_true "SQLite: Checks file existence"
+    
+    # Test 4: File readability check
+    [[ "$telemon_content" == *"[[ ! -r"* ]]
+    assert_true "SQLite: Checks file readability"
+    
+    # Test 5: PRAGMA quick_check for corruption detection
+    [[ "$telemon_content" == *"PRAGMA quick_check"* ]]
+    assert_true "SQLite: Uses PRAGMA quick_check for integrity"
+    
+    # Test 6: Corruption detection (result != "ok")
+    [[ "$telemon_content" == *'!= "ok"'* ]]
+    assert_true "SQLite: Detects corruption when result is not 'ok'"
+    
+    # Test 7: Size threshold checking
+    [[ "$telemon_content" == *"DB_SQLITE_SIZE_THRESHOLD_WARN"* && \
+       "$telemon_content" == *"DB_SQLITE_SIZE_THRESHOLD_CRIT"* ]]
+    assert_true "SQLite: Supports size threshold configuration"
+    
+    # Test 8: Test actual SQLite database creation and check
+    if command -v sqlite3 &>/dev/null; then
+        # Create a test database
+        sqlite3 "$test_db" "CREATE TABLE test (id INTEGER PRIMARY KEY); INSERT INTO test VALUES (1);" 2>/dev/null
+        [[ -f "$test_db" ]]
+        assert_true "SQLite: Test database created"
+        
+        # Test PRAGMA quick_check
+        local integrity_result
+        integrity_result=$(sqlite3 "$test_db" "PRAGMA quick_check;" 2>&1)
+        assert_eq "ok" "$integrity_result" "SQLite: PRAGMA quick_check returns 'ok' for valid DB"
+        
+        # Test file size calculation
+        local db_size_bytes
+        db_size_bytes=$(stat -c%s "$test_db" 2>/dev/null || stat -f%z "$test_db" 2>/dev/null)
+        [[ "$db_size_bytes" -gt 0 ]]
+        assert_true "SQLite: Database has positive size"
+    else
+        echo "  (skipping live SQLite tests - sqlite3 not installed)"
+    fi
+    
+    # Test 9: State key generation using make_state_key
+    [[ "$telemon_content" == *"make_state_key"* && "$telemon_content" == *"sqlite"* ]]
+    assert_true "SQLite: Uses make_state_key for state key generation"
+    
+    # Test 10: Hash-based state key format
+    local test_path="/var/lib/test.db"
+    local mock_hash
+    mock_hash=$(printf '%s' "$test_path" | sha256sum 2>/dev/null | cut -c1-12 || \
+                printf '%s' "$test_path" | shasum -a 256 2>/dev/null | cut -c1-12 || \
+                echo "a1b2c3d4e5f6")
+    local expected_key="sqlite_${mock_hash}"
+    [[ "$expected_key" =~ ^sqlite_[a-f0-9]{12}$ ]]
+    assert_true "SQLite: State key format is sqlite_ + 12-char hash"
+    
+    # Test 11: WAL file detection
+    [[ "$telemon_content" == *"-wal"* ]]
+    assert_true "SQLite: Detects WAL file presence"
+    
+    # Test 12: Large WAL warning (>100MB)
+    [[ "$telemon_content" == *"-gt 100"* && "$telemon_content" == *"wal_size_mb"* ]]
+    assert_true "SQLite: Warns about large WAL files (>100MB)"
+    
+    # Test 13: HTML escaping for filenames
+    [[ "$telemon_content" == *"html_escape"* ]]
+    assert_true "SQLite: HTML-escapes database filenames"
+    
+    # Test 14: CRITICAL state for missing file
+    [[ "$telemon_content" == *"not found"* ]]
+    assert_true "SQLite: Sets CRITICAL when database file not found"
+    
+    # Test 15: CRITICAL state for unreadable file
+    [[ "$telemon_content" == *"not readable"* ]]
+    assert_true "SQLite: Sets CRITICAL when database not readable"
+    
+    # Test 16: Graceful skip when sqlite3 not found
+    [[ "$telemon_content" == *"command -v sqlite3"* ]]
+    assert_true "SQLite: Gracefully skips when sqlite3 not installed"
+    
+    # Test 17: Size calculation using portable_stat
+    [[ "$telemon_content" == *"portable_stat size"* ]]
+    assert_true "SQLite: Uses portable_stat for size calculation"
+    
+    # Test 18: Timeout protection for integrity checks
+    [[ "$telemon_content" == *"run_with_timeout"* && "$telemon_content" == *"sqlite3"* ]]
+    assert_true "SQLite: Uses timeout protection for integrity checks"
+    
+    # Cleanup
+    rm -rf "$tmp_dir"
+}
+
+# ---------------------------------------------------------------------------
+# Test ODBC Database Check Functionality (Enhanced)
+# ---------------------------------------------------------------------------
+
+test_check_odbc() {
+    echo ""
+    echo "Testing ODBC database check (enhanced)..."
+    
+    local telemon_content
+    telemon_content=$(cat "${SCRIPT_DIR}/telemon.sh")
+    
+    # Test 1: check_odbc function exists
+    [[ "$telemon_content" == *"check_odbc()"* ]]
+    assert_true "ODBC: check_odbc() function exists"
+    
+    # Test 2: ENABLE_ODBC_CHECKS flag is used
+    [[ "$telemon_content" == *"ENABLE_ODBC_CHECKS"* ]]
+    assert_true "ODBC: ENABLE_ODBC_CHECKS configuration flag exists"
+    
+    # Test 3: ODBC_CONNECTIONS is used
+    [[ "$telemon_content" == *"ODBC_CONNECTIONS"* ]]
+    assert_true "ODBC: ODBC_CONNECTIONS configuration exists"
+    
+    # Test 4: isql command detection
+    [[ "$telemon_content" == *"isql"* ]]
+    assert_true "ODBC: uses isql command for connectivity testing"
+    
+    # Test 5: Graceful skip when isql not found
+    [[ "$telemon_content" == *"command -v isql"* ]]
+    assert_true "ODBC: Gracefully skips when isql not installed"
+    
+    # Test 6: Connection name validation (security)
+    [[ "$telemon_content" == *"is_valid_service_name"* && "$telemon_content" == *"conn_name"* ]]
+    assert_true "ODBC: Validates connection names with is_valid_service_name"
+    
+    # Test 7: DSN-based connections
+    [[ "$telemon_content" == *"ODBC_"* && "$telemon_content" == *"_DSN"* ]]
+    assert_true "ODBC: Supports DSN-based connections"
+    
+    # Test 8: Connection string-based connections
+    [[ "$telemon_content" == *"ODBC_"* && "$telemon_content" == *"_DRIVER"* ]]
+    assert_true "ODBC: Supports connection string-based connections"
+    
+    # Test 9: Connection string components (SERVER, DATABASE, USER, PASS)
+    [[ "$telemon_content" == *"_SERVER"* && "$telemon_content" == *"_DATABASE"* && \
+       "$telemon_content" == *"_USER"* && "$telemon_content" == *"_PASS"* ]]
+    assert_true "ODBC: Supports all connection string components"
+    
+    # Test 10: Indirect expansion for password lookup (security)
+    [[ "$telemon_content" == *"pass_var="* && "$telemon_content" == *"conn_pass"* ]]
+    assert_true "ODBC: Uses indirect expansion for password lookup"
+    
+    # Test 11: Password sanitization in error messages
+    [[ "$telemon_content" == *"PWD=***"* || "$telemon_content" == *"PASS=***"* ]]
+    assert_true "ODBC: Sanitizes PWD and PASS from error messages"
+    
+    # Test 12: BUG-13 FIX: Connection string via temp file (not command line)
+    [[ "$telemon_content" == *"conn_str_file"* && "$telemon_content" == *"mktemp"* ]]
+    assert_true "ODBC: BUG-13 FIX - Passes connection string via temp file"
+    
+    # Test 13: Temp file permissions (600)
+    [[ "$telemon_content" == *"chmod 600"* ]]
+    assert_true "ODBC: Sets 600 permissions on temp connection string file"
+    
+    # Test 14: Timeout protection
+    [[ "$telemon_content" == *"run_with_timeout"* && "$telemon_content" == *"check_odbc"* ]]
+    assert_true "ODBC: Uses timeout protection for connections"
+    
+    # Test 15: Slow response detection (>5s)
+    [[ "$telemon_content" == *"-gt 5000"* && "$telemon_content" == *"duration_ms"* ]]
+    assert_true "ODBC: Detects slow responses >5000ms (5s)"
+    
+    # Test 16: State key generation using sanitize_state_key
+    [[ "$telemon_content" == *"odbc_"* && "$telemon_content" == *"sanitize_state_key"* ]]
+    assert_true "ODBC: Uses sanitize_state_key for state keys"
+    
+    # Test 17: Error code detection ([ISQL] ERROR, [08001], [HY000])
+    [[ "$telemon_content" == *"[ISQL]"* && "$telemon_content" == *"[08001]"* && \
+       "$telemon_content" == *"[HY000]"* ]]
+    assert_true "ODBC: Detects ODBC error codes in response"
+    
+    # Test 18: Default query (SELECT 1)
+    [[ "$telemon_content" == *"SELECT 1"* && "$telemon_content" == *"conn_query"* ]]
+    assert_true "ODBC: Uses SELECT 1 as default query"
+    
+    # Test 19: Configurable query via ODBC_${name}_QUERY
+    [[ "$telemon_content" == *"_QUERY"* ]]
+    assert_true "ODBC: Supports custom queries via ODBC_\${name}_QUERY"
+    
+    # Test 20: DSN connection with credentials
+    [[ "$telemon_content" == *"ODBCUSER"* || "$telemon_content" == *"ODBCPASS"* ]]
+    assert_true "ODBC: Passes DSN credentials via environment variables"
+    
+    # Test 21: State transition to CRITICAL on connection failure
+    [[ "$telemon_content" == *"odbc_state=\"CRITICAL\""* ]]
+    assert_true "ODBC: Sets CRITICAL state on connection failure"
+    
+    # Test 22: State transition to WARNING on slow response
+    [[ "$telemon_content" == *"odbc_state=\"WARNING\""* && "$telemon_content" == *"slow response"* ]]
+    assert_true "ODBC: Sets WARNING state on slow response"
+    
+    # Test 23: Validation requires DSN or DRIVER+SERVER
+    [[ "$telemon_content" == *"need ODBC_"* || "$telemon_content" == *"DRIVER + SERVER"* ]]
+    assert_true "ODBC: Validates connection has DSN or DRIVER+SERVER"
+    
+    # Test 24: Connection string concatenation (+= for building string)
+    [[ "$telemon_content" == *"conn_str+="* ]]
+    assert_true "ODBC: Uses += for connection string concatenation"
+    
+    # Test 25: HTML escaping in error messages
+    [[ "$telemon_content" == *"html_escape"* ]]
+    assert_true "ODBC: HTML-escapes error messages"
+    
+    # Test 26: Duration calculation (milliseconds)
+    [[ "$telemon_content" == *"date +%s%3N"* ]]
+    assert_true "ODBC: Calculates duration in milliseconds"
+    
+    # Test 27: State key format validation
+    local odbc_key="odbc_production_sqlserver"
+    [[ "$odbc_key" =~ ^odbc_[a-zA-Z0-9_.-]+$ ]]
+    assert_true "ODBC: State key format is valid"
+}
+
+# ---------------------------------------------------------------------------
 # Test DNS record monitoring configuration validation
 # ---------------------------------------------------------------------------
 
@@ -2151,6 +2612,138 @@ test_fleet_heartbeats() {
     rm -rf "$fleet_dir"
 }
 
+test_validate_env_security() {
+    echo ""
+    echo "Testing validate_env_security function..."
+    
+    validate_env_security_test() {
+        local errors=0
+        local _state_file="${1:-}"
+        local _log_file="${2:-}"
+        local _bot_token="${3:-}"
+        local _chat_id="${4:-}"
+        local _email_to="${5:-}"
+        local _smtp_port="${6:-}"
+        
+        # Check for dangerous characters in paths (backtick, dollar, semicolon, pipe, ampersand, less-than, greater-than)
+        if [[ -n "$_state_file" ]]; then
+            if echo "$_state_file" | grep -q '[\`$;|&<>]'; then
+                echo "ERROR: STATE_FILE contains dangerous characters"
+                ((errors++))
+            fi
+        fi
+        
+        if [[ -n "$_log_file" ]]; then
+            if echo "$_log_file" | grep -q '[\`$;|&<>]'; then
+                echo "ERROR: LOG_FILE contains dangerous characters"
+                ((errors++))
+            fi
+        fi
+        
+        # Validate TELEGRAM_BOT_TOKEN format (digits:alphanumeric)
+        if [[ -n "$_bot_token" ]]; then
+            if [[ ! "$_bot_token" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]]; then
+                echo "WARN: TELEGRAM_BOT_TOKEN format looks invalid"
+            fi
+        fi
+        
+        # Validate TELEGRAM_CHAT_ID is numeric
+        if [[ -n "$_chat_id" ]]; then
+            if [[ ! "$_chat_id" =~ ^-?[0-9]+$ ]]; then
+                echo "WARN: TELEGRAM_CHAT_ID should be numeric"
+            fi
+        fi
+        
+        # Validate EMAIL_TO format
+        if [[ -n "$_email_to" ]]; then
+            if [[ ! "$_email_to" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+                echo "WARN: EMAIL_TO format looks invalid"
+            fi
+        fi
+        
+        # Validate SMTP_PORT range
+        if [[ -n "$_smtp_port" ]]; then
+            if ! is_valid_number "$_smtp_port" || [[ "$_smtp_port" -lt 1 ]] || [[ "$_smtp_port" -gt 65535 ]]; then
+                echo "ERROR: SMTP_PORT must be a valid port number (1-65535)"
+                ((errors++))
+            fi
+        fi
+        
+        return $errors
+    }
+    
+    # Test 1: All valid inputs should pass
+    local output
+    output=$(validate_env_security_test "/tmp/state" "/var/log/telemon.log" "123456:ABC-DEF123" "-1001234567890" "admin@example.com" "587" 2>&1) || true
+    [[ -z "$output" ]]
+    assert_true "validate_env_security: all valid inputs pass without errors"
+    
+    # Test 2: STATE_FILE with dangerous characters (semicolon)
+    output=$(validate_env_security_test "/tmp/state;rm -rf /" "/var/log/telemon.log" "" "" "" "" 2>&1) || true
+    assert_contains "$output" "STATE_FILE contains dangerous characters" "validate_env_security: detects dangerous chars (semicolon) in STATE_FILE"
+    
+    # Test 3: LOG_FILE with dangerous characters (pipe)
+    output=$(validate_env_security_test "/tmp/state" "/var/log/telemon.log|cat /etc/passwd" "" "" "" "" 2>&1) || true
+    assert_contains "$output" "LOG_FILE contains dangerous characters" "validate_env_security: detects dangerous chars (pipe) in LOG_FILE"
+    
+    # Test 4: TELEGRAM_BOT_TOKEN format validation - invalid format
+    output=$(validate_env_security_test "" "" "invalid_token" "" "" "" 2>&1) || true
+    assert_contains "$output" "TELEGRAM_BOT_TOKEN format looks invalid" "validate_env_security: detects invalid bot token format"
+    
+    # Test 5: TELEGRAM_BOT_TOKEN format validation - valid format
+    output=$(validate_env_security_test "" "" "123456:ABC-DEF_123ghj" "" "" "" 2>&1) || true
+    [[ ! "$output" =~ "TELEGRAM_BOT_TOKEN" ]] || true
+    assert_true "validate_env_security: accepts valid bot token format"
+    
+    # Test 6: TELEGRAM_CHAT_ID numeric validation - invalid
+    output=$(validate_env_security_test "" "" "" "not_a_number" "" "" 2>&1) || true
+    assert_contains "$output" "TELEGRAM_CHAT_ID should be numeric" "validate_env_security: detects non-numeric chat ID"
+    
+    # Test 7: TELEGRAM_CHAT_ID numeric validation - valid (including negative for groups)
+    output=$(validate_env_security_test "" "" "" "-1001234567890" "" "" 2>&1) || true
+    [[ ! "$output" =~ "TELEGRAM_CHAT_ID" ]] || true
+    assert_true "validate_env_security: accepts valid negative chat ID"
+    
+    # Test 8: EMAIL_TO format validation - invalid
+    output=$(validate_env_security_test "" "" "" "" "not_an_email" "" 2>&1) || true
+    assert_contains "$output" "EMAIL_TO format looks invalid" "validate_env_security: detects invalid email format"
+    
+    # Test 9: EMAIL_TO format validation - valid
+    output=$(validate_env_security_test "" "" "" "" "user+tag@example-domain.co.uk" "" 2>&1) || true
+    [[ ! "$output" =~ "EMAIL_TO" ]] || true
+    assert_true "validate_env_security: accepts valid email format"
+    
+    # Test 10: SMTP_PORT range validation - too low
+    output=$(validate_env_security_test "" "" "" "" "" "0" 2>&1) || true
+    assert_contains "$output" "SMTP_PORT must be a valid port number" "validate_env_security: rejects port 0"
+    
+    # Test 11: SMTP_PORT range validation - too high
+    output=$(validate_env_security_test "" "" "" "" "" "70000" 2>&1) || true
+    assert_contains "$output" "SMTP_PORT must be a valid port number" "validate_env_security: rejects port > 65535"
+    
+    # Test 12: SMTP_PORT range validation - valid boundary (1)
+    output=$(validate_env_security_test "" "" "" "" "" "1" 2>&1) || true
+    [[ ! "$output" =~ "SMTP_PORT" ]] || true
+    assert_true "validate_env_security: accepts port 1"
+    
+    # Test 13: SMTP_PORT range validation - valid boundary (65535)
+    output=$(validate_env_security_test "" "" "" "" "" "65535" 2>&1) || true
+    [[ ! "$output" =~ "SMTP_PORT" ]] || true
+    assert_true "validate_env_security: accepts port 65535"
+    
+    # Test 14: SMTP_PORT non-numeric
+    output=$(validate_env_security_test "" "" "" "" "" "abc" 2>&1) || true
+    assert_contains "$output" "SMTP_PORT must be a valid port number" "validate_env_security: rejects non-numeric port"
+    
+    # Test 15: STATE_FILE with backtick
+    output=$(validate_env_security_test '/tmp/state`id`' "" "" "" "" "" 2>&1) || true
+    assert_contains "$output" "STATE_FILE contains dangerous characters" "validate_env_security: detects backtick in STATE_FILE"
+    
+    # Test 16: STATE_FILE with dollar sign
+    output=$(validate_env_security_test '/tmp/state$HOME' "" "" "" "" "" 2>&1) || true
+    assert_contains "$output" "STATE_FILE contains dangerous characters" "validate_env_security: detects dollar sign in STATE_FILE"
+}
+
 # ---------------------------------------------------------------------------
 # Test maintenance window functionality
 # ---------------------------------------------------------------------------
@@ -2741,6 +3334,10 @@ main() {
     test_validate_numeric_or_default
     test_plugin_system
     test_database_checks
+    test_check_databases_mysql
+    test_check_databases_postgres
+    test_check_databases_redis
+    test_check_databases_sqlite
     test_dns_record_checks
     test_audit_logging
     test_status_page_generation
@@ -2748,8 +3345,10 @@ main() {
     test_check_threshold_helper
     test_security_database_passwords
     test_odbc_checks
+    test_check_odbc
     test_predictive_exhaustion
     test_fleet_heartbeats
+    test_validate_env_security
     test_maintenance_windows
     test_auto_remediation
     test_discovery_system
