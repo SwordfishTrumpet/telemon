@@ -894,14 +894,18 @@ check_state_change() {
         if [[ "$ALERT_COOLDOWN_SEC" -gt 0 ]] && [[ "$time_since_last" -lt "$ALERT_COOLDOWN_SEC" ]]; then
             log "DEBUG" "Rate limited alert for ${key}: cooldown active (${ALERT_COOLDOWN_SEC}s)"
         else
-            local emoji=""
-            case "$new_state" in
-                CRITICAL) emoji="&#128308;" ;;  # Red circle
-                WARNING)  emoji="&#128992;" ;;  # Orange circle
-                OK)       emoji="&#128994;" ;;  # Green circle
-            esac
-            
-            ALERTS+="${emoji} <b>${key}</b>: ${detail}%0A%0A"
+            # Skip OK/recovery alerts - only alert on problems
+            if [[ "$new_state" == "OK" ]]; then
+                log "DEBUG" "Skipping OK alert for ${key} (recovery alerts disabled)"
+            else
+                local emoji=""
+                case "$new_state" in
+                    CRITICAL) emoji="&#128308;" ;;  # Red circle
+                    WARNING)  emoji="&#128992;" ;;  # Orange circle
+                esac
+                
+                ALERTS+="${emoji} <b>${key}</b>: ${detail}%0A%0A"
+            fi
             ALERT_LAST_SENT["$key"]="$now_epoch"
             log "INFO" "State change confirmed for ${key}: ${prev_state} -> ${new_state} (count: ${PREV_COUNT[$key]})"
             
@@ -6587,11 +6591,8 @@ main() {
 
     # On first run, send a single bootstrap message instead of per-item alerts
     if [[ "$is_first_run" == "true" ]]; then
-        local header="<b>&#128421; [${SERVER_LABEL}] Telemon Initialized</b>%0A"
-        header+="<i>$(date '+%Y-%m-%d %H:%M:%S %Z')</i>%0A%0A"
-        header+="<b>Summary:</b> &#128308; ${crit_count} critical | &#128992; ${warn_count} warning | &#128994; ${ok_count} healthy%0A"
-        header+="Confirmation count: ${saved_confirm_count} (alerts require ${saved_confirm_count} consecutive matches)%0A"
-        header+="-----------------------------%0A%0A"
+        local first_msg="<b>&#128421; [${SERVER_LABEL}] Telemon Initialized</b>%0A"
+        first_msg+="<i>$(date '+%Y-%m-%d %H:%M:%S %Z')</i>%0A%0A"
 
         # On first run, only report non-OK items
         local first_alerts=""
@@ -6607,12 +6608,12 @@ main() {
         done
 
         if [[ -n "$first_alerts" ]]; then
-            header+="${first_alerts}"
+            first_msg+="${first_alerts}"
         else
-            header+="&#9989; All ${ok_count} checks passed. Monitoring active.%0A"
+            first_msg+="&#9989; All ${ok_count} checks passed. Monitoring active.%0A"
         fi
 
-        dispatch_with_retry "$header"
+        dispatch_with_retry "$first_msg"
         log "INFO" "First run: bootstrap message sent (${crit_count}C/${warn_count}W/${ok_count}OK)"
 
     elif [[ -n "$ALERTS" ]]; then
@@ -6620,10 +6621,7 @@ main() {
         local header="<b>&#128421; [${SERVER_LABEL}] System Vital Alert</b>%0A"
         header+="<i>$(date '+%Y-%m-%d %H:%M:%S %Z')</i>%0A%0A"
 
-        local summary="<b>Summary:</b> &#128308; ${crit_count} critical | &#128992; ${warn_count} warning | &#128994; ${ok_count} healthy%0A"
-        summary+="-----------------------------%0A%0A"
-
-        local full_message="${header}${summary}${ALERTS}"
+        local full_message="${header}${ALERTS}"
         
         # Append top processes info if available
         if [[ -n "$TOP_PROCESSES_INFO" ]]; then
