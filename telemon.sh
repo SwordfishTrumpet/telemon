@@ -820,6 +820,30 @@ safe_write_state_file() {
     fi
 }
 
+# ===========================================================================
+# Container Detection Helpers
+# ===========================================================================
+is_lxc_container() {
+    # Detect if running inside an LXC container using multiple methods
+    # Method 1: Check cgroups for LXC indicators (cgroup v1 or legacy v2)
+    if [[ -f /proc/1/cgroup ]]; then
+        if grep -qE 'lxc|lxc\.payload|lxc\.monitor' /proc/1/cgroup 2>/dev/null; then
+            return 0
+        fi
+    fi
+    # Method 2: Environment variable set by some LXC configurations
+    if [[ -n "${container:-}" ]] && [[ "$container" == "lxc" ]]; then
+        return 0
+    fi
+    # Method 3: systemd-detect-virt (most reliable, available on systemd systems)
+    if command -v systemd-detect-virt &>/dev/null; then
+        if [[ "$(systemd-detect-virt 2>/dev/null)" == "lxc" ]]; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
 check_state_change() {
     local key="$1"
     local new_state="$2"
@@ -1480,6 +1504,12 @@ check_internet() {
 # CHECK: Swap Usage
 # ===========================================================================
 check_swap() {
+    # Skip in LXC containers - swap is shared with host and not actionable
+    if is_lxc_container; then
+        log "DEBUG" "Swap check: LXC container detected — skipping (swap is host-managed)"
+        return
+    fi
+
     local swap_total swap_used swap_pct
     
     # Read swap info from /proc/swaps
