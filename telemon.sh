@@ -6646,24 +6646,29 @@ main() {
         dispatch_with_retry "$first_msg"
         log "INFO" "First run: bootstrap message sent (${crit_count}C/${warn_count}W/${ok_count}OK)"
 
-    elif [[ -n "$ALERTS" ]]; then
-        # Normal run -- dispatch accumulated state-change alerts
-        local header="<b>&#128421; [${SERVER_LABEL}] System Vital Alert</b>%0A"
-        header+="<i>$(date '+%Y-%m-%d %H:%M:%S %Z')</i>%0A%0A"
-
-        local full_message="${header}${ALERTS}"
-        
-        # Append top processes info if available
-        if [[ -n "$TOP_PROCESSES_INFO" ]]; then
-            # Convert literal newlines to %0A encoding for Telegram message format
-            local encoded_top_procs="${TOP_PROCESSES_INFO//$'\n'/%0A}"
-            full_message+="%0A<b>Process Details:</b>%0A${encoded_top_procs}"
-        fi
-
-        dispatch_with_retry "$full_message"
-        log "INFO" "Alert dispatched (${crit_count}C/${warn_count}W/${ok_count}OK)"
     else
-        log "INFO" "No confirmed state changes detected -- no alerts sent"
+        # Normal run -- dispatch accumulated state-change alerts
+        # Strip encoded newlines (%0A) and whitespace to check for actual content
+        local alerts_stripped="${ALERTS//%0A/}"
+        alerts_stripped="${alerts_stripped// /}"
+        if [[ -n "$alerts_stripped" ]]; then
+            local header="<b>&#128421; [${SERVER_LABEL}] System Vital Alert</b>%0A"
+            header+="<i>$(date '+%Y-%m-%d %H:%M:%S %Z')</i>%0A%0A"
+
+            local full_message="${header}${ALERTS}"
+
+            # Append top processes info if available
+            if [[ -n "$TOP_PROCESSES_INFO" ]]; then
+                # Convert literal newlines to %0A encoding for Telegram message format
+                local encoded_top_procs="${TOP_PROCESSES_INFO//$'\n'/%0A}"
+                full_message+="%0A<b>Process Details:</b>%0A${encoded_top_procs}"
+            fi
+
+            dispatch_with_retry "$full_message"
+            log "INFO" "Alert dispatched (${crit_count}C/${warn_count}W/${ok_count}OK)"
+        else
+            log "INFO" "No confirmed state changes detected -- no alerts sent"
+        fi
     fi
 
     # Post-dispatch: exports and escalation
