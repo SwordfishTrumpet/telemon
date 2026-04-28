@@ -3,6 +3,9 @@
 # Monitors /dev/sda which contains Proxmox OS
 # Output format: STATE|KEY|DETAIL
 
+# Source shared helpers for is_valid_number and other validation functions
+source /opt/telemon/lib/common.sh
+
 DEVICE="/dev/sda"
 
 # Check if smartctl is available

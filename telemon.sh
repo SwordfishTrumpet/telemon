@@ -3883,19 +3883,19 @@ check_proxmox_tasks() {
     fi
 
     local task_minutes="${PROXMOX_TASK_MINUTES:-60}"
-    local task_warn="${PROXMOX_TASK_WARN:-0}"
+    local task_warn="${PROXMOX_TASK_WARN:-1}"
     local task_crit="${PROXMOX_TASK_CRIT:-1}"
 
     local failed_tasks
     failed_tasks=$(run_with_timeout "$CHECK_TIMEOUT" pvesh get "/cluster/tasks" --output-format json 2>/dev/null | grep -c "FAILED\|ERROR" || echo "0")
     failed_tasks=$(echo "$failed_tasks" | head -1 | tr -d '\n')
 
-    if [[ "$failed_tasks" -ge "$task_crit" ]]; then
+    if [[ "$failed_tasks" -ge "$task_crit" && "$task_crit" -gt 0 ]]; then
         check_state_change "proxmox_tasks" "CRITICAL" "<b>${failed_tasks}</b> failed task(s) in task log"
-    elif [[ "$failed_tasks" -ge "$task_warn" ]]; then
+    elif [[ "$failed_tasks" -ge "$task_warn" && "$task_warn" -gt 0 ]]; then
         check_state_change "proxmox_tasks" "WARNING" "<b>${failed_tasks}</b> failed task(s) in task log"
     else
-        check_state_change "proxmox_tasks" "OK" "No failed tasks detected"
+        check_state_change "proxmox_tasks" "OK" "No failed tasks in last ${task_minutes}min"
     fi
 }
 
@@ -6493,19 +6493,18 @@ main() {
         local header="<b>&#128421; [${SERVER_LABEL}] System Vital Alert</b>%0A"
         header+="<i>$(date '+%Y-%m-%d %H:%M:%S %Z')</i>%0A%0A"
 
-        # List all non-OK states (not just newly confirmed ones)
-        local all_issues=""
+        # List all non-OK states sorted by severity (CRITICAL first, then WARNING)
+        local critical_issues=""
+        local warning_issues=""
         for key in "${!CURR_STATE[@]}"; do
             local state="${CURR_STATE[$key]}"
-            if [[ "$state" != "OK" ]]; then
-                local emoji=""
-                case "$state" in
-                    CRITICAL) emoji="&#128308;" ;;
-                    WARNING)  emoji="&#128992;" ;;
-                esac
-                all_issues+="${emoji} <b>${key}</b>: ${STATE_DETAIL[$key]:-$state}%0A%0A"
+            if [[ "$state" == "CRITICAL" ]]; then
+                critical_issues+="&#128308; <b>${key}</b>: ${STATE_DETAIL[$key]:-$state}%0A"
+            elif [[ "$state" == "WARNING" ]]; then
+                warning_issues+="&#128992; <b>${key}</b>: ${STATE_DETAIL[$key]:-$state}%0A"
             fi
         done
+        local all_issues="${critical_issues}${warning_issues}"
 
         local full_message="${header}${all_issues}"
         
