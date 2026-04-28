@@ -747,20 +747,24 @@ generate_smart_thresholds() {
     local cores
     cores=$(_get_cpu_cores)
     
+    # Convert to integers for comparison (handle floating point like "8.0")
+    local total_mem_int
+    total_mem_int=$(echo "$total_mem_gb" | cut -d. -f1)
+    
     local thresholds=""
     thresholds+="# Smart Thresholds (based on system specs: ${total_mem_gb}GB RAM, ${cores} cores)"
     thresholds+=$'\n'
     
     # Memory thresholds based on total RAM
     # More RAM = lower threshold percentages (same absolute safety margin)
-    if [[ "$total_mem_gb" -ge 32 ]]; then
+    if [[ "$total_mem_int" -ge 32 ]]; then
         thresholds+="# High memory system - using generous thresholds"
         thresholds+=$'\n'
         thresholds+="MEM_THRESHOLD_WARN=10"
         thresholds+=$'\n'
         thresholds+="MEM_THRESHOLD_CRIT=5"
         thresholds+=$'\n'
-    elif [[ "$total_mem_gb" -ge 16 ]]; then
+    elif [[ "$total_mem_int" -ge 16 ]]; then
         thresholds+="MEM_THRESHOLD_WARN=12"
         thresholds+=$'\n'
         thresholds+="MEM_THRESHOLD_CRIT=8"
@@ -809,6 +813,9 @@ detect_hardware() {
             model=$(smartctl -i "$dev" 2>/dev/null | grep -i "Model Number" | cut -d: -f2 | xargs)
             echo "$dev $model"
         done)
+    elif _cmd_exists lsblk; then
+        # Fallback: use lsblk to detect NVMe drives when nvme-cli/smartctl unavailable
+        nvme_drives=$(lsblk -d -o NAME,TYPE,MODEL 2>/dev/null | grep -i nvme | awk '{print "/dev/"$1, $3}' | head -10)
     fi
     
     if [[ -n "$nvme_drives" ]]; then
@@ -817,10 +824,18 @@ detect_hardware() {
         hw_info+="${GREEN}✓${NC} NVMe drives detected ($nvme_count):"
         hw_info+=$'\n'
         hw_info+=$(echo "$nvme_drives" | sed 's/^/  - /')
-        hw_info+=$'\n\n'
+        hw_info+=$'\n'
+        # Check if smartmontools is installed
+        if ! _cmd_exists smartctl && ! _cmd_exists nvme; then
+            hw_info+="${YELLOW}!${NC} Install smartmontools to enable NVMe health monitoring"
+            hw_info+=$'\n'
+        fi
+        hw_info+=$'\n'
         hw_suggestions+="# NVMe health monitoring"
         hw_suggestions+=$'\n'
         hw_suggestions+="ENABLE_NVME_CHECK=true"
+        hw_suggestions+=$'\n'
+        hw_suggestions+="NVME_DEVICE=\"/dev/nvme0n1\"  # Adjust if different"
         hw_suggestions+=$'\n'
         hw_suggestions+="# NVME_TEMP_THRESHOLD_WARN=70"
         hw_suggestions+=$'\n'
@@ -910,6 +925,7 @@ detect_hardware() {
     fi
     
     # CPU Temperature / Sensors
+    local temp_detected=false
     if _cmd_exists sensors; then
         local sensor_chips
         sensor_chips=$(sensors -u 2>/dev/null | grep -E '^[a-zA-Z]+-i2c' | head -5)
@@ -918,15 +934,37 @@ detect_hardware() {
             hw_info+=$'\n'
             hw_info+=$(echo "$sensor_chips" | sed 's/^/  - /')
             hw_info+=$'\n\n'
-            hw_suggestions+="# CPU temperature monitoring"
-            hw_suggestions+=$'\n'
-            hw_suggestions+="ENABLE_TEMP_CHECK=true"
-            hw_suggestions+=$'\n'
-            hw_suggestions+="# TEMP_THRESHOLD_WARN=75"
-            hw_suggestions+=$'\n'
-            hw_suggestions+="# TEMP_THRESHOLD_CRIT=90"
-            hw_suggestions+=$'\n\n'
+            temp_detected=true
         fi
+    fi
+    
+    # Fallback: Check thermal zones (works without lm-sensors on many systems)
+    if [[ "$temp_detected" == "false" ]] && [[ -d /sys/class/thermal ]]; then
+        local thermal_zones
+        thermal_zones=$(ls /sys/class/thermal/thermal_zone* 2>/dev/null | head -5)
+        if [[ -n "$thermal_zones" ]]; then
+            local sample_temp
+            sample_temp=$(cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null | head -1 | awk '{print int($1/1000)}')
+            hw_info+="${GREEN}✓${NC} CPU thermal zones detected"
+            hw_info+=$'\n'
+            if [[ -n "$sample_temp" ]]; then
+                hw_info+="  Current temp: ${sample_temp}°C"
+                hw_info+=$'\n'
+            fi
+            hw_info+=$'\n'
+            temp_detected=true
+        fi
+    fi
+    
+    if [[ "$temp_detected" == "true" ]]; then
+        hw_suggestions+="# CPU temperature monitoring"
+        hw_suggestions+=$'\n'
+        hw_suggestions+="ENABLE_TEMP_CHECK=true"
+        hw_suggestions+=$'\n'
+        hw_suggestions+="# TEMP_THRESHOLD_WARN=75"
+        hw_suggestions+=$'\n'
+        hw_suggestions+="# TEMP_THRESHOLD_CRIT=90"
+        hw_suggestions+=$'\n\n'
     fi
     
     # RAID Detection
@@ -962,6 +1000,39 @@ detect_hardware() {
             hw_info+=$'\n'
             hw_info+=$(echo "$zfs_pools" | sed 's/^/  - /')
             hw_info+=$'\n\n'
+        fi
+    fi
+    
+    # Network interfaces (suggest bandwidth monitoring)
+    if [[ -d /sys/class/net ]]; then
+        local physical_ifaces
+        physical_ifaces=$(ls /sys/class/net/ 2>/dev/null | grep -v -E '^(lo|docker|veth|tun|tap|virbr|br-|bonding)' | head -5)
+        if [[ -n "$physical_ifaces" ]]; then
+            local iface_count
+            iface_count=$(echo "$physical_ifaces" | wc -l)
+            hw_info+="${GREEN}✓${NC} Physical network interfaces ($iface_count):"
+            hw_info+=$'\n'
+            for iface in $physical_ifaces; do
+                local speed
+                speed=$(cat /sys/class/net/$iface/speed 2>/dev/null || echo "?")
+                if [[ "$speed" != "?" ]]; then
+                    hw_info+="  - $iface (${speed} Mbps)"
+                else
+                    hw_info+="  - $iface"
+                fi
+                hw_info+=$'\n'
+            done
+            hw_info+=$'\n'
+            hw_suggestions+="# Network bandwidth monitoring"
+            hw_suggestions+=$'\n'
+            hw_suggestions+="ENABLE_NETWORK_CHECK=true"
+            hw_suggestions+=$'\n'
+            hw_suggestions+="NETWORK_INTERFACES=\"${physical_ifaces//$'\n'/ }\""
+            hw_suggestions+=$'\n'
+            hw_suggestions+="# NETWORK_THRESHOLD_WARN=800"
+            hw_suggestions+=$'\n'
+            hw_suggestions+="# NETWORK_THRESHOLD_CRIT=950"
+            hw_suggestions+=$'\n\n'
         fi
     fi
     
@@ -1275,10 +1346,10 @@ detect_database_servers() {
     fi
     
     # PostgreSQL Server
-    if _systemd_is_active postgresql || _systemd_is_active "postgres*" 2>/dev/null; then
+    if _systemd_is_active postgresql || systemctl list-units --type=service --state=running 2>/dev/null | grep -q "postgresql-[0-9]"; then
         # Get the specific version service
         local pg_service
-        pg_service=$(systemctl list-units --type=service --state=running | grep -oE 'postgresql-[0-9]+\.[0-9]+' | head -1 || echo "postgresql")
+        pg_service=$(systemctl list-units --type=service --state=running 2>/dev/null | grep -oE 'postgresql-[0-9]+\.[0-9]+' | head -1 || echo "postgresql")
         db_info+="${GREEN}✓${NC} PostgreSQL server running ($pg_service)"
         db_info+=$'\n\n'
         has_running_db=true
@@ -1580,6 +1651,64 @@ except Exception:
             
             suggestions+=$'\n'
         fi
+    fi
+    
+    # ============================================
+    # LOG FILE DISCOVERY (Generic)
+    # ============================================
+    local log_files=""
+    local common_logs="/var/log/syslog /var/log/messages /var/log/auth.log /var/log/secure /var/log/kern.log /var/log/daemon.log"
+    
+    for log in $common_logs; do
+        if [[ -f "$log" && -r "$log" ]]; then
+            log_files+="$log "
+        fi
+    done
+    
+    # Check for journald (systemd systems)
+    local has_journald=false
+    if [[ -d /var/log/journal ]] || _cmd_exists journalctl; then
+        has_journald=true
+    fi
+    
+    if [[ -n "$log_files" ]] || [[ "$has_journald" == "true" ]]; then
+        echo -e "${BLUE}=== Log Files ===${NC}"
+        echo ""
+        
+        if [[ -n "$log_files" ]]; then
+            echo -e "${GREEN}✓${NC} System log files detected:"
+            for log in $log_files; do
+                local log_size
+                log_size=$(du -h "$log" 2>/dev/null | cut -f1)
+                echo "  - $log ($log_size)"
+            done
+            echo ""
+        fi
+        
+        if [[ "$has_journald" == "true" ]]; then
+            echo -e "${GREEN}✓${NC} Systemd journal available"
+            echo ""
+        fi
+        
+        suggestions+="# Log pattern monitoring"
+        suggestions+=$'\n'
+        suggestions+="# ENABLE_LOG_CHECK=true"
+        suggestions+=$'\n'
+        if [[ -n "$log_files" ]]; then
+            suggestions+="# LOG_WATCH_FILES=\"${log_files% }\""
+            suggestions+=$'\n'
+        fi
+        suggestions+="# LOG_WATCH_PATTERNS=\"ERROR|CRITICAL|FATAL|EXCEPTION|WARNING|FAIL\""
+        suggestions+=$'\n'
+        suggestions+="# LOG_WATCH_LINES=500"
+        suggestions+=$'\n'
+        if [[ "$has_journald" == "true" ]]; then
+            suggestions+="# Note: For journald systems, also consider:"
+            suggestions+=$'\n'
+            suggestions+="#   journalctl -p err -n 100 --no-pager"
+            suggestions+=$'\n'
+        fi
+        suggestions+=$'\n'
     fi
     
     # ============================================
