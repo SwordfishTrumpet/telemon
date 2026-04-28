@@ -5915,16 +5915,13 @@ run_digest() {
     # Build digest message — always sent
     local msg="<b>&#128202; [${SERVER_LABEL}] Health Digest</b>%0A"
     msg+="<i>$(date '+%Y-%m-%d %H:%M:%S %Z')</i>%0A%0A"
-    msg+="<b>Summary:</b> &#128308; ${crit_count} critical | &#128992; ${warn_count} warning | &#128994; ${ok_count} healthy%0A"
-    msg+="-----------------------------%0A%0A"
-
     # Guard: if no checks ran, note this in the digest
     if [[ ${#CURR_STATE[@]} -eq 0 ]]; then
         msg+="<i>No checks enabled or all checks skipped.</i>%0A%0A"
     fi
 
-    # List all checks grouped by state
-    for state_label in CRITICAL WARNING OK; do
+    # List only non-OK checks (skip green/OK items per user preference)
+    for state_label in CRITICAL WARNING; do
         while IFS= read -r key; do
             [[ -z "$key" ]] && continue
             if [[ "${CURR_STATE[$key]}" == "$state_label" ]]; then
@@ -5932,7 +5929,6 @@ run_digest() {
                 case "$state_label" in
                     CRITICAL) emoji="&#128308;" ;;
                     WARNING)  emoji="&#128992;" ;;
-                    OK)       emoji="&#128994;" ;;
                 esac
                 msg+="${emoji} <b>${key}</b>: ${STATE_DETAIL[$key]:-${CURR_STATE[$key]}}%0A"
             fi
@@ -5950,10 +5946,9 @@ run_digest() {
             local fleet_crit_sec=$(( fleet_threshold_sec * ${FLEET_CRITICAL_MULTIPLIER:-2} ))
             local fleet_self
             fleet_self=$(sanitize_state_key "${SERVER_LABEL}")
-            local fleet_has_entries=false
+            local fleet_has_issues=false
             for fleet_file in "$fleet_dir"/*; do
                 [[ -f "$fleet_file" ]] || continue
-                fleet_has_entries=true
                 local fleet_fname
                 fleet_fname=$(basename "$fleet_file")
                 local fl_label fl_ts fl_status fl_count _
@@ -5961,12 +5956,16 @@ run_digest() {
                 is_valid_number "$fl_ts" || continue
                 local fl_age=$(( fleet_now - fl_ts ))
                 local fl_age_min=$(( fl_age / 60 ))
-                local fl_emoji="&#128994;"
+                # Only show fleet nodes with issues (skip healthy/green)
+                local fl_emoji=""
                 if (( fl_age > fleet_crit_sec )); then
                     fl_emoji="&#128308;"
                 elif (( fl_age > fleet_threshold_sec )); then
                     fl_emoji="&#128992;"
+                else
+                    continue  # Skip healthy nodes
                 fi
+                fleet_has_issues=true
                 local fl_safe_label
                 fl_safe_label=$(html_escape "${fl_label:-$fleet_fname}")
                 # Validate fields from untrusted heartbeat files
@@ -5987,9 +5986,6 @@ run_digest() {
                     msg+="${fl_emoji} <code>${fl_safe_label}</code>: last seen ${fl_age_min}m ago (${fl_safe_status}, ${fl_safe_count} checks)%0A"
                 fi
             done
-            if [[ "$fleet_has_entries" != "true" ]]; then
-                msg+="<i>No heartbeat files found</i>%0A"
-            fi
             # Show expected-but-missing servers
             if [[ -n "${FLEET_EXPECTED_SERVERS:-}" ]]; then
                 for fleet_exp in ${FLEET_EXPECTED_SERVERS}; do
@@ -6469,9 +6465,6 @@ main() {
     if [[ "$is_first_run" == "true" ]]; then
         local header="<b>&#128421; [${SERVER_LABEL}] Telemon Initialized</b>%0A"
         header+="<i>$(date '+%Y-%m-%d %H:%M:%S %Z')</i>%0A%0A"
-        header+="<b>Summary:</b> &#128308; ${crit_count} critical | &#128992; ${warn_count} warning | &#128994; ${ok_count} healthy%0A"
-        header+="Confirmation count: ${saved_confirm_count} (alerts require ${saved_confirm_count} consecutive matches)%0A"
-        header+="-----------------------------%0A%0A"
 
         # On first run, only report non-OK items
         local first_alerts=""
@@ -6489,7 +6482,7 @@ main() {
         if [[ -n "$first_alerts" ]]; then
             header+="${first_alerts}"
         else
-            header+="&#9989; All ${ok_count} checks passed. Monitoring active.%0A"
+            header+="&#9989; All checks passed. Monitoring active.%0A"
         fi
 
         dispatch_with_retry "$header"
@@ -6500,10 +6493,21 @@ main() {
         local header="<b>&#128421; [${SERVER_LABEL}] System Vital Alert</b>%0A"
         header+="<i>$(date '+%Y-%m-%d %H:%M:%S %Z')</i>%0A%0A"
 
-        local summary="<b>Summary:</b> &#128308; ${crit_count} critical | &#128992; ${warn_count} warning | &#128994; ${ok_count} healthy%0A"
-        summary+="-----------------------------%0A%0A"
+        # List all non-OK states (not just newly confirmed ones)
+        local all_issues=""
+        for key in "${!CURR_STATE[@]}"; do
+            local state="${CURR_STATE[$key]}"
+            if [[ "$state" != "OK" ]]; then
+                local emoji=""
+                case "$state" in
+                    CRITICAL) emoji="&#128308;" ;;
+                    WARNING)  emoji="&#128992;" ;;
+                esac
+                all_issues+="${emoji} <b>${key}</b>: ${STATE_DETAIL[$key]:-$state}%0A%0A"
+            fi
+        done
 
-        local full_message="${header}${summary}${ALERTS}"
+        local full_message="${header}${all_issues}"
         
         # Append top processes info if available
         if [[ -n "$TOP_PROCESSES_INFO" ]]; then
