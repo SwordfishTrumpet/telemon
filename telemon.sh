@@ -844,6 +844,148 @@ is_lxc_container() {
     return 1
 }
 
+# ===========================================================================
+# LXC Container Metrics Helpers (cgroup v2)
+# ===========================================================================
+# These functions provide container-specific metrics that are accurate
+# inside LXC containers, unlike /proc files which show host statistics.
+# ===========================================================================
+
+# Detect if cgroup v2 is available
+is_cgroup_v2() {
+    [[ -f /sys/fs/cgroup/cgroup.controllers ]]
+}
+
+# Get container memory usage from cgroup (accurate in LXC)
+# Returns: current memory usage in bytes
+get_lxc_memory_usage() {
+    if [[ -f /sys/fs/cgroup/memory.current ]]; then
+        cat /sys/fs/cgroup/memory.current 2>/dev/null || echo 0
+    else
+        echo 0
+    fi
+}
+
+# Get container memory limit from cgroup
+# Returns: memory limit in bytes, or "max" if unlimited
+get_lxc_memory_limit() {
+    local limit="max"
+    if [[ -f /sys/fs/cgroup/memory.max ]]; then
+        limit=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo "max")
+    fi
+    echo "$limit"
+}
+
+# Read CPU usage microseconds from cgroup cpu.stat
+# Format: user_usec, system_usec (microseconds of CPU time used)
+get_lxc_cpu_usage_usec() {
+    local user_usec=0 system_usec=0
+    if [[ -f /sys/fs/cgroup/cpu.stat ]]; then
+        user_usec=$(awk '/^user_usec / {print $2}' /sys/fs/cgroup/cpu.stat 2>/dev/null || echo 0)
+        system_usec=$(awk '/^system_usec / {print $2}' /sys/fs/cgroup/cpu.stat 2>/dev/null || echo 0)
+    fi
+    echo "${user_usec:-0} ${system_usec:-0}"
+}
+
+# Calculate CPU usage percentage for LXC containers
+# Uses delta calculation like iowait check
+# State file key: "lxc_cpu_baseline"
+calculate_lxc_cpu_percent() {
+    local state_file="${STATE_FILE}.lxc_cpu"
+    local now
+    now=$(date +%s)
+    
+    # Read current CPU usage
+    local -a cpu_usage
+    read -r -a cpu_usage < <(get_lxc_cpu_usage_usec)
+    local user_usec=${cpu_usage[0]:-0}
+    local system_usec=${cpu_usage[1]:-0}
+    local total_usec=$((user_usec + system_usec))
+    
+    # Load previous sample
+    local prev_total=0 prev_ts=0
+    if [[ -f "$state_file" ]]; then
+        read -r prev_total prev_ts < "$state_file" 2>/dev/null || true
+    fi
+    
+    # Validate loaded values
+    if ! is_valid_number "$prev_total"; then prev_total=0; fi
+    if ! is_valid_number "$prev_ts"; then prev_ts=0; fi
+    
+    # Save current sample for next run
+    safe_write_state_file "$state_file" "$total_usec $now"
+    
+    # Need previous reading to calculate rate
+    if [[ "$prev_ts" -eq 0 ]]; then
+        # Log to stderr to avoid capturing in function output
+        echo "$(date '+%Y-%m-%d %H:%M:%S') [DEBUG] calculate_lxc_cpu_percent: no previous sample — baseline established" >&2
+        echo "0"
+        return
+    fi
+    
+    # Calculate delta
+    local delta_usec=$((total_usec - prev_total))
+    local delta_sec=$((now - prev_ts))
+    
+    # Handle counter wraparound (rare but possible)
+    if [[ "$delta_usec" -lt 0 ]]; then
+        # Log to stderr to avoid capturing in function output
+        echo "$(date '+%Y-%m-%d %H:%M:%S') [DEBUG] calculate_lxc_cpu_percent: counter wraparound detected — skipping calculation" >&2
+        echo "0"
+        return
+    fi
+    
+    # Need at least 1 second between samples
+    if [[ "$delta_sec" -le 0 ]]; then
+        echo "0"
+        return
+    fi
+    
+    # Get number of cores allocated to container
+    local cores
+    cores=$(nproc 2>/dev/null) || cores=1
+    
+    # Calculate percentage: (delta_usec / (delta_sec * cores * 1000000)) * 100
+    # Simplified: (delta_usec * 100) / (delta_sec * cores * 1000000)
+    # = (delta_usec) / (delta_sec * cores * 10000)
+    if [[ "$cores" -gt 0 && "$delta_sec" -gt 0 ]]; then
+        local pct
+        pct=$(( delta_usec / (delta_sec * cores * 10000) ))
+        # Clamp to 0-100
+        if [[ "$pct" -gt 100 ]]; then pct=100; fi
+        if [[ "$pct" -lt 0 ]]; then pct=0; fi
+        echo "$pct"
+    else
+        echo "0"
+    fi
+}
+
+# Get container memory percentage (usage / limit)
+# Returns: percentage 0-100, or -1 if unable to calculate
+calculate_lxc_memory_percent() {
+    local usage limit
+    usage=$(get_lxc_memory_usage)
+    limit=$(get_lxc_memory_limit)
+    
+    if [[ "$limit" == "max" ]] || [[ "$limit" -eq 0 ]]; then
+        # No limit set - can't calculate percentage
+        echo "-1"
+        return
+    fi
+    
+    if ! is_valid_number "$usage" || ! is_valid_number "$limit"; then
+        echo "-1"
+        return
+    fi
+    
+    echo $(( 100 - ((usage * 100) / limit) ))
+}
+
+# Check if we should use LXC-aware metrics
+use_lxc_metrics() {
+    is_lxc_container && is_cgroup_v2
+}
+
 check_state_change() {
     local key="$1"
     local new_state="$2"
@@ -1240,8 +1382,6 @@ check_threshold() {
 
 # ===========================================================================
 check_cpu() {
-    [[ -f /proc/loadavg ]] || { log "WARN" "check_cpu: /proc/loadavg not found — skipping"; return; }
-    
     local cores
     cores=$(nproc 2>/dev/null) || cores=1
     if ! is_valid_number "$cores" || [[ "$cores" -lt 1 ]]; then
@@ -1249,16 +1389,35 @@ check_cpu() {
         cores=1
     fi
     
-    local load_1m
-    load_1m=$(awk '{print $1}' /proc/loadavg)
-    if [[ -z "$load_1m" || ! "$load_1m" =~ ^[0-9.]+$ ]]; then
-        log "WARN" "check_cpu: invalid load value from /proc/loadavg — skipping"
-        return
-    fi
+    local load_pct load_1m
+    
+    # LXC Container: Use cgroup v2 metrics instead of /proc/loadavg (host's load)
+    if use_lxc_metrics; then
+        log "DEBUG" "check_cpu: using LXC cgroup v2 metrics for accurate container CPU"
+        load_pct=$(calculate_lxc_cpu_percent)
+        # For display purposes, estimate load from percentage
+        load_1m=$(awk -v pct="$load_pct" -v cores="$cores" 'BEGIN {printf "%.2f", (pct / 100) * cores}')
+        
+        if ! is_valid_number "$load_pct"; then
+            log "WARN" "check_cpu: LXC CPU calculation returned invalid value '${load_pct}' — skipping"
+            return
+        fi
+    else
+        # Standard host/VM: Use /proc/loadavg
+        if [[ ! -f /proc/loadavg ]]; then
+            log "WARN" "check_cpu: /proc/loadavg not found — skipping"
+            return
+        fi
+        
+        load_1m=$(awk '{print $1}' /proc/loadavg)
+        if [[ -z "$load_1m" || ! "$load_1m" =~ ^[0-9.]+$ ]]; then
+            log "WARN" "check_cpu: invalid load value from /proc/loadavg — skipping"
+            return
+        fi
 
-    # Calculate load as percentage of cores (bash integer math, x100 for precision)
-    local load_pct
-    load_pct=$(awk -v ld="$load_1m" -v cores="$cores" 'BEGIN {printf "%.0f", (ld / cores) * 100}')
+        # Calculate load as percentage of cores (bash integer math, x100 for precision)
+        load_pct=$(awk -v ld="$load_1m" -v cores="$cores" 'BEGIN {printf "%.0f", (ld / cores) * 100}')
+    fi
     if [[ -z "$load_pct" ]] || ! is_valid_number "$load_pct"; then
         log "WARN" "check_cpu: computed load_pct '${load_pct}' is not numeric — skipping"
         return
@@ -1283,25 +1442,53 @@ check_cpu() {
 # CHECK: Memory
 # ===========================================================================
 check_memory() {
-    [[ -f /proc/meminfo ]] || { log "WARN" "check_memory: /proc/meminfo not found — skipping"; return; }
     local total_kb available_kb
-    total_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
-    available_kb=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+    local lxc_mode=false
+    
+    # LXC Container: Use cgroup v2 metrics for accurate container memory
+    if use_lxc_metrics; then
+        log "DEBUG" "check_memory: using LXC cgroup v2 metrics for accurate container memory"
+        lxc_mode=true
+        
+        local usage_bytes limit_bytes
+        usage_bytes=$(get_lxc_memory_usage)
+        limit_bytes=$(get_lxc_memory_limit)
+        
+        # Convert to KB for consistent units
+        available_kb=$((usage_bytes / 1024))
+        
+        if [[ "$limit_bytes" != "max" ]] && is_valid_number "$limit_bytes"; then
+            total_kb=$((limit_bytes / 1024))
+            log "DEBUG" "check_memory: LXC memory limit ${total_kb}KB, usage ${available_kb}KB"
+        else
+            # No hard limit set - fall back to /proc/meminfo but log warning
+            total_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+            log "DEBUG" "check_memory: LXC no memory limit — using /proc/meminfo total (shows host memory)"
+        fi
+    else
+        # Standard host/VM: Use /proc/meminfo
+        if [[ ! -f /proc/meminfo ]]; then
+            log "WARN" "check_memory: /proc/meminfo not found — skipping"
+            return
+        fi
+        total_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+        available_kb=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+        
+        # Fallback for kernels < 3.14 without MemAvailable (estimate: MemFree + Buffers + Cached)
+        if [[ -z "$available_kb" ]]; then
+            local mem_free buffers cached
+            mem_free=$(awk '/^MemFree:/ {print $2}' /proc/meminfo)
+            buffers=$(awk '/^Buffers:/ {print $2}' /proc/meminfo)
+            cached=$(awk '/^Cached:/ {print $2}' /proc/meminfo)
+            available_kb=$(( ${mem_free:-0} + ${buffers:-0} + ${cached:-0} ))
+            log "DEBUG" "check_memory: MemAvailable not found — using fallback calculation (kernel < 3.14)"
+        fi
+    fi
 
     # Guard against missing or zero values
     if [[ -z "$total_kb" || "$total_kb" -eq 0 ]]; then
         log "WARN" "check_memory: MemTotal is ${total_kb:-empty} — skipping"
         return
-    fi
-    
-    # Fallback for kernels < 3.14 without MemAvailable (estimate: MemFree + Buffers + Cached)
-    if [[ -z "$available_kb" ]]; then
-        local mem_free buffers cached
-        mem_free=$(awk '/^MemFree:/ {print $2}' /proc/meminfo)
-        buffers=$(awk '/^Buffers:/ {print $2}' /proc/meminfo)
-        cached=$(awk '/^Cached:/ {print $2}' /proc/meminfo)
-        available_kb=$(( ${mem_free:-0} + ${buffers:-0} + ${cached:-0} ))
-        log "DEBUG" "check_memory: MemAvailable not found — using fallback calculation (kernel < 3.14)"
     fi
 
     # Percentage of AVAILABLE memory (not just "free")
@@ -1310,15 +1497,27 @@ check_memory() {
 
     local total_mb=$(( total_kb / 1024 ))
     local avail_mb=$(( available_kb / 1024 ))
+    
+    # Build appropriate message based on mode
+    local ok_detail warn_detail crit_detail
+    if [[ "$lxc_mode" == true ]]; then
+        ok_detail="Memory: ${avail_mb}MB free of ${total_mb}MB container limit (${avail_pct}% free)"
+        warn_detail="Memory: only <b>${avail_mb}MB</b> free of ${total_mb}MB container limit (<b>${avail_pct}%</b> free, threshold: ${MEM_THRESHOLD_WARN}%)"
+        crit_detail="Memory: only <b>${avail_mb}MB</b> free of ${total_mb}MB container limit (<b>${avail_pct}%</b> free, threshold: ${MEM_THRESHOLD_CRIT}%)"
+    else
+        ok_detail="Memory: ${avail_mb}MB available of ${total_mb}MB (${avail_pct}% free)"
+        warn_detail="Memory: only <b>${avail_mb}MB</b> available of ${total_mb}MB (<b>${avail_pct}%</b> free, threshold: ${MEM_THRESHOLD_WARN}%)"
+        crit_detail="Memory: only <b>${avail_mb}MB</b> available of ${total_mb}MB (<b>${avail_pct}%</b> free, threshold: ${MEM_THRESHOLD_CRIT}%)"
+    fi
 
     # Use check_threshold helper for consistent threshold handling (inverted metric: lower = worse)
     check_threshold "mem" "$avail_pct" \
         "${MEM_THRESHOLD_WARN:-15}" \
         "${MEM_THRESHOLD_CRIT:-10}" \
         "true" \
-        "Memory: ${avail_mb}MB available of ${total_mb}MB (${avail_pct}% free)" \
-        "Memory: only <b>${avail_mb}MB</b> available of ${total_mb}MB (<b>${avail_pct}%</b> free, threshold: ${MEM_THRESHOLD_WARN}%)" \
-        "Memory: only <b>${avail_mb}MB</b> available of ${total_mb}MB (<b>${avail_pct}%</b> free, threshold: ${MEM_THRESHOLD_CRIT}%)"
+        "$ok_detail" \
+        "$warn_detail" \
+        "$crit_detail"
     
     # Predictive: track memory usage trend (usage = 100 - available%)
     local mem_usage_pct=$(( 100 - avail_pct ))
@@ -1547,8 +1746,18 @@ check_swap() {
 # ===========================================================================
 # CHECK: I/O Wait (CPU waiting for disk I/O)
 # Uses state file to store previous sample, calculates delta on next run
+# 
+# LXC NOTE: /proc/stat shows host statistics, not container-specific I/O.
+# In LXC containers, this check monitors host I/O wait which may or may not
+# reflect the container's own I/O impact. Consider disabling for pure LXC
+# monitoring by setting ENABLE_IOWAIT_CHECK=false in .env
 # ===========================================================================
 check_iowait() {
+    # LXC Warning: /proc/stat shows host I/O statistics
+    if is_lxc_container; then
+        log "DEBUG" "check_iowait: running in LXC — /proc/stat shows host I/O wait (may not reflect container)"
+    fi
+    
     [[ -f /proc/stat ]] || { log "WARN" "check_iowait: /proc/stat not found — skipping"; return; }
     
     local iowait_state_file="${STATE_FILE}.iowait"
