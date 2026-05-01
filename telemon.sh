@@ -6873,6 +6873,16 @@ main() {
                 full_message+="%0A<b>Process Details:</b>%0A${encoded_top_procs}"
             fi
 
+            # Log the actual alert content (strip HTML tags for readability)
+            local alerts_for_log="${ALERTS//<b>/}"
+            alerts_for_log="${alerts_for_log//<\/b>/}"
+            alerts_for_log="${alerts_for_log//<code>/}"
+            alerts_for_log="${alerts_for_log//<\/code>/}"
+            alerts_for_log="${alerts_for_log//%0A/ }"
+            alerts_for_log="${alerts_for_log//&#128308; /CRITICAL: }"
+            alerts_for_log="${alerts_for_log//&#128992; /WARNING: }"
+            log "INFO" "Alert content: ${alerts_for_log}"
+
             dispatch_with_retry "$full_message"
             log "INFO" "Alert dispatched (${crit_count}C/${warn_count}W/${ok_count}OK)"
         else
