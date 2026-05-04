@@ -1,32 +1,27 @@
-# Telemon - Environment Configuration
-.env
 
-# Internal documentation (not for GitHub)
+*~
 AGENTS.md
-TODO.md
-
-# Log files
-*.log
-telemon_cron.log
-
-# State files
-/tmp/telemon_*
-.telemon_state*
-
+.backup-*
 # Backup directories
 backups/
-.backup-*
-
-# OS files
 .DS_Store
-Thumbs.db
-
 # Editor files
-*.swp
-*.swo
-*~
-.vscode/
+.env
 .idea/
-
-# Weave agent working files
+# Internal documentation (not for GitHub)
+*.log
+# Log files
+# OS files
+# State files
+*.swo
+*.swp
+telemon_cron.log
+# Telemon - Environment Configuration
+.telemon_first_run_done
+.telemon_state*
+Thumbs.db
+/tmp/telemon_*
+TODO.md
+.vscode/
 .weave/
+# Weave agent working files

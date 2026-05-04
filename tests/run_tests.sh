@@ -4,7 +4,7 @@
 # =============================================================================
 # Tests for core helper functions. Run with: bash tests/run_tests.sh
 # =============================================================================
-set -euo pipefail
+set -uo pipefail
 
 # Colors for output
 RED='\033[0;31m'
@@ -1507,9 +1507,9 @@ test_check_databases_redis() {
     [[ "$telemon_content" == *"PING"* && "$telemon_content" == *"PONG"* ]]
     assert_true "Redis: Uses PING/PONG for health check"
     
-    # Test 4: BUG-20: WRONGPASS and NOAUTH detection
+    # Test 4: WRONGPASS and NOAUTH detection
     [[ "$telemon_content" == *"NOAUTH"* && "$telemon_content" == *"WRONGPASS"* ]]
-    assert_true "Redis: BUG-20 FIX - Detects NOAUTH and WRONGPASS errors"
+    assert_true "Redis: Detects NOAUTH and WRONGPASS errors"
     
     # Test 5: Authentication failure detection patterns
     [[ "$telemon_content" == *"authentication"* || "$telemon_content" == *"AUTH"* ]]
@@ -1549,10 +1549,10 @@ test_check_databases_redis() {
     [[ "$mock_noauth" == *"NOAUTH"* ]]
     assert_true "Redis: NOAUTH error is detected"
     
-    # Test 14: Test WRONGPASS error detection (BUG-20)
+    # Test 14: Test WRONGPASS error detection
     local mock_wrongpass="WRONGPASS invalid username-password pair"
     [[ "$mock_wrongpass" == *"WRONGPASS"* ]]
-    assert_true "Redis: WRONGPASS error is detected (BUG-20)"
+    assert_true "Redis: WRONGPASS error is detected"
     
     # Test 15: State key format validation
     local redis_key="redis_localhost_6379"
@@ -1741,9 +1741,9 @@ test_check_odbc() {
     [[ "$telemon_content" == *"PWD=***"* || "$telemon_content" == *"PASS=***"* ]]
     assert_true "ODBC: Sanitizes PWD and PASS from error messages"
     
-    # Test 12: BUG-13 FIX: Connection string via temp file (not command line)
+    # Test 12: Connection string via temp file (not command line)
     [[ "$telemon_content" == *"conn_str_file"* && "$telemon_content" == *"mktemp"* ]]
-    assert_true "ODBC: BUG-13 FIX - Passes connection string via temp file"
+    assert_true "ODBC: Passes connection string via temp file"
     
     # Test 13: Temp file permissions (600)
     [[ "$telemon_content" == *"chmod 600"* ]]
@@ -3192,7 +3192,7 @@ test_first_run_fingerprint() {
     assert_true "First-run: FIRST_RUN_FINGERPRINT variable defined"
     
     # Test 2: Fingerprint path uses SCRIPT_DIR as primary location (with fallback support)
-    # BUG-3 FIX: Now uses _determine_fingerprint_location() for fallback locations
+    # Uses _determine_fingerprint_location() for fallback locations
     grep -q '_determine_fingerprint_location' "$telemon_script" && \
     grep -q 'primary="${SCRIPT_DIR}/.telemon_first_run_done"' "$telemon_script"
     assert_true "First-run: Fingerprint path uses SCRIPT_DIR/.telemon_first_run_done as primary"
@@ -3222,7 +3222,7 @@ test_first_run_fingerprint() {
     grep -A2 'FIRST_RUN_FINGERPRINT' "$telemon_script" | grep -q 'chmod 600'
     assert_true "First-run: Fingerprint file created with 600 permissions"
     
-    # Test 9: BUG-3 FIX - Fingerprint creation logs warning on failure
+    # Test 9: Fingerprint creation logs warning on failure
     grep -q 'Failed to create first-run fingerprint' "$telemon_script" && \
     grep -q 'log "WARN"' "$telemon_script"
     assert_true "First-run: Fingerprint creation failure is logged as WARNING"
@@ -3240,62 +3240,53 @@ test_bug_fixes_2026_04_25() {
     local install_script="${SCRIPT_DIR}/install.sh"
     local admin_script="${SCRIPT_DIR}/telemon-admin.sh"
     
-    # BUG-8: LOG_FILE default value
-    grep -q 'BUG-8 FIX' "$telemon_script" && \
+    # LOG_FILE default value
     grep -q 'LOG_FILE="\${LOG_FILE:-' "$telemon_script"
-    assert_true "BUG-8: LOG_FILE has default value to prevent unbound variable"
+    assert_true "LOG_FILE has default value to prevent unbound variable"
     
-    # BUG-9: SMTP password sanitization uses bash parameter substitution
-    grep -q 'BUG-9 FIX' "$telemon_script" && \
+    # SMTP password sanitization uses bash parameter substitution
     grep -q 'sanitized_error="\${filtered_error//' "$telemon_script"
-    assert_true "BUG-9: SMTP password sanitization uses bash substitution not sed"
+    assert_true "SMTP password sanitization uses bash substitution not sed"
     
-    # BUG-10: install.sh validates values before sed
-    grep -q 'BUG-10 FIX' "$install_script" && \
+    # install.sh validates boolean values before sed
     grep -q 'if \[\[ "\$value" != "true" && "\$value" != "false"' "$install_script"
-    assert_true "BUG-10: install.sh validates boolean values before sed"
+    assert_true "install.sh validates boolean values before sed"
     
-    # BUG-11: sanitize_state_key includes lowercase conversion
-    grep -q 'BUG-11 FIX' "$telemon_script"
-    assert_true "BUG-11: sanitize_state_key converts to lowercase"
+    # sanitize_state_key includes lowercase conversion
+    grep -q "tr '\[:upper:]' '\[:lower:]'" "$telemon_script"
+    assert_true "sanitize_state_key converts to lowercase"
     
-    # BUG-12: disk mount sanitization uses sanitize_state_key
-    grep -q 'BUG-12 FIX' "$telemon_script"
-    assert_true "BUG-12: disk mount sanitization uses sanitize_state_key"
+    # disk mount sanitization uses sanitize_state_key
+    grep -q 'sanitize_state_key "\$mountpoint"' "$telemon_script"
+    assert_true "disk mount sanitization uses sanitize_state_key"
     
-    # BUG-14: run_with_timeout validates timeout
-    grep -q 'BUG-14 FIX' "$telemon_script" && \
+    # run_with_timeout validates timeout
     grep -q 'if ! is_valid_number "\$timeout_sec"' "$telemon_script"
-    assert_true "BUG-14: run_with_timeout validates timeout is positive"
+    assert_true "run_with_timeout validates timeout is positive"
     
-    # BUG-15: Proxmox guest ID validation
-    grep -q 'BUG-15 FIX' "$telemon_script" && \
+    # Proxmox guest ID validation
     grep -q 'if ! is_valid_number "\$guest_id"' "$telemon_script"
-    assert_true "BUG-15: Proxmox guest ID validated as numeric"
+    assert_true "Proxmox guest ID validated as numeric"
     
-    # BUG-16: Proxmox/Docker status HTML escaping
-    grep -q 'BUG-16 FIX' "$telemon_script"
-    assert_true "BUG-16: Proxmox vm_status is HTML-escaped"
+    # Proxmox/Docker status HTML escaping
+    grep -q 'html_escape "\$vm_status"' "$telemon_script"
+    assert_true "Proxmox vm_status is HTML-escaped"
     
-    # BUG-17: check_state_change key validation
-    grep -q 'BUG-17 FIX' "$telemon_script" && \
+    # check_state_change key validation
     grep -q 'if \[\[ "\$key" == \*"="\* || "\$key" == \*":"\* \]\]' "$telemon_script"
-    assert_true "BUG-17: check_state_change validates key for = and :"
+    assert_true "check_state_change validates key for = and :"
     
-    # BUG-19: File integrity HTML escaping
-    grep -q 'BUG-19 FIX' "$telemon_script" && \
+    # File integrity HTML escaping
     grep -q 'safe_fname=.*html_escape.*"\$fname"' "$telemon_script"
-    assert_true "BUG-19: File integrity filename is HTML-escaped"
+    assert_true "File integrity filename is HTML-escaped"
     
-    # BUG-20: Redis WRONGPASS pattern
-    grep -q 'BUG-20 FIX' "$telemon_script" && \
+    # Redis WRONGPASS pattern
     grep -q 'WRONGPASS' "$telemon_script"
-    assert_true "BUG-20: Redis check includes WRONGPASS pattern"
+    assert_true "Redis check includes WRONGPASS pattern"
     
-    # BUG-21: check_disk uses df -P
-    grep -q 'BUG-21 FIX' "$telemon_script" && \
+    # check_disk uses df -P
     grep -q 'df -P' "$telemon_script"
-    assert_true "BUG-21: check_disk uses df -P for POSIX format"
+    assert_true "check_disk uses df -P for POSIX format"
 }
 
 # ---------------------------------------------------------------------------
