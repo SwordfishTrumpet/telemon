@@ -41,6 +41,7 @@ CRON_SCHEDULE="*/5 * * * *"
 SILENT_MODE="${TELEMON_SILENT:-false}"
 SYSTEMD_MODE="${TELEMON_SYSTEMD:-false}"
 SKIP_TEST="${TELEMON_SKIP_TEST:-false}"
+YES_MODE="${TELEMON_YES:-false}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -84,7 +85,7 @@ set_env_value() {
 }
 
 # Set a plain value (for booleans/simple values without quotes)
-# BUG-10 FIX: Validate value is strictly "true" or "false" to prevent sed injection
+# Validate value is strictly "true" or "false" to prevent sed injection
 # This function is only used for boolean flags, so we validate the input
 set_env_value_plain() {
     local env_file="$1"
@@ -144,6 +145,9 @@ parse_arguments() {
             --skip-test)
                 SKIP_TEST="true"
                 ;;
+            --yes|-y)
+                YES_MODE="true"
+                ;;
             --help|-h)
                 show_help
                 exit 0
@@ -163,6 +167,7 @@ parse_arguments() {
     # Also check environment variables for backward compatibility
     [[ "${TELEMON_SILENT:-}" == "true" ]] && SILENT_MODE="true"
     [[ "${TELEMON_SYSTEMD:-}" == "true" ]] && SYSTEMD_MODE="true"
+    [[ "${TELEMON_YES:-}" == "true" ]] && YES_MODE="true"
 }
 
 show_help() {
@@ -178,6 +183,7 @@ Options:
   --silent              Non-interactive mode (uses env vars for config)
   --systemd             Use systemd timer instead of cron
   --skip-test           Skip the test notification at the end
+  --yes, -y             Auto-answer yes to all prompts (for updates)
   --help, -h            Show this help message
 
 Environment Variables (for --silent mode):
@@ -262,7 +268,7 @@ step_2_create_directory() {
     log_info "Step 2/8: Creating installation directory..."
     
     if [[ -d "$INSTALL_DIR" ]]; then
-        if [[ "$SILENT_MODE" == "true" ]]; then
+        if [[ "$SILENT_MODE" == "true" ]] || [[ "$YES_MODE" == "true" ]]; then
             log_info "Directory ${INSTALL_DIR} already exists, continuing..."
         else
             log_warn "Directory ${INSTALL_DIR} already exists"
@@ -367,9 +373,8 @@ step_5_configure_env() {
     
     # Check if .env already exists
     if [[ -f "$env_file" ]]; then
-        if [[ "$SILENT_MODE" == "true" ]]; then
+        if [[ "$SILENT_MODE" == "true" ]] || [[ "$YES_MODE" == "true" ]]; then
             log_info ".env already exists, merging with new values..."
-            # In silent mode, we'll update specific values but keep the file
         else
             log_warn ".env already exists at ${env_file}"
             read -rp "  Keep existing configuration? [Y/n] " answer
@@ -675,7 +680,7 @@ step_6_setup_cron_legacy() {
     # Check if cron line already exists
     if crontab -l 2>/dev/null | grep -qF "$monitor_script"; then
         log_warn "Cron job already exists"
-        if [[ "$SILENT_MODE" != "true" ]]; then
+        if [[ "$SILENT_MODE" != "true" && "$YES_MODE" != "true" ]]; then
             read -rp "  Reinstall cron job? [y/N] " answer
             if [[ ! "$answer" =~ ^[Yy]$ ]]; then
                 log_info "Keeping existing cron job"
@@ -748,8 +753,8 @@ step_8_run_test() {
         log_warn "Configuration validation failed - check your .env file"
     fi
     
-    if [[ "$SKIP_TEST" == "true" || "$SILENT_MODE" == "true" ]]; then
-        log_info "Step 8/8: Skipping test notification (--skip-test or --silent)"
+    if [[ "$SKIP_TEST" == "true" || "$SILENT_MODE" == "true" || "$YES_MODE" == "true" ]]; then
+        log_info "Step 8/8: Skipping test notification (--skip-test, --silent, or --yes)"
         return 0
     fi
     
@@ -832,6 +837,10 @@ main() {
     
     if [[ "$SILENT_MODE" == "true" ]]; then
         log_info "Running in SILENT mode (no interactive prompts)"
+    fi
+    
+    if [[ "$YES_MODE" == "true" ]]; then
+        log_info "Running in YES mode (auto-answer all prompts)"
     fi
     
     if [[ "$SYSTEMD_MODE" == "true" ]]; then

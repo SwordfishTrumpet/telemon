@@ -44,11 +44,8 @@ fi
 # shellcheck source=/dev/null
 source "$ENV_FILE"
 
-# BUG-5 FIX: Ensure STATE_FILE has a default value after .env sourcing
 STATE_FILE="${STATE_FILE:-/tmp/telemon_sys_alert_state}"
 
-# BUG-8 FIX: Ensure LOG_FILE has a default value to prevent unbound variable crashes
-# The fallback pattern used at lines 165-166 is safe, but log() at line 421 uses $LOG_FILE directly
 LOG_FILE="${LOG_FILE:-${SCRIPT_DIR}/telemon.log}"
 
 # SECURITY: Validate critical input variables to prevent code injection
@@ -130,7 +127,6 @@ SERVER_LABEL="${SERVER_LABEL:-$(hostname)}"
 # First-run fingerprint file — persists across state file changes
 # Used to prevent duplicate bootstrap messages when STATE_FILE location changes
 # or state file is temporarily removed (e.g., log rotation cleanup)
-# BUG-3 FIX: Try multiple fallback locations if SCRIPT_DIR is not writable
 # ---------------------------------------------------------------------------
 _determine_fingerprint_location() {
     local primary="${SCRIPT_DIR}/.telemon_first_run_done"
@@ -387,7 +383,6 @@ migrate_state_file() {
         
         if [[ -n "$persistent_dir" && -d "$persistent_dir" && -w "$persistent_dir" ]]; then
             local new_state="${persistent_dir}/.telemon_state"
-            # BUG-1 FIX: Only migrate if persistent copy doesn't exist yet
             # Prevents overwriting newer state on every run
             if [[ -f "$new_state" ]]; then
                 # Persistent state exists - use it instead of migrating
@@ -403,9 +398,6 @@ migrate_state_file() {
         fi
     fi
 }
-
-# BUG-9 FIX: migrate_state_file() call moved to AFTER log() function definition
-# (was previously called at line 372 before log() existed, causing messages to use lib/common.sh only)
 
 # ---------------------------------------------------------------------------
 # Logging helper — respects LOG_LEVEL (DEBUG < INFO < WARN < ERROR)
@@ -425,7 +417,6 @@ log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') [${level}] $*" | tee -a "$LOG_FILE"
 }
 
-# BUG-9 FIX: Call migrate_state_file() AFTER log() function is defined
 migrate_state_file
 
 # ===========================================================================
@@ -532,7 +523,6 @@ run_with_timeout() {
     local timeout_sec="$1"
     shift
     
-    # BUG-14 FIX: Validate timeout is positive integer, default to 30s if not
     if ! is_valid_number "$timeout_sec" || [[ "$timeout_sec" -le 0 ]]; then
         timeout_sec=30
     fi
@@ -915,11 +905,28 @@ calculate_lxc_cpu_percent() {
     # Save current sample for next run
     safe_write_state_file "$state_file" "$total_usec $now"
     
-    # Need previous reading to calculate rate
+    # Need previous reading to calculate delta rate
     if [[ "$prev_ts" -eq 0 ]]; then
-        # Log to stderr to avoid capturing in function output
-        echo "$(date '+%Y-%m-%d %H:%M:%S') [DEBUG] calculate_lxc_cpu_percent: no previous sample — baseline established" >&2
-        echo "0"
+        # No baseline yet (first run or --test/--validate).
+        # Fall back to average CPU% since boot using uptime.
+        local uptime_sec=0
+        if [[ -f /proc/uptime ]]; then
+            read -r uptime_sec _ < /proc/uptime 2>/dev/null || uptime_sec=0
+        fi
+        if [[ "$uptime_sec" -gt 0 && "$total_usec" -gt 0 ]]; then
+            local cores
+            cores=$(nproc 2>/dev/null) || cores=1
+            [[ -z "$cores" || "$cores" -lt 1 ]] && cores=1
+            # Average CPU% = (total_usec / 1e6) / uptime_sec / cores * 100
+            local estimate
+            estimate=$(awk -v tu="$total_usec" -v up="$uptime_sec" -v c="$cores" \
+                'BEGIN { pct = (tu / 1000000) / up / c * 100; if (pct > 100) pct = 100; if (pct < 0) pct = 0; printf "%d", pct }')
+            echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] calculate_lxc_cpu_percent: no previous sample — using boot-average estimate (${estimate}%)" >&2
+            echo "$estimate"
+        else
+            echo "$(date '+%Y-%m-%d %H:%M:%S') [DEBUG] calculate_lxc_cpu_percent: no previous sample and no uptime available — baseline established" >&2
+            echo "0"
+        fi
         return
     fi
     
@@ -944,6 +951,7 @@ calculate_lxc_cpu_percent() {
     # Get number of cores allocated to container
     local cores
     cores=$(nproc 2>/dev/null) || cores=1
+    [[ -z "$cores" || "$cores" -lt 1 ]] && cores=1
     
     # Calculate percentage: (delta_usec / (delta_sec * cores * 1000000)) * 100
     # Simplified: (delta_usec * 100) / (delta_sec * cores * 1000000)
@@ -991,7 +999,6 @@ check_state_change() {
     local new_state="$2"
     local detail="$3"
 
-    # BUG-17 FIX: Validate key doesn't contain = or : which would corrupt state file format
     # These characters are used as delimiters in key=STATE:count format
     if [[ "$key" == *"="* || "$key" == *":"* ]]; then
         log "ERROR" "check_state_change: invalid key '${key}' contains = or : — rejecting to prevent state file corruption"
@@ -1100,7 +1107,6 @@ html_escape() {
 # ===========================================================================
 sanitize_state_key() {
     local key="$1"
-    # BUG-11 FIX: Added lowercase conversion as documented in AGENTS.md
     # Replace anything not alphanumeric, underscore, hyphen, or dot with underscore,
     # then convert to lowercase for consistent state keys
     printf '%s' "$key" | tr -c 'a-zA-Z0-9_.-' '_' | tr '[:upper:]' '[:lower:]'
@@ -1535,7 +1541,6 @@ check_memory() {
 # ===========================================================================
 check_disk() {
     # Parse df output, skip tmpfs/devtmpfs/overlay/squashfs/loop
-    # BUG-21 FIX: Use df -P (POSIX format) which handles mount points with spaces correctly
     # POSIX format: Filesystem 1024-blocks Used Available Capacity Mounted on
     # With -P, each filesystem is on one line, and "Mounted on" is the last field (can contain spaces)
     local filesystem blocks used avail pct mountpoint
@@ -1545,7 +1550,6 @@ check_disk() {
         
         # Parse POSIX df output: Filesystem blocks used avail pct mountpoint...
         # Use regex to extract fields, handling spaces in mount point
-        # BUG-21 FIX: Regex pattern correctly captures mount points with spaces in BASH_REMATCH[6]
         if [[ "$line" =~ ^([^[:space:]]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)%[[:space:]]+(.+)$ ]]; then
             filesystem="${BASH_REMATCH[1]}"
             # blocks="${BASH_REMATCH[2]}"  # Available if needed
@@ -1574,9 +1578,7 @@ check_disk() {
             log "WARN" "check_disk: non-numeric usage '${pct}' for ${mountpoint} — skipping"
             continue
         fi
-        # BUG-4 FIX: Sanitize key properly - only replace solitary underscore with 'root'
-        # BUG-12 FIX: Use sanitize_state_key to handle = and : characters that corrupt state file
-        # Old code: sed 's/^_/root/' incorrectly turned /home into disk_roothome
+        # sanitized_state_key handles special chars; strip leading _ for root mount
         local sanitized=$(sanitize_state_key "$mountpoint")
         # Remove leading underscore (from leading /) for root mount point
         sanitized="${sanitized#_}"
@@ -1614,8 +1616,6 @@ check_disk() {
                 local inode_usage
                 inode_usage=$(printf '%s' "$inode_pct_raw" | tr -dc '0-9')
                 if is_valid_number "$inode_usage" && [[ "$inode_usage" -gt 0 ]]; then
-                    # BUG-4 FIX: Apply same sanitization fix to inode key
-                    # BUG-12 FIX: Use sanitize_state_key to handle = and : characters
                     local inode_sanitized=$(sanitize_state_key "$mountpoint")
                     # Remove leading underscore (from leading /) for root mount point
                     inode_sanitized="${inode_sanitized#_}"
@@ -1627,7 +1627,6 @@ check_disk() {
                 fi
             fi
         fi
-    # BUG-21 FIX: Use df -P (POSIX format) which handles mount points with spaces
     # POSIX format uses 1024-blocks and ensures one line per filesystem
     done < <(run_with_timeout "$CHECK_TIMEOUT" df -P 2>/dev/null | tail -n +2)
 }
@@ -2022,7 +2021,6 @@ check_docker_containers() {
                 ;;
             *)
                 state="CRITICAL"
-                # BUG-16 FIX: Escape status for HTML to prevent parse errors
                 detail="Container <code>${safe_container}</code> status: <b>$(html_escape "$status")</b>"
                 ;;
         esac
@@ -3035,7 +3033,6 @@ check_databases() {
             local redis_exit=$?
             
             # Check for password authentication error
-            # BUG-20 FIX: Added WRONGPASS and AUTH patterns for Redis 6+ ACL errors
             if [[ "$redis_result" == *"NOAUTH"* ]] || [[ "$redis_result" == *"authentication"* ]] || \
                [[ "$redis_result" == *"WRONGPASS"* ]] || [[ "$redis_result" == *"AUTH"* ]]; then
                 redis_state="CRITICAL"
@@ -3251,7 +3248,6 @@ check_odbc() {
             fi
         else
             # Connection string-based: isql -k "connection_string" -b -c';' query
-            # BUG-13 FIX: Pass connection string via file to hide password from ps output
             # The connection string containing PWD= is passed via a temp file descriptor
             # instead of command line to prevent exposure in /proc/*/cmdline
             local conn_str_file
@@ -3494,7 +3490,6 @@ check_file_integrity() {
         key=$(make_state_key "integrity" "$filepath")
         local fname
         fname=$(basename "$filepath")
-        # BUG-19 FIX: Escape filename for HTML to prevent parse errors from special chars in filenames
         local safe_fname
         safe_fname=$(html_escape "$fname")
 
@@ -4034,7 +4029,7 @@ check_proxmox_guests() {
         local guest_id="${guest_entry##*:}"
         local guest_name=""
         
-        # BUG-15 FIX: Validate guest ID is numeric to prevent state file corruption
+        # Validate guest ID is numeric to prevent state file corruption
         # and ensure safe shell command usage
         if ! is_valid_number "$guest_id"; then
             log "WARN" "proxmox_guests: Invalid guest ID '${guest_id}' (must be numeric) — skipping"
@@ -4060,7 +4055,6 @@ check_proxmox_guests() {
                 check_state_change "proxmox_vm_${guest_id}" "CRITICAL" "VM <code>$(html_escape "$guest_name")</code> ($guest_id) is <b>STOPPED</b>"
             else
                 all_ok=false
-                # BUG-16 FIX: Escape vm_status for HTML to prevent parse errors
                 check_state_change "proxmox_vm_${guest_id}" "WARNING" "VM <code>$(html_escape "$guest_name")</code> ($guest_id) status: <b>$(html_escape "$vm_status")</b>"
             fi
         elif [[ "$guest_type" == "ct" ]]; then
@@ -4077,7 +4071,6 @@ check_proxmox_guests() {
                 check_state_change "proxmox_ct_${guest_id}" "CRITICAL" "LXC <code>$(html_escape "$guest_name")</code> ($guest_id) is <b>STOPPED</b>"
             else
                 all_ok=false
-                # BUG-16 FIX: Escape ct_status for HTML to prevent parse errors
                 check_state_change "proxmox_ct_${guest_id}" "WARNING" "LXC <code>$(html_escape "$guest_name")</code> ($guest_id) status: <b>$(html_escape "$ct_status")</b>"
             fi
         fi
@@ -6584,7 +6577,7 @@ EOF
         return 0
     else
         # Log the actual error for debugging (but sanitize credentials)
-        # BUG-9 FIX: Use bash parameter substitution instead of sed to avoid issues
+        # Use bash parameter substitution instead of sed to avoid issues
         # with special characters in password (|, \, [, ., *, $ are regex metacharacters in sed)
         local filtered_error
         filtered_error=$(echo "$curl_output" | grep -E "(^< [0-9]|^curl:|Failed|Could not|Error|timeout|refused|resolve)" | tail -3)
@@ -6768,7 +6761,6 @@ main() {
     if [[ ! -f "$FIRST_RUN_FINGERPRINT" ]]; then
         # No fingerprint found — this is truly a first run
         is_first_run=true
-        # BUG-3 FIX: Create fingerprint with proper error handling
         if echo "$(date '+%Y-%m-%d %H:%M:%S')" > "$FIRST_RUN_FINGERPRINT" 2>/dev/null; then
             chmod 600 "$FIRST_RUN_FINGERPRINT" 2>/dev/null || true
             log "INFO" "First run detected (fingerprint created at ${FIRST_RUN_FINGERPRINT}) - using immediate alerts (confirmation=1)"
