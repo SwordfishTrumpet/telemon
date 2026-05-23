@@ -41,6 +41,9 @@ jobs:
     
     - name: Check telemon-admin.sh syntax
       run: bash -n telemon-admin.sh
+    
+    - name: Check lib/common.sh syntax
+      run: bash -n lib/common.sh
 
   test-run:
     name: Test Run (Dry Mode)

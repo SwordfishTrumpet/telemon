@@ -538,6 +538,10 @@ run_with_timeout() {
     "$@" &
     pid=$!
     
+    # Ensure background process is killed if this function exits abnormally
+    # shellcheck disable=SC2064
+    trap "kill -KILL $pid 2>/dev/null || true" EXIT
+    
     local count=0
     while kill -0 "$pid" 2>/dev/null; do
         sleep 1
@@ -546,13 +550,16 @@ run_with_timeout() {
             kill -TERM "$pid" 2>/dev/null || true
             sleep 1
             kill -KILL "$pid" 2>/dev/null || true
+            trap - EXIT
             log "WARN" "Command timed out after ${timeout_sec}s: $*"
             return 124
         fi
     done
     
     wait "$pid" 2>/dev/null
-    return $?
+    local exit_code=$?
+    trap - EXIT
+    return $exit_code
 }
 
 # Default timeout for external commands (seconds)
@@ -798,16 +805,28 @@ safe_write_state_file() {
     tmp_target=$(mktemp "${target}.XXXXXX") || { log "ERROR" "Failed to create temp file for ${target}"; return 1; }
     echo "$content" > "$tmp_target"
     chmod 600 "$tmp_target" 2>/dev/null || true
-    # mv -T refuses to follow symlinks at target (prevents TOCTOU race)
-    if ! mv -T "$tmp_target" "$target" 2>/dev/null; then
-        # Fallback for non-GNU mv: check for symlink, then plain mv
+    safe_atomic_mv "$tmp_target" "$target"
+}
+
+# Atomic move helper used by safe_write_state_file and export_prometheus
+# Provides symlink protection and TOCTOU defense via mv -T
+safe_atomic_mv() {
+    local tmp_file="$1"
+    local target="$2"
+    if [[ -L "$target" ]]; then
+        log "ERROR" "Target ${target} is a symlink — refusing to write"
+        rm -f "$tmp_file"
+        return 1
+    fi
+    if ! mv -T "$tmp_file" "$target" 2>/dev/null; then
         if [[ -L "$target" ]]; then
-            log "ERROR" "State file ${target} is a symlink — refusing to write"
-            rm -f "$tmp_target"
+            log "ERROR" "Target ${target} is a symlink — refusing to write"
+            rm -f "$tmp_file"
             return 1
         fi
-        mv "$tmp_target" "$target" || { log "ERROR" "Failed to write ${target}"; rm -f "$tmp_target"; return 1; }
+        mv "$tmp_file" "$target" || { log "ERROR" "Failed to write ${target}"; rm -f "$tmp_file"; return 1; }
     fi
+    return 0
 }
 
 # ===========================================================================
@@ -968,27 +987,6 @@ calculate_lxc_cpu_percent() {
     fi
 }
 
-# Get container memory percentage (usage / limit)
-# Returns: percentage 0-100, or -1 if unable to calculate
-calculate_lxc_memory_percent() {
-    local usage limit
-    usage=$(get_lxc_memory_usage)
-    limit=$(get_lxc_memory_limit)
-    
-    if [[ "$limit" == "max" ]] || [[ "$limit" -eq 0 ]]; then
-        # No limit set - can't calculate percentage
-        echo "-1"
-        return
-    fi
-    
-    if ! is_valid_number "$usage" || ! is_valid_number "$limit"; then
-        echo "-1"
-        return
-    fi
-    
-    echo $(( 100 - ((usage * 100) / limit) ))
-}
-
 # Check if we should use LXC-aware metrics
 use_lxc_metrics() {
     is_lxc_container && is_cgroup_v2
@@ -1067,10 +1065,6 @@ check_state_change() {
         if [[ "$ALERT_COOLDOWN_SEC" -gt 0 ]] && [[ "$time_since_last" -lt "$ALERT_COOLDOWN_SEC" ]]; then
             log "DEBUG" "Rate limited alert for ${key}: cooldown active (${ALERT_COOLDOWN_SEC}s)"
         else
-            # Skip OK/recovery alerts - only alert on problems
-            if [[ "$new_state" == "OK" ]]; then
-                log "DEBUG" "Skipping OK alert for ${key} (recovery alerts disabled)"
-            else
                 local emoji=""
                 case "$new_state" in
                     CRITICAL) emoji="&#128308;" ;;  # Red circle
@@ -1078,7 +1072,6 @@ check_state_change() {
                 esac
                 
                 ALERTS+="${emoji} <b>${key}</b>: ${detail}%0A%0A"
-            fi
             ALERT_LAST_SENT["$key"]="$now_epoch"
             log "INFO" "State change confirmed for ${key}: ${prev_state} -> ${new_state} (count: ${PREV_COUNT[$key]})"
             
@@ -1151,15 +1144,18 @@ linear_regression() {
     [[ -z "$datapoints" ]] && { echo "0 0"; return 1; }
     echo "$datapoints" | awk -F',' '{
         n = 0; sx = 0; sy = 0; sxx = 0; sxy = 0
+        first_x = 0
         for (i = 1; i <= NF; i++) {
             split($i, a, ":")
             if (a[1] == "" || a[2] == "") continue
             x = a[1] + 0; y = a[2] + 0
+            if (n == 0) first_x = x
+            x = x - first_x
             sx += x; sy += y; sxx += x*x; sxy += x*y; n++
         }
         if (n < 2 || (n*sxx - sx*sx) == 0) { print "0 0"; exit 1 }
         slope = (n*sxy - sx*sy) / (n*sxx - sx*sx)
-        intercept = (sy - slope*sx) / n
+        intercept = (sy - slope*sx) / n - slope * first_x
         printf "%.10f %.4f\n", slope, intercept
     }'
 }
@@ -1460,16 +1456,24 @@ check_memory() {
         usage_bytes=$(get_lxc_memory_usage)
         limit_bytes=$(get_lxc_memory_limit)
         
-        # Convert to KB for consistent units
-        available_kb=$((usage_bytes / 1024))
-        
         if [[ "$limit_bytes" != "max" ]] && is_valid_number "$limit_bytes"; then
             total_kb=$((limit_bytes / 1024))
-            log "DEBUG" "check_memory: LXC memory limit ${total_kb}KB, usage ${available_kb}KB"
+            # Calculate available memory correctly: limit - usage
+            available_kb=$(((limit_bytes - usage_bytes) / 1024))
+            log "DEBUG" "check_memory: LXC memory limit ${total_kb}KB, usage ${usage_bytes}KB, available ${available_kb}KB"
         else
             # No hard limit set - fall back to /proc/meminfo but log warning
             total_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
-            log "DEBUG" "check_memory: LXC no memory limit — using /proc/meminfo total (shows host memory)"
+            available_kb=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+            # Fallback for kernels < 3.14 without MemAvailable
+            if [[ -z "$available_kb" ]]; then
+                local mem_free buffers cached
+                mem_free=$(awk '/^MemFree:/ {print $2}' /proc/meminfo)
+                buffers=$(awk '/^Buffers:/ {print $2}' /proc/meminfo)
+                cached=$(awk '/^Cached:/ {print $2}' /proc/meminfo)
+                available_kb=$(( ${mem_free:-0} + ${buffers:-0} + ${cached:-0} ))
+            fi
+            log "DEBUG" "check_memory: LXC no memory limit — using /proc/meminfo (shows host memory)"
         fi
     else
         # Standard host/VM: Use /proc/meminfo
@@ -1543,7 +1547,7 @@ check_disk() {
     # Parse df output, skip tmpfs/devtmpfs/overlay/squashfs/loop
     # POSIX format: Filesystem 1024-blocks Used Available Capacity Mounted on
     # With -P, each filesystem is on one line, and "Mounted on" is the last field (can contain spaces)
-    local filesystem blocks used avail pct mountpoint
+    local filesystem pct mountpoint
     while IFS= read -r line; do
         # Skip header line
         [[ "$line" == Filesystem* ]] && continue
@@ -1552,9 +1556,6 @@ check_disk() {
         # Use regex to extract fields, handling spaces in mount point
         if [[ "$line" =~ ^([^[:space:]]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)%[[:space:]]+(.+)$ ]]; then
             filesystem="${BASH_REMATCH[1]}"
-            # blocks="${BASH_REMATCH[2]}"  # Available if needed
-            # used="${BASH_REMATCH[3]}"    # Available if needed
-            # avail="${BASH_REMATCH[4]}"  # Available if needed
             pct="${BASH_REMATCH[5]}%"
             mountpoint="${BASH_REMATCH[6]}"
         else
@@ -2246,11 +2247,11 @@ check_sites() {
 
         # Validate numeric parameters, fall back to defaults
         if ! is_valid_number "$expected_status"; then
-            log "WARN" "check_sites: invalid expected_status '${expected_status}' for ${url} — using default"
-            expected_status="${SITE_EXPECTED_STATUS:-200}"
+            log "WARN" "check_sites: invalid expected_status '${expected_status}' for ${url} — using default 200"
+            expected_status="200"
         elif [[ "$expected_status" -lt 100 ]] || [[ "$expected_status" -gt 599 ]]; then
-            log "WARN" "check_sites: expected_status '${expected_status}' out of range (100-599) for ${url} — using default"
-            expected_status="${SITE_EXPECTED_STATUS:-200}"
+            log "WARN" "check_sites: expected_status '${expected_status}' out of range (100-599) for ${url} — using default 200"
+            expected_status="200"
         fi
         if ! is_valid_number "$max_response_ms"; then
             log "WARN" "check_sites: invalid max_response_ms '${max_response_ms}' for ${url} — using default"
@@ -3348,11 +3349,8 @@ check_network_bandwidth() {
         return
     fi
 
-    local rx_rate=$(( (rx_bytes - prev_rx) / interval ))
-    local tx_rate=$(( (tx_bytes - prev_tx) / interval ))
-
     # Handle counter wraparound: report OK and let next cycle use fresh baseline
-    if [[ "$rx_rate" -lt 0 ]] || [[ "$tx_rate" -lt 0 ]]; then
+    if [[ "$rx_bytes" -lt "$prev_rx" ]] || [[ "$tx_bytes" -lt "$prev_tx" ]]; then
         log "DEBUG" "check_network_bandwidth: counter wraparound detected on ${iface} — skipping rate calculation"
         local iface_key_wrap="net_$(printf '%s' "$iface" | tr -c 'a-zA-Z0-9_' '_')"
         check_state_change "$iface_key_wrap" "OK" "Network ${safe_iface}: counter wraparound (awaiting next sample)"
@@ -3840,10 +3838,11 @@ check_plugins() {
         
         # Parse plugin output: STATE|KEY|DETAIL
         # State must be OK, WARNING, or CRITICAL
-        local plugin_state="${plugin_output%%|*}"
-        local rest="${plugin_output#*|}"
-        local plugin_key="${rest%%|*}"
-        local plugin_detail="${rest#*|}"
+        # Use cut to preserve pipe characters in the detail field
+        local plugin_state plugin_key plugin_detail
+        plugin_state=$(printf '%s' "$plugin_output" | cut -d'|' -f1)
+        plugin_key=$(printf '%s' "$plugin_output" | cut -d'|' -f2)
+        plugin_detail=$(printf '%s' "$plugin_output" | cut -d'|' -f3-)
         
         # Validate state
         case "$plugin_state" in
@@ -4239,9 +4238,10 @@ check_proxmox_tasks() {
     local task_warn="${PROXMOX_TASK_WARN:-0}"
     local task_crit="${PROXMOX_TASK_CRIT:-1}"
 
-    local failed_tasks
-    failed_tasks=$(run_with_timeout "$CHECK_TIMEOUT" pvesh get "/cluster/tasks" --output-format json 2>/dev/null | grep -c "FAILED\|ERROR" || echo "0")
-    failed_tasks=$(echo "$failed_tasks" | head -1 | tr -d '\n')
+    local json_output failed_tasks
+    json_output=$(run_with_timeout "$CHECK_TIMEOUT" pvesh get "/cluster/tasks" --output-format json 2>/dev/null) || json_output="[]"
+    failed_tasks=$(printf '%s' "$json_output" | python3 -c "import json,sys; data=json.load(sys.stdin); print(sum(1 for t in data if isinstance(t,dict) and t.get('status') in ('FAILED','ERROR')))" 2>/dev/null || echo "0")
+    failed_tasks=$(printf '%s' "$failed_tasks" | head -1 | tr -d '\n')
 
     if [[ "$failed_tasks" -ge "$task_crit" ]]; then
         check_state_change "proxmox_tasks" "CRITICAL" "<b>${failed_tasks}</b> failed task(s) in task log"
@@ -4353,7 +4353,7 @@ export_prometheus() {
             esac
             # Sanitize key for Prometheus label
             local safe_key
-            safe_key=$(echo "$key" | tr -c 'a-zA-Z0-9_' '_')
+            safe_key=$(printf '%s' "$key" | tr -c 'a-zA-Z0-9_' '_')
             echo "telemon_check_state{check=\"${safe_key}\"} ${val}"
         done
 
@@ -4366,7 +4366,7 @@ export_prometheus() {
         echo "telemon_last_run_timestamp $(date +%s)"
     } > "$tmp_file"
 
-    mv "$tmp_file" "$prom_file"
+    safe_atomic_mv "$tmp_file" "$prom_file"
     chmod 644 "$prom_file" 2>/dev/null || true
 }
 

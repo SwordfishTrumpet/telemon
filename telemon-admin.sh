@@ -47,7 +47,7 @@ cmd_backup() {
     local backup_path="${1:-${SCRIPT_DIR}/backups/telemon-backup-$(date +%Y%m%d-%H%M%S)}"
     
     echo "Creating backup at: $backup_path"
-    if ! mkdir -m 700 -p "$backup_path" 2>/dev/null; then
+    if ! mkdir -p "$backup_path" 2>/dev/null; then
         echo -e "${RED}ERROR: Failed to create backup directory: ${backup_path}${NC}"
         exit 1
     fi
