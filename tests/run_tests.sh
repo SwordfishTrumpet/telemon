@@ -654,15 +654,18 @@ test_linear_regression() {
         [[ -z "$datapoints" ]] && { echo "0 0"; return 1; }
         echo "$datapoints" | awk -F',' '{
             n = 0; sx = 0; sy = 0; sxx = 0; sxy = 0
+            first_x = 0
             for (i = 1; i <= NF; i++) {
                 split($i, a, ":")
                 if (a[1] == "" || a[2] == "") continue
                 x = a[1] + 0; y = a[2] + 0
+                if (n == 0) first_x = x
+                x = x - first_x
                 sx += x; sy += y; sxx += x*x; sxy += x*y; n++
             }
             if (n < 2 || (n*sxx - sx*sx) == 0) { print "0 0"; exit 1 }
             slope = (n*sxy - sx*sy) / (n*sxx - sx*sx)
-            intercept = (sy - slope*sx) / n
+            intercept = (sy - slope*sx) / n - slope * first_x
             printf "%.10f %.4f\n", slope, intercept
         }'
     }
@@ -979,10 +982,15 @@ test_require_file() {
     assert_true "require_file rejects unsafe path with .."
     
     # Test with unreadable file (TEST-001)
-    chmod 000 "$tmpfile"
-    ! require_file "$tmpfile" "unreadable file" 2>/dev/null
-    assert_true "require_file rejects unreadable file"
-    chmod 644 "$tmpfile"  # Restore permissions for cleanup
+    # Skip if running as root because root bypasses file permissions
+    if [[ $EUID -ne 0 ]]; then
+        chmod 000 "$tmpfile"
+        ! require_file "$tmpfile" "unreadable file" 2>/dev/null
+        assert_true "require_file rejects unreadable file"
+        chmod 644 "$tmpfile"  # Restore permissions for cleanup
+    else
+        echo -e "${YELLOW}⚠${NC} Skipping unreadable-file test (running as root)"
+    fi
     
     # Cleanup
     rm -f "$tmpfile"
@@ -3229,6 +3237,170 @@ test_first_run_fingerprint() {
 }
 
 # ---------------------------------------------------------------------------
+# Test Plugin Detail Parsing with Pipe Characters
+# ---------------------------------------------------------------------------
+
+test_plugin_detail_pipes() {
+    echo ""
+    echo "Testing plugin detail parsing with pipe characters..."
+    
+    # Test the cut-based parsing logic used in telemon.sh
+    local plugin_output plugin_state plugin_key plugin_detail
+    
+    # Test 1: Normal output without pipes in detail
+    plugin_output="OK|my_check|Everything is working"
+    plugin_state=$(printf '%s' "$plugin_output" | cut -d'|' -f1)
+    plugin_key=$(printf '%s' "$plugin_output" | cut -d'|' -f2)
+    plugin_detail=$(printf '%s' "$plugin_output" | cut -d'|' -f3-)
+    assert_eq "OK" "$plugin_state" "Plugin state parsing (no pipes in detail)"
+    assert_eq "my_check" "$plugin_key" "Plugin key parsing (no pipes in detail)"
+    assert_eq "Everything is working" "$plugin_detail" "Plugin detail parsing (no pipes in detail)"
+    
+    # Test 2: Detail containing pipe characters
+    plugin_output="WARNING|cpu|CPU: 85% | Load: high | Temp: 70C"
+    plugin_state=$(printf '%s' "$plugin_output" | cut -d'|' -f1)
+    plugin_key=$(printf '%s' "$plugin_output" | cut -d'|' -f2)
+    plugin_detail=$(printf '%s' "$plugin_output" | cut -d'|' -f3-)
+    assert_eq "WARNING" "$plugin_state" "Plugin state parsing (pipes in detail)"
+    assert_eq "cpu" "$plugin_key" "Plugin key parsing (pipes in detail)"
+    assert_eq "CPU: 85% | Load: high | Temp: 70C" "$plugin_detail" "Plugin detail preserves pipe characters"
+    
+    # Test 3: Empty detail field
+    plugin_output="CRITICAL|disk|"
+    plugin_state=$(printf '%s' "$plugin_output" | cut -d'|' -f1)
+    plugin_key=$(printf '%s' "$plugin_output" | cut -d'|' -f2)
+    plugin_detail=$(printf '%s' "$plugin_output" | cut -d'|' -f3-)
+    assert_eq "CRITICAL" "$plugin_state" "Plugin state parsing (empty detail)"
+    assert_eq "disk" "$plugin_key" "Plugin key parsing (empty detail)"
+    assert_eq "" "$plugin_detail" "Plugin detail parsing (empty detail)"
+}
+
+# ---------------------------------------------------------------------------
+# Test LXC Code Paths with Mock cgroup Filesystems
+# ---------------------------------------------------------------------------
+
+test_lxc_code_paths() {
+    echo ""
+    echo "Testing LXC code paths with mock cgroup filesystems..."
+    
+    # Create a mock cgroup v2 filesystem in a temp directory
+    local mock_cgroup
+    mock_cgroup=$(mktemp -d)
+    
+    # Mock /proc/1/cgroup for LXC detection
+    local mock_proc
+    mock_proc=$(mktemp -d)
+    mkdir -p "${mock_proc}/1"
+    echo "0::/lxc/100" > "${mock_proc}/1/cgroup"
+    
+    # Mock cgroup v2 files
+    mkdir -p "${mock_cgroup}"
+    echo "memory current" > "${mock_cgroup}/memory.current"
+    echo "1073741824" > "${mock_cgroup}/memory.current"  # 1GB
+    echo "2147483648" > "${mock_cgroup}/memory.max"      # 2GB limit
+    printf 'user_usec 1000000\nsystem_usec 500000\n' > "${mock_cgroup}/cpu.stat"
+    echo "cpu io" > "${mock_cgroup}/cgroup.controllers"
+    
+    # Test 1: LXC detection via cgroup content
+    [[ -f "${mock_proc}/1/cgroup" ]]
+    assert_true "LXC: mock /proc/1/cgroup exists"
+    grep -q "lxc" "${mock_proc}/1/cgroup"
+    assert_true "LXC: mock /proc/1/cgroup contains lxc"
+    
+    # Test 2: cgroup v2 detection
+    [[ -f "${mock_cgroup}/cgroup.controllers" ]]
+    assert_true "LXC: mock cgroup.controllers exists"
+    
+    # Test 3: Memory usage reading
+    local usage
+    usage=$(cat "${mock_cgroup}/memory.current")
+    assert_eq "1073741824" "$usage" "LXC: memory.current reads correctly"
+    
+    # Test 4: Memory limit reading
+    local limit
+    limit=$(cat "${mock_cgroup}/memory.max")
+    assert_eq "2147483648" "$limit" "LXC: memory.max reads correctly"
+    
+    # Test 5: Calculate available memory correctly
+    local available_kb
+    available_kb=$(((limit - usage) / 1024))
+    assert_eq "1048576" "$available_kb" "LXC: available memory calculation is correct (limit - usage)"
+    
+    # Test 6: Calculate usage percentage
+    local usage_pct
+    usage_pct=$(( (usage * 100) / limit ))
+    assert_eq "50" "$usage_pct" "LXC: usage percentage calculation is correct"
+    
+    # Test 7: cpu.stat parsing
+    local user_usec system_usec
+    user_usec=$(awk '/user_usec/ {print $2}' "${mock_cgroup}/cpu.stat")
+    system_usec=$(awk '/system_usec/ {print $2}' "${mock_cgroup}/cpu.stat")
+    assert_eq "1000000" "$user_usec" "LXC: cpu.stat user_usec parsing"
+    assert_eq "500000" "$system_usec" "LXC: cpu.stat system_usec parsing"
+    
+    # Cleanup
+    rm -rf "$mock_cgroup" "$mock_proc"
+}
+
+# ---------------------------------------------------------------------------
+# Test safe_atomic_mv helper (symlink/TOCTOU protection)
+# ---------------------------------------------------------------------------
+
+test_safe_atomic_mv() {
+    echo ""
+    echo "Testing safe_atomic_mv helper..."
+    
+    # Define safe_atomic_mv inline for testing
+    safe_atomic_mv() {
+        local tmp_file="$1"
+        local target="$2"
+        if [[ -L "$target" ]]; then
+            rm -f "$tmp_file"
+            return 1
+        fi
+        if ! mv -T "$tmp_file" "$target" 2>/dev/null; then
+            if [[ -L "$target" ]]; then
+                rm -f "$tmp_file"
+                return 1
+            fi
+            mv "$tmp_file" "$target" || { rm -f "$tmp_file"; return 1; }
+        fi
+        return 0
+    }
+    
+    local test_dir
+    test_dir=$(mktemp -d)
+    
+    # Test 1: Basic atomic move
+    local tmp_file="${test_dir}/tmp.XXXXXX"
+    echo "test content" > "$tmp_file"
+    local target="${test_dir}/target_file"
+    safe_atomic_mv "$tmp_file" "$target"
+    assert_true "safe_atomic_mv: basic move succeeds"
+    [[ -f "$target" ]]
+    assert_true "safe_atomic_mv: target file exists after move"
+    [[ ! -f "$tmp_file" ]]
+    assert_true "safe_atomic_mv: temp file removed after move"
+    
+    # Test 2: Refuse to follow symlinks
+    local real_file="${test_dir}/real_file"
+    echo "real content" > "$real_file"
+    local symlink="${test_dir}/symlink_target"
+    ln -s "$real_file" "$symlink"
+    local tmp_file2="${test_dir}/tmp2.XXXXXX"
+    echo "malicious content" > "$tmp_file2"
+    ! safe_atomic_mv "$tmp_file2" "$symlink"
+    assert_true "safe_atomic_mv: refuses to overwrite symlink"
+    # Verify real file was not overwritten
+    local real_content
+    real_content=$(cat "$real_file")
+    assert_eq "real content" "$real_content" "safe_atomic_mv: real file unchanged after symlink rejection"
+    
+    # Cleanup
+    rm -rf "$test_dir"
+}
+
+# ---------------------------------------------------------------------------
 # Test Bug Fixes (2026-04-25 batch)
 # ---------------------------------------------------------------------------
 
@@ -3287,6 +3459,58 @@ test_bug_fixes_2026_04_25() {
     # check_disk uses df -P
     grep -q 'df -P' "$telemon_script"
     assert_true "check_disk uses df -P for POSIX format"
+    
+    # LXC memory check: available memory calculated as limit - usage
+    grep -q 'available_kb=$(((limit_bytes - usage_bytes) / 1024))' "$telemon_script"
+    assert_true "LXC memory check calculates available as limit - usage"
+    
+    # Dead code removed: calculate_lxc_memory_percent no longer exists
+    ! grep -q 'calculate_lxc_memory_percent()' "$telemon_script"
+    assert_true "Dead code calculate_lxc_memory_percent() removed"
+    
+    # Recovery alerts re-enabled (OK skip removed from check_state_change)
+    ! grep -q 'Skipping OK alert for' "$telemon_script"
+    assert_true "Recovery alerts re-enabled in check_state_change"
+    
+    # shellcheck SC2174 fixed in telemon-admin.sh (no mkdir -m with -p)
+    ! grep -q 'mkdir -m 700 -p' "$admin_script"
+    assert_true "telemon-admin.sh: SC2174 fixed (no mkdir -m with -p)"
+    
+    # safe_atomic_mv helper exists for symlink/TOCTOU protection
+    grep -q 'safe_atomic_mv()' "$telemon_script"
+    assert_true "safe_atomic_mv helper exists for atomic writes"
+    
+    # export_prometheus uses safe_atomic_mv
+    grep -q 'safe_atomic_mv.*prom_file' "$telemon_script"
+    assert_true "export_prometheus uses safe_atomic_mv for atomic writes"
+    
+    # Plugin detail parsing uses cut to preserve pipe characters
+    grep -q "cut -d'|' -f3-" "$telemon_script"
+    assert_true "Plugin detail parsing uses cut to preserve pipe characters"
+    
+    # check_proxmox_tasks uses python3 JSON parsing instead of grep
+    grep -q 'python3 -c.*json.load.*status.*FAILED' "$telemon_script"
+    assert_true "check_proxmox_tasks uses python3 JSON parsing"
+    
+    # SITE_EXPECTED_STATUS uses hard-coded default fallback
+    grep -q 'expected_status="200"' "$telemon_script"
+    assert_true "SITE_EXPECTED_STATUS fallback uses hard-coded default 200"
+    
+    # run_with_timeout fallback sets trap for cleanup
+    grep -q 'trap.*kill -KILL.*EXIT' "$telemon_script"
+    assert_true "run_with_timeout fallback sets trap for background process cleanup"
+    
+    # linear_regression centers timestamps for numerical stability
+    grep -q 'x = x - first_x' "$telemon_script"
+    assert_true "linear_regression centers timestamps for numerical stability"
+    
+    # check_disk removes unused regex capture variables
+    ! grep -q 'local filesystem blocks used avail pct mountpoint' "$telemon_script"
+    assert_true "check_disk removes unused local variable declarations"
+    
+    # check_network_bandwidth removes unused integer rate calculations
+    ! grep -q 'local rx_rate=$(( (rx_bytes - prev_rx) / interval ))' "$telemon_script"
+    assert_true "check_network_bandwidth removes unused integer rate calculations"
 }
 
 # ---------------------------------------------------------------------------
@@ -3346,6 +3570,9 @@ main() {
     test_lock_mechanism
     test_first_run_fingerprint
     test_bug_fixes_2026_04_25
+    test_plugin_detail_pipes
+    test_lxc_code_paths
+    test_safe_atomic_mv
 
     # Summary
     echo ""

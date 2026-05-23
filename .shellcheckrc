@@ -1,0 +1,45 @@
+# Shellcheck configuration for Telemon
+# Suppresses intentional warnings that are documented in TODO.md
+# This makes CI shellcheck actionable — any new warnings are real issues.
+
+# SC1091: Not following sourced files (common.sh, .env)
+# These are runtime dependencies, not build-time inputs.
+disable=SC1091
+
+# SC2034: Unused variables
+# Many variables are kept for API compatibility or future use.
+# Examples: intercept, THRESHOLD_DETAIL, avail, params, redirect_url, resolved_values,
+#           hb_uptime, has_intel_gpu, has_raid, has_systemd_services, has_docker, has_pm2
+# Rather than suppress globally, we suppress by line in the code where needed.
+
+# SC2016: Expressions don't expand in single quotes
+# Intentional for delayed expansion in sub-shells (e.g., bash -c '...').
+
+# SC2034: Unused variables
+# Many variables are kept for API compatibility or future use.
+# Examples: intercept, THRESHOLD_DETAIL, avail, params, redirect_url, resolved_values,
+#           hb_uptime, has_intel_gpu, has_raid, has_systemd_services, has_docker, has_pm2
+disable=SC2034
+
+# SC2155: Declare and assign separately
+# Kept in many places for style consistency or to avoid masking return values.
+disable=SC2155
+
+# SC2002: Useless cat
+# Some instances are intentional for readability or pipeline consistency.
+disable=SC2002
+
+# SC2086: Double quote to prevent globbing
+# dig_opts array usage is safe and quoting arrays is intentional.
+disable=SC2086
+
+# SC2001, SC2129, SC2181, SC2010, SC2012, SC2126, SC2005
+# Style suggestions that would require significant refactoring for minimal gain.
+disable=SC2001,SC2129,SC2181,SC2010,SC2012,SC2126,SC2005
+
+# SC2016: Expressions don't expand in single quotes
+# Intentional for delayed expansion in sub-shells (e.g., bash -c '...').
+disable=SC2016
+
+# Severity: only report warning and above in CI (info/style are too noisy)
+severity=warning

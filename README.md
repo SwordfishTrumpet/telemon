@@ -49,12 +49,12 @@ Check 1: CPU=85% → count=1/3, silent (collecting evidence)
 Check 2: CPU=88% → count=2/3, silent (still collecting)
 Check 3: CPU=87% → count=3/3, ALERT SENT (confirmed problem)
 Check 4: CPU=87% → silent (already alerted)
-Check 5: CPU=40% → RESOLVED alert (immediate)
+Check 5: CPU=40% → RESOLVED ALERT SENT (problem cleared)
 ```
 
 - **Confirmation count**: Problem must persist N consecutive checks (default: 3 = 15 min)
 - **Rate limiting**: Per-key cooldown prevents flapping floods (default: 15 min)
-- **Resolution alerts**: Immediate notification when problems clear
+- **Recovery alerts**: Get notified when problems clear (CRITICAL → OK transitions trigger alerts)
 - **Retry queue**: Failed Telegram alerts retry next cycle
 
 ---
@@ -824,7 +824,7 @@ Check 1: CPU=85% (CRITICAL) → count=1/3, no alert
 Check 2: CPU=88% (CRITICAL) → count=2/3, no alert
 Check 3: CPU=87% (CRITICAL) → count=3/3, ALERT SENT
 Check 4: CPU=87% (CRITICAL) → count=3/3, silent
-Check 5: CPU=40% (OK)       → RESOLVED
+Check 5: CPU=40% (OK)       → RESOLVED ALERT SENT
 ```
 
 Set `CONFIRMATION_COUNT=1` for immediate alerts.
@@ -835,7 +835,7 @@ Per-key cooldown prevents alert floods:
 
 ```
 12:00 — CPU goes CRITICAL → alert sent
-12:05 — CPU resolves to OK → resolution sent
+12:05 — CPU resolves to OK → recovery alert sent
 12:10 — CPU goes CRITICAL again → cooldown active, no alert
 12:15 — CPU still CRITICAL → cooldown expired, alert sent
 ```
