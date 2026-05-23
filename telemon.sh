@@ -1435,8 +1435,8 @@ check_cpu() {
         "${CPU_THRESHOLD_CRIT:-80}" \
         "false" \
         "CPU load ${load_1m} (${load_pct}% of ${cores} cores)" \
-        "CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_WARN}%)" \
-        "CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_CRIT}%)"
+        "CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_WARN:-70}%)" \
+        "CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_CRIT:-80}%)"
     
     # Capture top processes if CPU is under stress
     if [[ "${THRESHOLD_STATE:-OK}" == "WARNING" || "${THRESHOLD_STATE:-OK}" == "CRITICAL" ]]; then
