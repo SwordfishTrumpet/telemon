@@ -6648,32 +6648,65 @@ send_telegram() {
     local message="$1"
     # Convert %0A back to real newlines for --data-urlencode
     message="${message//%0A/$'\n'}"
-    local response
+    # Telegram message limit is 4096 characters; truncate to avoid
+    # "message is too long" errors. Do this after %0A conversion so
+    # we measure the actual message length.
+    local orig_len=${#message}
+    if [[ ${#message} -gt 4000 ]]; then
+        message="${message:0:4000}"
+        local trunc_note=$'\n\n<i>... (truncated, '"${orig_len}"$' chars total)</i>'
+        message="${message}${trunc_note}"
+        log "WARN" "send_telegram: message length ${orig_len} exceeds limit — truncated to 4000 chars"
+    fi
+    local response curl_stderr
     # Use --config with process substitution to keep bot token out of
     # process args (hidden from ps aux / /proc/*/cmdline)
     # Fallback to temp file if /dev/fd is unavailable (restricted containers/chroots)
     local config_arg
     if [[ -e /dev/fd/0 ]]; then
         # Process substitution: preferred (no temp file, auto-cleaned)
+        curl_stderr=$(mktemp) || { log "ERROR" "send_telegram: failed to create temp file"; return 1; }
+        trap 'rm -f "$curl_stderr" 2>/dev/null' RETURN
         response=$(curl -s --max-time 30 -X POST \
             --config <(printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TELEGRAM_BOT_TOKEN") \
             -d "chat_id=${TELEGRAM_CHAT_ID}" \
             -d "parse_mode=HTML" \
-            --data-urlencode "text=${message}" 2>&1)
+            --data-urlencode "text=${message}" 2>"$curl_stderr")
+        local curl_exit=$?
+        if [[ $curl_exit -ne 0 ]]; then
+            local err_msg
+            err_msg=$(cat "$curl_stderr" 2>/dev/null || echo "unknown error")
+            log "ERROR" "Telegram send failed: curl exit $curl_exit ($err_msg)"
+            rm -f "$curl_stderr" 2>/dev/null
+            return 1
+        fi
+        rm -f "$curl_stderr" 2>/dev/null
+        trap - RETURN
     else
         # Fallback: secure temp file (umask 077 inherited, cleaned on exit)
         local tmp_config
         tmp_config=$(mktemp) || { log "ERROR" "send_telegram: failed to create temp config"; return 1; }
+        local curl_stderr
+        curl_stderr=$(mktemp) || { log "ERROR" "send_telegram: failed to create temp file"; return 1; }
         # Ensure cleanup on all exit paths
-        trap 'rm -f "$tmp_config" 2>/dev/null' RETURN
+        trap 'rm -f "$tmp_config" "$curl_stderr" 2>/dev/null' RETURN
         printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TELEGRAM_BOT_TOKEN" > "$tmp_config"
         chmod 600 "$tmp_config" 2>/dev/null || true
         response=$(curl -s --max-time 30 -X POST \
             --config "$tmp_config" \
             -d "chat_id=${TELEGRAM_CHAT_ID}" \
             -d "parse_mode=HTML" \
-            --data-urlencode "text=${message}" 2>&1)
-        rm -f "$tmp_config" 2>/dev/null
+            --data-urlencode "text=${message}" 2>"$curl_stderr")
+        local curl_exit=$?
+        if [[ $curl_exit -ne 0 ]]; then
+            local err_msg
+            err_msg=$(cat "$curl_stderr" 2>/dev/null || echo "unknown error")
+            log "ERROR" "Telegram send failed: curl exit $curl_exit ($err_msg)"
+            rm -f "$tmp_config" "$curl_stderr" 2>/dev/null
+            return 1
+        fi
+        rm -f "$tmp_config" "$curl_stderr" 2>/dev/null
+        trap - RETURN
     fi
 
     local ok
