@@ -48,6 +48,9 @@ if [[ "$SMBD_STATUS" != "active" ]]; then
     exit 0
 fi
 
+# Collect warnings to emit only if no CRITICAL is found
+WARNINGS=()
+
 # Check 2: Active SMB connections for Time Machine
 # Disable pipefail temporarily for this check (grep returns 1 when no matches)
 set +o pipefail
@@ -59,8 +62,7 @@ if ! [[ "$SMB_CONNECTIONS" =~ ^[0-9]+$ ]]; then
     SMB_CONNECTIONS=0
 fi
 if [[ "$SMB_CONNECTIONS" -eq 0 ]]; then
-    echo "WARNING|timemachine-connection|No active Time Machine connections on CT $TIMEMACHINE_CT"
-    # Continue to check other issues
+    WARNINGS+=("WARNING|timemachine-connection|No active Time Machine connections on CT $TIMEMACHINE_CT")
 fi
 
 # Check 3: Stale lock file
@@ -121,7 +123,7 @@ if [[ -n "$SMB_CONF" ]]; then
         esac
         
         if [[ "$QUOTA_GB" -lt "$QUOTA_MIN_GB" ]]; then
-            echo "WARNING|timemachine-quota|Samba quota ${QUOTA_VALUE} is below recommended ${QUOTA_MIN_GB}GB - may cause backup failures"
+            WARNINGS+=("WARNING|timemachine-quota|Samba quota ${QUOTA_VALUE} is below recommended ${QUOTA_MIN_GB}GB - may cause backup failures")
         fi
     fi
 fi
@@ -132,7 +134,7 @@ TMP_EXISTS=$(pct exec "$TIMEMACHINE_CT" -- test -f "$MACHINEID_TMP" 2>/dev/null 
 if [[ "$TMP_EXISTS" == "yes" ]]; then
     TMP_AGE=$(pct exec "$TIMEMACHINE_CT" -- find "$MACHINEID_TMP" -mmin +60 2>/dev/null | wc -l)
     if [[ "$TMP_AGE" -gt 0 ]]; then
-        echo "WARNING|timemachine-tmpfile|Stale MachineID.plist.tmp exists (>1 hour old) - previous backup may have been interrupted"
+        WARNINGS+=("WARNING|timemachine-tmpfile|Stale MachineID.plist.tmp exists (>1 hour old) - previous backup may have been interrupted")
     fi
 fi
 
@@ -150,6 +152,13 @@ if [[ -n "$IS_RUNNING" ]] && [[ "$HOURS_SINCE_WRITE" -le "$STALE_BACKUP_HOURS" ]
     else
         echo "OK|timemachine-running|Backup is running (no progress data available)"
     fi
+    exit 0
+fi
+
+# Emit collected warnings (only if no CRITICAL was emitted)
+if [[ ${#WARNINGS[@]} -gt 0 ]]; then
+    # Output the first warning only (most important one)
+    echo "${WARNINGS[0]}"
     exit 0
 fi
 
