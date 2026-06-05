@@ -6654,8 +6654,40 @@ send_telegram() {
     local orig_len=${#message}
     if [[ ${#message} -gt 4000 ]]; then
         message="${message:0:4000}"
+        # Close any HTML tags that were cut by truncation to prevent
+        # Telegram "can't parse entities" errors. Walk the text left to
+        # right, maintaining a stack; then close in reverse (LIFO) order.
+        local tag_stack=()
+        local remaining="$message"
+        local tag_re='(</?[a-z]+>)'
+        while [[ "$remaining" =~ $tag_re ]]; do
+            local matched="${BASH_REMATCH[1]}"
+            remaining="${remaining#*"$matched"}"
+            local tag_name
+            if [[ "$matched" == "</"* ]]; then
+                tag_name="${matched:2:${#matched}-3}"
+            else
+                tag_name="${matched:1:${#matched}-2}"
+            fi
+            if [[ "$matched" == "</"* ]]; then
+                # Closing tag: pop matching opening tag if on stack
+                if [[ ${#tag_stack[@]} -gt 0 && "${tag_stack[-1]}" == "$tag_name" ]]; then
+                    unset 'tag_stack[-1]'
+                fi
+            else
+                # Opening tag: push
+                tag_stack+=("$tag_name")
+            fi
+        done
+        # Close all remaining open tags in reverse order
+        local open_closes=""
+        local idx=$(( ${#tag_stack[@]} - 1 ))
+        while (( idx >= 0 )); do
+            open_closes+="</${tag_stack[$idx]}>"
+            idx=$(( idx - 1 ))
+        done
         local trunc_note=$'\n\n<i>... (truncated, '"${orig_len}"$' chars total)</i>'
-        message="${message}${trunc_note}"
+        message="${message}${open_closes}${trunc_note}"
         log "WARN" "send_telegram: message length ${orig_len} exceeds limit — truncated to 4000 chars"
     fi
     local response curl_stderr
