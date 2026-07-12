@@ -47,8 +47,10 @@ get_telemon_version() {
     if [[ -d "${SCRIPT_DIR}/.git" ]]; then
         git -C "$SCRIPT_DIR" describe --tags --always 2>/dev/null || \
         git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || \
+        cat "${SCRIPT_DIR}/VERSION" 2>/dev/null || \
         echo "unknown"
     else
+        cat "${SCRIPT_DIR}/VERSION" 2>/dev/null || \
         echo "unknown"
     fi
 }
