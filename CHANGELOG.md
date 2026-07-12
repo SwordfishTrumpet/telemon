@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-07-12
+
+### Fixed
+- **is_valid_number regex bug** — regex `^([1-9][0-9]*|0)$` rejected numbers with leading zeros (e.g., `"00"`, `"01"`), breaking `MAINT_SCHEDULE` entries with midnight start times like `Sun 00:30-02:30`. The `is_in_maintenance_window()` function logged `WARN` every 5-minute run (~288 warnings/day). Fixed by changing regex to `^[0-9]+$` — all callers already use `10#` prefix for octal safety.
+
 ### Security
 - **Input Validation** — critical `.env` security hardening:
   - Added `validate_env_security()` function to sanitize critical variables after sourcing
@@ -288,5 +293,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - .env.example with all configuration options
 - MIT License
 
-[Unreleased]: https://github.com/SwordfishTrumpet/telemon/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/SwordfishTrumpet/telemon/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/SwordfishTrumpet/telemon/releases/tag/v1.0.1
 [1.0.0]: https://github.com/SwordfishTrumpet/telemon/releases/tag/v1.0.0
