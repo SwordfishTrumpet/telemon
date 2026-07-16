@@ -1655,14 +1655,17 @@ check_internet() {
         log "WARN" "check_internet: PING_TARGET '${target}' contains unsafe characters — skipping"
         return
     fi
-    if ! is_valid_number "${PING_FAIL_THRESHOLD}"; then
-        log "WARN" "check_internet: PING_FAIL_THRESHOLD '${PING_FAIL_THRESHOLD}' is not numeric — skipping"
+    # Default to 3 — bare expansion crashed under `set -u` when .env did not
+    # define PING_FAIL_THRESHOLD (run died mid-way, all later checks skipped)
+    local fail_threshold="${PING_FAIL_THRESHOLD:-3}"
+    if ! is_valid_number "$fail_threshold"; then
+        log "WARN" "check_internet: PING_FAIL_THRESHOLD '${fail_threshold}' is not numeric — skipping"
         return
     fi
     
     # Wrap entire ping check in timeout to prevent indefinite hanging
     local fail_count=0
-    local ping_timeout=$(( PING_FAIL_THRESHOLD * 5 ))  # 5 seconds per ping (including -W 3 + buffer)
+    local ping_timeout=$(( fail_threshold * 5 ))  # 5 seconds per ping (including -W 3 + buffer)
     
     local ping_result
     ping_result=$(run_with_timeout "$ping_timeout" bash -c '
@@ -1673,14 +1676,14 @@ check_internet() {
             fi
         done
         echo "$count"
-    ' _ "$target" "$PING_FAIL_THRESHOLD" 2>/dev/null) || ping_result=""
+    ' _ "$target" "$fail_threshold" 2>/dev/null) || ping_result=""
     
     # Validate result is numeric
     if is_valid_number "$ping_result"; then
         fail_count="$ping_result"
     else
         log "WARN" "check_internet: ping check timed out or failed — assuming connectivity lost"
-        fail_count="$PING_FAIL_THRESHOLD"
+        fail_count="$fail_threshold"
     fi
 
     local state="OK"
@@ -1688,12 +1691,12 @@ check_internet() {
     safe_target=$(html_escape "$target")
     local detail="Internet: connectivity to ${safe_target} OK"
 
-    if (( fail_count >= PING_FAIL_THRESHOLD )); then
+    if (( fail_count >= fail_threshold )); then
         state="CRITICAL"
-        detail="Internet: <b>${fail_count}/${PING_FAIL_THRESHOLD}</b> pings to ${safe_target} failed -- connectivity lost"
+        detail="Internet: <b>${fail_count}/${fail_threshold}</b> pings to ${safe_target} failed -- connectivity lost"
     elif (( fail_count > 0 )); then
         state="WARNING"
-        detail="Internet: ${fail_count}/${PING_FAIL_THRESHOLD} pings to ${safe_target} failed -- intermittent"
+        detail="Internet: ${fail_count}/${fail_threshold} pings to ${safe_target} failed -- intermittent"
     fi
 
     check_state_change "internet" "$state" "$detail"

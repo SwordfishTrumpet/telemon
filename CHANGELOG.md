@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-07-16
+
+### Fixed
+- **Unbound variable crash in check_internet()** — bare `${PING_FAIL_THRESHOLD}` expansion crashed under `set -u` when `.env` did not define the variable. Guests with `ENABLE_INTERNET_CHECK=true` but no `PING_FAIL_THRESHOLD` died mid-run (CT 209: 2451 runs started, 0 finished; CT 211: 2450 started, 0 finished). Fixed by capturing `${PING_FAIL_THRESHOLD:-3}` into a local `fail_threshold` at function entry and using it throughout. The validation at line 655 already had a default and was not affected.
+
 ## [1.1.0] — 2026-07-16
 
 ### Changed
