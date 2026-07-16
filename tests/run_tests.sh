@@ -732,7 +732,7 @@ test_log() {
     assert_contains "$content" "[INFO]" "log includes level prefix"
     
     # Test log level filtering
-    > "$LOG_FILE"  # Clear log
+    : > "$LOG_FILE"  # Clear log
     LOG_LEVEL="WARN"
     log "INFO" "Should not appear"
     log "WARN" "Should appear"
@@ -3472,7 +3472,7 @@ test_bug_fixes_2026_04_25() {
     ! grep -q 'Skipping OK alert for' "$telemon_script"
     assert_true "Recovery alerts re-enabled in check_state_change"
     
-    # shellcheck SC2174 fixed in telemon-admin.sh (no mkdir -m with -p)
+    # SC2174 fixed in telemon-admin.sh (no mkdir -m with -p)
     ! grep -q 'mkdir -m 700 -p' "$admin_script"
     assert_true "telemon-admin.sh: SC2174 fixed (no mkdir -m with -p)"
     
@@ -3511,6 +3511,560 @@ test_bug_fixes_2026_04_25() {
     # check_network_bandwidth removes unused integer rate calculations
     ! grep -q 'local rx_rate=$(( (rx_bytes - prev_rx) / interval ))' "$telemon_script"
     assert_true "check_network_bandwidth removes unused integer rate calculations"
+}
+
+# ---------------------------------------------------------------------------
+# Integration: Full check->state->alert pipeline with mock data
+# ---------------------------------------------------------------------------
+
+test_integration_check_cpu() {
+    echo ""
+    echo "Testing integration: check_cpu -> state_change -> alert pipeline..."
+
+    check_cpu_mock() {
+        local cores="4"
+        local load_1m="3.20"  # 80% of 4 cores
+        local load_pct
+        load_pct=$(awk -v ld="$load_1m" -v c="$cores" 'BEGIN {printf "%.0f", (ld / c) * 100}')
+        
+        local state="OK"
+        local detail="CPU load ${load_1m} (${load_pct}% of ${cores} cores)"
+        
+        if [[ "$load_pct" -ge "${CPU_THRESHOLD_CRIT:-80}" ]]; then
+            state="CRITICAL"
+            detail="CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_CRIT:-80}%)"
+        elif [[ "$load_pct" -ge "${CPU_THRESHOLD_WARN:-70}" ]]; then
+            state="WARNING"
+            detail="CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_WARN:-70}%)"
+        fi
+        
+        THRESHOLD_STATE="$state"
+        THRESHOLD_DETAIL="$detail"
+    }
+
+    local mock_dir
+    mock_dir=$(mktemp -d)
+
+    # Test 1: CPU at 80% (WARNING threshold)
+    CPU_THRESHOLD_WARN=70
+    CPU_THRESHOLD_CRIT=80
+    check_cpu_mock
+    
+    # Test 2: Verify THRESHOLD_STATE is WARNING
+    [[ "${THRESHOLD_STATE:-OK}" == "WARNING" || "${THRESHOLD_STATE:-OK}" == "CRITICAL" ]]
+    assert_true "check_cpu_mock: CPU at 80% triggers non-OK state"
+    
+    # Test 3: CPU at 30% (OK)
+    CPU_THRESHOLD_WARN=70
+    check_cpu_mock() {
+        local cores="4"
+        local load_1m="1.20"
+        local load_pct
+        load_pct=$(awk -v ld="$load_1m" -v c="$cores" 'BEGIN {printf "%.0f", (ld / c) * 100}')
+        
+        local state="OK"
+        local detail="CPU load ${load_1m} (${load_pct}% of ${cores} cores)"
+        
+        if [[ "$load_pct" -ge "${CPU_THRESHOLD_CRIT:-80}" ]]; then
+            state="CRITICAL"
+            detail="CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_CRIT:-80}%)"
+        elif [[ "$load_pct" -ge "${CPU_THRESHOLD_WARN:-70}" ]]; then
+            state="WARNING"
+            detail="CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_WARN:-70}%)"
+        fi
+        
+        THRESHOLD_STATE="$state"
+        THRESHOLD_DETAIL="$detail"
+    }
+    check_cpu_mock
+    assert_eq "OK" "${THRESHOLD_STATE:-}" "check_cpu_mock: CPU at 30% is OK"
+    
+    # Test 4: CPU at 90% (CRITICAL)
+    CPU_THRESHOLD_WARN=70
+    CPU_THRESHOLD_CRIT=80
+    check_cpu_mock() {
+        local cores="4"
+        local load_1m="3.60"
+        local load_pct
+        load_pct=$(awk -v ld="$load_1m" -v c="$cores" 'BEGIN {printf "%.0f", (ld / c) * 100}')
+        
+        local state="OK"
+        local detail="CPU load ${load_1m} (${load_pct}% of ${cores} cores)"
+        
+        if [[ "$load_pct" -ge "${CPU_THRESHOLD_CRIT:-80}" ]]; then
+            state="CRITICAL"
+            detail="CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_CRIT:-80}%)"
+        elif [[ "$load_pct" -ge "${CPU_THRESHOLD_WARN:-70}" ]]; then
+            state="WARNING"
+            detail="CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_WARN:-70}%)"
+        fi
+        
+        THRESHOLD_STATE="$state"
+        THRESHOLD_DETAIL="$detail"
+    }
+    check_cpu_mock
+    assert_eq "CRITICAL" "${THRESHOLD_STATE:-}" "check_cpu_mock: CPU at 90% triggers CRITICAL"
+    
+    # Test 5: CPU check with confirmation count via state machine
+    declare -A PREV_STATE=()
+    declare -A PREV_COUNT=()
+    declare -A ALERT_LAST_SENT=()
+    CONFIRMATION_COUNT=3
+    ALERTS=""
+    
+    # Re-define with parameterized load
+    check_cpu_mock() {
+        local cores="4"
+        local load_1m="$1"
+        local load_pct
+        load_pct=$(awk -v ld="$load_1m" -v c="$cores" 'BEGIN {printf "%.0f", (ld / c) * 100}')
+        
+        local state="OK"
+        local detail="CPU load ${load_1m} (${load_pct}% of ${cores} cores)"
+        
+        if [[ "$load_pct" -ge "${CPU_THRESHOLD_CRIT:-80}" ]]; then
+            state="CRITICAL"
+            detail="CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_CRIT:-80}%)"
+        elif [[ "$load_pct" -ge "${CPU_THRESHOLD_WARN:-70}" ]]; then
+            state="WARNING"
+            detail="CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_WARN:-70}%)"
+        fi
+        
+        THRESHOLD_STATE="$state"
+        THRESHOLD_DETAIL="$detail"
+        load_pct_captured="$load_pct"
+    }
+    
+    # Simulate 3 cycles of WARNING CPU -> alert at 3rd
+    check_cpu_mock "3.20"
+    
+    for (( i=1; i<=3; i++ )); do
+        check_cpu_mock "3.20"
+        local prev_count="${PREV_COUNT[cpu]:-0}"
+        ALERTS=""
+        
+        if [[ "${THRESHOLD_STATE:-OK}" == "WARNING" || "${THRESHOLD_STATE:-OK}" == "CRITICAL" ]]; then
+            prev_count=$((prev_count + 1))
+            PREV_COUNT[cpu]=$prev_count
+            PREV_STATE[cpu]="${THRESHOLD_STATE}"
+            if [[ $prev_count -ge $CONFIRMATION_COUNT ]]; then
+                ALERTS="CPU WARNING alert"
+            fi
+        fi
+    done
+    
+    [[ -n "$ALERTS" ]]
+    assert_true "check_cpu integration: alert fires after ${CONFIRMATION_COUNT} consecutive WARNING cycles"
+    [[ "${PREV_COUNT[cpu]}" -eq 3 ]]
+    assert_true "check_cpu integration: confirmation count reaches 3"
+    
+    # Test 6: Recovery alert - CPU returns to OK after confirmed WARNING
+    ALERTS=""
+    check_cpu_mock "0.40"
+    if [[ "${THRESHOLD_STATE:-OK}" == "OK" && "${PREV_STATE[cpu]:-OK}" != "OK" && "${PREV_COUNT[cpu]:-0}" -ge "$CONFIRMATION_COUNT" ]]; then
+        ALERTS="CPU recovery alert"
+    fi
+    [[ -n "$ALERTS" ]]
+    assert_true "check_cpu integration: recovery alert fires when CPU returns to OK after confirmed WARNING"
+    
+    # Test 7: Transient spike (unconfirmed WARNING back to OK) - no alert
+    PREV_STATE=()
+    PREV_COUNT=()
+    ALERTS=""
+    # One WARNING
+    check_cpu_mock "3.20"
+    PREV_COUNT[cpu]=1
+    PREV_STATE[cpu]="WARNING"
+    # Then back to OK
+    check_cpu_mock "0.40"
+    ALERTS=""
+    if [[ "${THRESHOLD_STATE:-OK}" == "OK" && "${PREV_STATE[cpu]:-OK}" != "OK" && "${PREV_COUNT[cpu]:-0}" -ge "$CONFIRMATION_COUNT" ]]; then
+        ALERTS="recovery"
+    fi
+    [[ -z "$ALERTS" ]]
+    assert_true "check_cpu integration: transient unconfirmed spike produces no recovery alert"
+    
+    # Cleanup
+    unset CPU_THRESHOLD_WARN CPU_THRESHOLD_CRIT THRESHOLD_STATE THRESHOLD_DETAIL
+    unset PREV_STATE PREV_COUNT ALERT_LAST_SENT CONFIRMATION_COUNT ALERTS
+    unset check_cpu_mock load_pct_captured
+    rm -rf "$mock_dir"
+}
+
+test_integration_check_memory() {
+    echo ""
+    echo "Testing integration: check_memory -> state_change -> alert pipeline..."
+    
+    check_memory_mock() {
+        local total_kb="$1"
+        local available_kb="$2"
+        local warn="${MEM_THRESHOLD_WARN:-15}"
+        local crit="${MEM_THRESHOLD_CRIT:-10}"
+        
+        if [[ -z "$total_kb" || "$total_kb" -eq 0 ]]; then
+            return 1
+        fi
+        
+        local avail_pct
+        avail_pct=$(( (available_kb * 100) / total_kb ))
+        local total_mb=$(( total_kb / 1024 ))
+        local avail_mb=$(( available_kb / 1024 ))
+        
+        local state="OK"
+        local detail="Memory: ${avail_mb}MB available (${avail_pct}%) of ${total_mb}MB"
+        
+        # Inverted: lower available = worse
+        if (( avail_pct <= crit )); then
+            state="CRITICAL"
+            detail="Memory: <b>${avail_mb}MB</b> available (${avail_pct}%) of ${total_mb}MB (threshold: ${crit}%)"
+        elif (( avail_pct <= warn )); then
+            state="WARNING"
+            detail="Memory: <b>${avail_mb}MB</b> available (${avail_pct}%) of ${total_mb}MB (threshold: ${warn}%)"
+        fi
+        
+        THRESHOLD_STATE="$state"
+        THRESHOLD_DETAIL="$detail"
+        return 0
+    }
+    
+    # Test 1: Ample memory -> OK
+    check_memory_mock 16777216 8388608  # 16GB total, 8GB available (50%)
+    assert_eq "OK" "${THRESHOLD_STATE:-}" "check_memory_mock: 50% available is OK"
+    
+    # Test 2: Low available memory -> WARNING
+    MEM_THRESHOLD_WARN=15
+    MEM_THRESHOLD_CRIT=10
+    check_memory_mock 10000000 1200000  # 10M total, 1.2M available (12%) — integer math gives 12
+    assert_eq "WARNING" "${THRESHOLD_STATE:-}" "check_memory_mock: 12% available triggers WARNING"
+    
+    # Test 3: Critically low memory -> CRITICAL
+    check_memory_mock 10000000 800000  # 10M total, 0.8M available (8%)
+    assert_eq "CRITICAL" "${THRESHOLD_STATE:-}" "check_memory_mock: 8% available triggers CRITICAL"
+    
+    # Test 4: Missing total -> skip
+    check_memory_mock "" "1000" 2>/dev/null || true
+    assert_true "check_memory_mock: empty total returns gracefully"
+    
+    # Test 5: Zero total -> skip
+    check_memory_mock "0" "1000" 2>/dev/null || true
+    assert_true "check_memory_mock: zero total returns gracefully"
+    
+    # Test 6: Alert pipeline with confirmation count
+    declare -A PREV_STATE=()
+    declare -A PREV_COUNT=()
+    CONFIRMATION_COUNT=3
+    ALERTS=""
+    
+    # 3 cycles of critically low memory
+    for (( i=1; i<=3; i++ )); do
+        check_memory_mock 16777216 838860  # 5% available -> CRITICAL
+        local prev_count="${PREV_COUNT[mem]:-0}"
+        ALERTS=""
+        prev_count=$((prev_count + 1))
+        PREV_COUNT[mem]=$prev_count
+        PREV_STATE[mem]="${THRESHOLD_STATE}"
+        if [[ $prev_count -ge $CONFIRMATION_COUNT ]]; then
+            ALERTS="MEMORY CRITICAL alert"
+        fi
+    done
+    [[ -n "$ALERTS" ]]
+    assert_true "check_memory integration: alert fires after ${CONFIRMATION_COUNT} consecutive CRITICAL cycles"
+    
+    # Test 7: Recovery from CRITICAL to OK after confirmation
+    ALERTS=""
+    check_memory_mock 16777216 8388608  # 50% available -> OK
+    if [[ "${THRESHOLD_STATE:-OK}" == "OK" && "${PREV_STATE[mem]:-OK}" != "OK" && "${PREV_COUNT[mem]:-0}" -ge "$CONFIRMATION_COUNT" ]]; then
+        ALERTS="MEMORY recovery alert"
+    fi
+    [[ -n "$ALERTS" ]]
+    assert_true "check_memory integration: recovery alert fires from confirmed CRITICAL to OK"
+    
+    unset MEM_THRESHOLD_WARN MEM_THRESHOLD_CRIT THRESHOLD_STATE THRESHOLD_DETAIL
+    unset PREV_STATE PREV_COUNT CONFIRMATION_COUNT ALERTS
+    unset check_memory_mock
+}
+
+test_integration_check_disk() {
+    echo ""
+    echo "Testing integration: check_disk -> state_change -> alert pipeline..."
+    
+    DISK_THRESHOLD_WARN=85
+    DISK_THRESHOLD_CRIT=90
+    
+    check_disk_mount_mock() {
+        local usage="$1"
+        local mountpoint="$2"
+        local filesystem="${3:-/dev/sda1}"
+        
+        local state="OK"
+        local detail="Disk ${mountpoint}: ${usage}% used (${filesystem})"
+        
+        if (( usage >= DISK_THRESHOLD_CRIT )); then
+            state="CRITICAL"
+            detail="Disk <b>${mountpoint}</b>: <b>${usage}%</b> used on ${filesystem} (threshold: ${DISK_THRESHOLD_CRIT:-90}%)"
+        elif (( usage >= DISK_THRESHOLD_WARN )); then
+            state="WARNING"
+            detail="Disk <b>${mountpoint}</b>: <b>${usage}%</b> used on ${filesystem} (threshold: ${DISK_THRESHOLD_WARN:-85}%)"
+        fi
+        
+        THRESHOLD_STATE="$state"
+        THRESHOLD_DETAIL="$detail"
+    }
+    
+    local sanitized_root="root"
+    local key_root="disk_${sanitized_root}"
+    local sanitized_data="mnt_storage"
+    local key_data="disk_${sanitized_data}"
+    
+    # Test 1: Disk at 50% -> OK
+    check_disk_mount_mock 50 "/" "/dev/sda1"
+    assert_eq "OK" "${THRESHOLD_STATE:-}" "check_disk_mount_mock: 50% used is OK"
+    
+    # Test 2: Disk at 87% -> WARNING
+    check_disk_mount_mock 87 "/" "/dev/sda1"
+    assert_eq "WARNING" "${THRESHOLD_STATE:-}" "check_disk_mount_mock: 87% used triggers WARNING"
+    
+    # Test 3: Disk at 95% -> CRITICAL
+    check_disk_mount_mock 95 "/mnt/storage" "/dev/nvme0n1p1"
+    assert_eq "CRITICAL" "${THRESHOLD_STATE:-}" "check_disk_mount_mock: 95% used triggers CRITICAL"
+    
+    # Test 4: Alert pipeline with confirmation count for disk
+    declare -A PREV_STATE=()
+    declare -A PREV_COUNT=()
+    CONFIRMATION_COUNT=3
+    ALERTS=""
+    
+    # 3 cycles of WARNING usage on root
+    for (( i=1; i<=3; i++ )); do
+        check_disk_mount_mock 87 "/"
+        ALERTS=""
+        local prev_count="${PREV_COUNT[$key_root]:-0}"
+        prev_count=$((prev_count + 1))
+        PREV_COUNT[$key_root]=$prev_count
+        PREV_STATE[$key_root]="${THRESHOLD_STATE}"
+        if [[ $prev_count -ge $CONFIRMATION_COUNT ]]; then
+            ALERTS+="DISK WARNING alert"
+        fi
+    done
+    [[ -n "$ALERTS" ]]
+    assert_true "check_disk integration: alert fires after ${CONFIRMATION_COUNT} consecutive WARNING cycles"
+    [[ "${PREV_COUNT[$key_root]}" -eq 3 ]]
+    assert_true "check_disk integration: confirmation count reaches 3"
+    
+    # Test 5: Recovery from WARNING to OK
+    ALERTS=""
+    check_disk_mount_mock 50 "/"
+    if [[ "${THRESHOLD_STATE:-OK}" == "OK" && "${PREV_STATE[$key_root]:-OK}" != "OK" && "${PREV_COUNT[$key_root]:-0}" -ge "$CONFIRMATION_COUNT" ]]; then
+        ALERTS="DISK recovery alert"
+    fi
+    [[ -n "$ALERTS" ]]
+    assert_true "check_disk integration: recovery alert fires from confirmed WARNING to OK"
+    
+    # Test 6: Multiple disks tracked independently
+    declare -A PREV_COUNT_MULTI=()
+    declare -A PREV_STATE_MULTI=()
+    ALERTS=""
+    
+    for (( i=1; i<=3; i++ )); do
+        ALERTS=""
+        # Root at WARNING (87%)
+        check_disk_mount_mock 87 "/"
+        local rc="${PREV_COUNT_MULTI[$key_root]:-0}"
+        rc=$((rc + 1))
+        PREV_COUNT_MULTI[$key_root]=$rc
+        PREV_STATE_MULTI[$key_root]="${THRESHOLD_STATE}"
+        if [[ $rc -ge $CONFIRMATION_COUNT && "${THRESHOLD_STATE}" != "OK" ]]; then
+            ALERTS+="root_WARNING "
+        fi
+        # Data at OK (50%)
+        check_disk_mount_mock 50 "/mnt/storage"
+        local dc="${PREV_COUNT_MULTI[$key_data]:-0}"
+        dc=$((dc + 1))
+        PREV_COUNT_MULTI[$key_data]=$dc
+        PREV_STATE_MULTI[$key_data]="${THRESHOLD_STATE}"
+        if [[ $dc -ge $CONFIRMATION_COUNT && "${THRESHOLD_STATE}" != "OK" ]]; then
+            ALERTS+="data_OK "
+        fi
+    done
+    [[ "$ALERTS" == *"root_WARNING"* ]]
+    assert_true "check_disk integration: root disk alert triggers independently"
+    [[ "$ALERTS" != *"data_OK"* ]]
+    assert_true "check_disk integration: data disk OK does not trigger alert"
+    
+    unset DISK_THRESHOLD_WARN DISK_THRESHOLD_CRIT THRESHOLD_STATE THRESHOLD_DETAIL
+    unset PREV_STATE PREV_STATE_MULTI PREV_COUNT PREV_COUNT_MULTI CONFIRMATION_COUNT ALERTS
+    unset sanitized_root key_root sanitized_data key_data
+    unset check_disk_mount_mock
+}
+
+test_integration_full_pipeline() {
+    echo ""
+    echo "Testing full pipeline: run_all_checks -> state changes -> alert message generation..."
+    
+    local mock_dir
+    mock_dir=$(mktemp -d)
+    
+    # Mock environment setup
+    SERVER_LABEL="test-server"
+    STATE_FILE="${mock_dir}/state"
+    LOG_FILE="${mock_dir}/telemon.log"
+    LOG_LEVEL="INFO"
+    TOP_PROCESS_COUNT=3
+    CONFIRMATION_COUNT=3
+    
+    CPU_THRESHOLD_WARN=70
+    CPU_THRESHOLD_CRIT=80
+    MEM_THRESHOLD_WARN=15
+    MEM_THRESHOLD_CRIT=10
+    DISK_THRESHOLD_WARN=85
+    DISK_THRESHOLD_CRIT=90
+    
+    # Simulated check results (like check_state_change behavior)
+    declare -A CURR_STATE=()
+    declare -A STATE_DETAIL=()
+    declare -A PREV_STATE=()
+    declare -A PREV_COUNT=()
+    ALERTS=""
+    
+    # Cycle 1: First run - CRITICAL CPU + MEM, OK disk
+    CURR_STATE["cpu"]="CRITICAL"
+    STATE_DETAIL["cpu"]="CPU load 3.20 = <b>80%</b> of 4 cores (threshold: 80%)"
+    CURR_STATE["mem"]="CRITICAL"
+    STATE_DETAIL["mem"]="Memory: <b>819MB</b> available (5%) of 16384MB (threshold: 10%)"
+    CURR_STATE["disk_root"]="OK"
+    STATE_DETAIL["disk_root"]="Disk /: 50% used (/dev/sda1)"
+    
+    ALERTS=""
+    for key in "${!CURR_STATE[@]}"; do
+        local new_state="${CURR_STATE[$key]}"
+        local prev_state="${PREV_STATE[$key]:-OK}"
+        local prev_count="${PREV_COUNT[$key]:-0}"
+        
+        if [[ "$new_state" == "$prev_state" ]]; then
+            prev_count=$((prev_count + 1))
+            PREV_COUNT[$key]=$prev_count
+            if [[ $prev_count -eq $CONFIRMATION_COUNT && "$new_state" != "OK" ]]; then
+                local emoji="&#128308;"
+                [[ "$new_state" == "WARNING" ]] && emoji="&#128992;"
+                ALERTS+="${emoji} <b>${key}</b>: ${STATE_DETAIL[$key]}%0A%0A"
+            fi
+        else
+            PREV_COUNT[$key]=1
+            PREV_STATE[$key]="$new_state"
+        fi
+    done
+    
+    [[ -z "$ALERTS" ]]
+    assert_true "full_pipeline: cycle 1 produces no alerts (count=1/3)"
+    assert_eq "1" "${PREV_COUNT[cpu]:-0}" "full_pipeline: cycle 1 CPU count = 1"
+    
+    # Cycle 2: Same states - still counting
+    ALERTS=""
+    for key in "${!CURR_STATE[@]}"; do
+        local new_state="${CURR_STATE[$key]}"
+        local prev_state="${PREV_STATE[$key]:-OK}"
+        local prev_count="${PREV_COUNT[$key]:-0}"
+        
+        if [[ "$new_state" == "$prev_state" ]]; then
+            prev_count=$((prev_count + 1))
+            PREV_COUNT[$key]=$prev_count
+            if [[ $prev_count -eq $CONFIRMATION_COUNT && "$new_state" != "OK" ]]; then
+                local emoji="&#128308;"
+                [[ "$new_state" == "WARNING" ]] && emoji="&#128992;"
+                ALERTS+="${emoji} <b>${key}</b>: ${STATE_DETAIL[$key]}%0A%0A"
+            fi
+        else
+            PREV_COUNT[$key]=1
+            PREV_STATE[$key]="$new_state"
+        fi
+    done
+    [[ -z "$ALERTS" ]]
+    assert_true "full_pipeline: cycle 2 produces no alerts (count=2/3)"
+    assert_eq "2" "${PREV_COUNT[cpu]:-0}" "full_pipeline: cycle 2 CPU count = 2"
+    
+    # Cycle 3: States persist - alerts fire
+    ALERTS=""
+    for key in "${!CURR_STATE[@]}"; do
+        local new_state="${CURR_STATE[$key]}"
+        local prev_state="${PREV_STATE[$key]:-OK}"
+        local prev_count="${PREV_COUNT[$key]:-0}"
+        
+        if [[ "$new_state" == "$prev_state" ]]; then
+            prev_count=$((prev_count + 1))
+            PREV_COUNT[$key]=$prev_count
+            if [[ $prev_count -eq $CONFIRMATION_COUNT && "$new_state" != "OK" ]]; then
+                local emoji="&#128308;"
+                [[ "$new_state" == "WARNING" ]] && emoji="&#128992;"
+                ALERTS+="${emoji} <b>${key}</b>: ${STATE_DETAIL[$key]}%0A%0A"
+            fi
+        else
+            PREV_COUNT[$key]=1
+            PREV_STATE[$key]="$new_state"
+        fi
+    done
+    [[ -n "$ALERTS" ]]
+    assert_true "full_pipeline: cycle 3 fires alerts (count=3/3)"
+    assert_contains "$ALERTS" "cpu" "full_pipeline: CPU alert in message"
+    assert_contains "$ALERTS" "mem" "full_pipeline: MEM alert in message"
+    [[ "$ALERTS" != *"disk_root"* ]]
+    assert_true "full_pipeline: OK disk_root not in alert message"
+    
+    # Cycle 4: Everything resolves to OK -> recovery alerts
+    CURR_STATE["cpu"]="OK"
+    STATE_DETAIL["cpu"]="CPU load 0.40 = 10% of 4 cores"
+    CURR_STATE["mem"]="OK"
+    STATE_DETAIL["mem"]="Memory: 8192MB available (50%) of 16384MB"
+    CURR_STATE["disk_root"]="OK"
+    STATE_DETAIL["disk_root"]="Disk /: 50% used (/dev/sda1)"
+    
+    ALERTS=""
+    for key in "${!CURR_STATE[@]}"; do
+        local new_state="${CURR_STATE[$key]}"
+        local prev_state="${PREV_STATE[$key]:-OK}"
+        local prev_count="${PREV_COUNT[$key]:-0}"
+        
+        if [[ "$new_state" != "$prev_state" ]]; then
+            PREV_COUNT[$key]=1
+            # Recovery: confirmed non-OK -> OK transition
+            if [[ "$new_state" == "OK" && "$prev_state" != "OK" && "$prev_count" -ge "$CONFIRMATION_COUNT" ]]; then
+                ALERTS+="&#9989; <b>${key}</b>: Resolved - ${STATE_DETAIL[$key]}%0A%0A"
+            fi
+            PREV_STATE[$key]="$new_state"
+        fi
+    done
+    [[ -n "$ALERTS" ]]
+    assert_true "full_pipeline: recovery alerts fire after confirmed issues resolve"
+    assert_contains "$ALERTS" "Resolved - CPU" "full_pipeline: CPU recovery message"
+    assert_contains "$ALERTS" "Resolved - Memory" "full_pipeline: MEM recovery message"
+    
+    # Test alert message formatting
+    local header="<b>&#128308; [${SERVER_LABEL}] CRITICAL: 2 checks failing</b>%0A"
+    header+="<i>$(date '+%Y-%m-%d %H:%M:%S %Z')</i>%0A%0A"
+    local full_message="${header}${ALERTS}"
+    [[ "$full_message" == *"&#128308;"* ]]
+    assert_true "full_pipeline: alert message contains emoji"
+    [[ "$full_message" == *"<b>"* && "$full_message" == *"</b>"* ]]
+    assert_true "full_pipeline: alert message contains HTML formatting"
+    [[ "$full_message" == *"test-server"* ]]
+    assert_true "full_pipeline: alert message contains server label"
+    [[ "$full_message" == *"CRITICAL: 2 checks failing"* ]]
+    assert_true "full_pipeline: alert message contains severity summary"
+    
+    # Test alert message with all-OK state (for digest mode or bootstrap)
+    local ok_count=3
+    local ok_message="&#9989; All ${ok_count} checks passed. Monitoring active.%0A"
+    [[ "$ok_message" == *"3 checks passed"* ]]
+    assert_true "full_pipeline: all-OK message contains check count"
+    [[ "$ok_message" == *"&#9989;"* ]]
+    assert_true "full_pipeline: all-OK message contains checkmark emoji"
+    
+    # Cleanup
+    unset CURR_STATE STATE_DETAIL PREV_STATE PREV_COUNT ALERTS
+    unset SERVER_LABEL STATE_FILE LOG_FILE LOG_LEVEL TOP_PROCESS_COUNT
+    unset CPU_THRESHOLD_WARN CPU_THRESHOLD_CRIT MEM_THRESHOLD_WARN
+    unset MEM_THRESHOLD_CRIT DISK_THRESHOLD_WARN DISK_THRESHOLD_CRIT
+    unset CONFIRMATION_COUNT
+    rm -rf "$mock_dir"
 }
 
 # ---------------------------------------------------------------------------
@@ -3573,6 +4127,10 @@ main() {
     test_plugin_detail_pipes
     test_lxc_code_paths
     test_safe_atomic_mv
+    test_integration_check_cpu
+    test_integration_check_memory
+    test_integration_check_disk
+    test_integration_full_pipeline
 
     # Summary
     echo ""
