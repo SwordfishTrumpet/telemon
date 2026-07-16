@@ -1436,7 +1436,7 @@ check_cpu() {
     
     # Capture top processes if CPU is under stress
     if [[ "${THRESHOLD_STATE:-OK}" == "WARNING" || "${THRESHOLD_STATE:-OK}" == "CRITICAL" ]]; then
-        TOP_PROCESSES_INFO=$(get_top_processes "${TOP_PROCESS_COUNT:-5}")
+        TOP_PROCESSES_INFO=$(get_top_processes "${TOP_PROCESS_COUNT:-3}" "cpu")
     fi
 }
 
@@ -1536,7 +1536,7 @@ check_memory() {
 
     # Capture top processes if memory is under stress
     if [[ "${THRESHOLD_STATE:-OK}" == "WARNING" || "${THRESHOLD_STATE:-OK}" == "CRITICAL" ]]; then
-        TOP_PROCESSES_INFO=$(get_top_processes "${TOP_PROCESS_COUNT:-5}")
+        TOP_PROCESSES_INFO=$(get_top_processes "${TOP_PROCESS_COUNT:-3}" "mem")
     fi
 }
 
@@ -1863,22 +1863,27 @@ get_top_processes() {
         return
     fi
 
-    local count="${1:-5}"
+    local count="${1:-3}"
+    local mode="${2:-cpu}"
     # Validate count is a positive integer in reasonable range
     if ! is_valid_number "$count" || [[ "$count" -lt 1 ]] || [[ "$count" -gt 50 ]]; then
-        count=5
+        count=3
     fi
-    local raw_cpu raw_mem
-    raw_cpu=$(ps aux --sort=-%cpu | head -$((count + 1)) | tail -${count} | awk '{cmd=""; for(i=11;i<=NF;i++) cmd=cmd (i>11?" ":"") $i; printf "  %s %5s%% %s\n", $2, $3, cmd}')
-    raw_mem=$(ps aux --sort=-%mem | head -$((count + 1)) | tail -${count} | awk '{cmd=""; for(i=11;i<=NF;i++) cmd=cmd (i>11?" ":"") $i; printf "  %s %5s%% %s\n", $2, $4, cmd}')
+    # Single compact list: PID, percentage, process name only (no full command
+    # line — full args bloated alerts past Telegram's 4096-char limit)
+    local raw label
+    if [[ "$mode" == "mem" ]]; then
+        label="Memory"
+        raw=$(ps -eo pid,pmem,comm --sort=-pmem | awk 'NR>1 && $3 != "ps"' | head -${count} | awk '{printf "  %s %5s%% %s\n", $1, $2, $3}')
+    else
+        label="CPU"
+        raw=$(ps -eo pid,pcpu,comm --sort=-pcpu | awk 'NR>1 && $3 != "ps"' | head -${count} | awk '{printf "  %s %5s%% %s\n", $1, $2, $3}')
+    fi
     # Escape HTML entities to prevent Telegram parse errors from process names
-    raw_cpu=$(html_escape "$raw_cpu")
-    raw_mem=$(html_escape "$raw_mem")
+    raw=$(html_escape "$raw")
     local output=""
-    output+="<pre>Top ${count} processes by CPU:"$'\n'
-    output+="${raw_cpu}"
-    output+=$'\n\n'"Top ${count} processes by Memory:"$'\n'
-    output+="${raw_mem}"
+    output+="<pre>Top ${count} processes by ${label}:"$'\n'
+    output+="${raw}"
     output+="</pre>"
     echo "$output"
 }

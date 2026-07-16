@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-07-16
+
+### Changed
+- **Compact top-process lists in alerts** — `get_top_processes()` rewritten to keep alerts within Telegram's 4096-char limit (alerts were reaching ~19 KB and being truncated):
+  - Now takes a mode argument (`cpu` | `mem`) and emits a **single** list instead of both CPU and memory tables — CPU alerts show top CPU consumers, memory alerts show top memory consumers
+  - Shows process **name** only (`comm`) instead of the full command line (a single `kvm` entry carried ~3 KB of arguments)
+  - Default count reduced from 5 to 3 (`TOP_PROCESS_COUNT` still configurable)
+  - Filters out the `ps` sampling process itself (reported spurious ~100% CPU due to lifetime-average accounting over its tiny elapsed time)
+
+### Documentation
+- **docker-compose.yml** — marked as reference-only/deprecated; documented that Telemon runs via host cron and why the Docker socket mount was removed (privilege escalation vector)
+
+### Tests
+- Added integration tests for the full check→state→alert pipeline with mock data (+560 lines in `tests/run_tests.sh`)
+
 ## [1.0.1] — 2026-07-12
 
 ### Fixed
