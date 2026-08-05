@@ -4048,6 +4048,20 @@ check_proxmox_guests() {
             continue
         fi
 
+        # Skip ignored guests (e.g. intentionally-stopped CTs).
+        # PROXMOX_GUESTS_IGNORE: space-separated, accepts "ct:203" or bare "203"
+        local guest_ignored=false
+        for ig_entry in ${PROXMOX_GUESTS_IGNORE:-}; do
+            if [[ "$ig_entry" == "$guest_entry" || "$ig_entry" == "$guest_id" ]]; then
+                guest_ignored=true
+                break
+            fi
+        done
+        if [[ "$guest_ignored" == "true" ]]; then
+            log "INFO" "proxmox_guests: skipping ignored guest ${guest_entry}"
+            continue
+        fi
+
         total_guests=$((total_guests + 1))
 
         if [[ "$guest_type" == "vm" ]]; then
