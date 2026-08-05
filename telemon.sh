@@ -6321,7 +6321,14 @@ run_digest() {
                     WARNING)  emoji="&#128992;" ;;
                     OK)       emoji="&#128994;" ;;
                 esac
-                msg+="${emoji} <b>${key}</b>: ${STATE_DETAIL[$key]:-${CURR_STATE[$key]}}%0A"
+                if [[ "$state_label" == "OK" ]]; then
+                    # OK entries: key only — full details for 60+ healthy
+                    # checks routinely push the digest past Telegram's 4000
+                    # char limit, truncating the tail (uptime etc.)
+                    msg+="${emoji} ${key}%0A"
+                else
+                    msg+="${emoji} <b>${key}</b>: ${STATE_DETAIL[$key]:-${CURR_STATE[$key]}}%0A"
+                fi
             fi
         done < <(printf '%s\n' "${!CURR_STATE[@]}" | sort)
     done
