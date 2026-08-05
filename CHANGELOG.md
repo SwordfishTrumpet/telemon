@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-08-05
+
+### Fixed
+- **`--generate-status-page` crash** — `declare -A CURR_STATE` without assignment triggered "unbound variable" under `set -u` (bash 5.2) because `load_state()` only populated `PREV_STATE`, never `CURR_STATE`. The status page both crashed and showed zero checks. `load_state()` now initializes and populates `CURR_STATE` from the persisted state file; `run_digest()` resets per-run globals to prevent stale keys.
+- **Digest message truncation** — the daily digest included `STATE_DETAIL` for every check; with 60+ OK entries it routinely exceeded Telegram's 4096-char limit and was truncated (losing uptime + trailing entries). OK entries now show key-name only; CRITICAL/WARNING entries keep details.
+- **Stale-lock detection dead code** — `exec 200>"$LOCK_FILE"` truncated the file, wiping the PID write on the line above it, so `lock_info` was always empty and stale-lock recovery never fired on the `flock` path. Holder PID/timestamp now live in a `${LOCK_FILE}.pid` sidecar written after acquiring the lock; `release_lock()` cleans it up.
+
+### Added
+- **`PROXMOX_GUESTS_IGNORE`** — space-separated list (accepts `ct:203` or bare `203`) of guests to exclude from `check_proxmox_guests()`, mirroring `PROXMOX_STORAGE_IGNORE`. Prevents perpetual CRITICAL alerts for intentionally-stopped guests (`onboot=0`).
+
+### Removed
+- **Site-specific plugins from tracking** — `checks.d/legalize-daemons.sh` and `checks.d/timemachine-ct101.sh` are deployment-local plugins referencing internal hostnames/container names. Removed from the git history entirely (filter-branch) and added to `.gitignore`.
+
 ## [1.1.1] — 2026-07-16
 
 ### Fixed
