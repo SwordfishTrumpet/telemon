@@ -695,6 +695,11 @@ load_state() {
     PREV_STATE=()
     PREV_COUNT=()
     ALERT_LAST_SENT=()
+    # Always set CURR_STATE (even if empty) — under `set -u` a bare
+    # `declare -A` without assignment is treated as unbound, which crashed
+    # the --generate-status-page path. Populating it from the persisted state
+    # also lets the status page reflect the last completed run.
+    CURR_STATE=()
     
     if [[ -f "$STATE_FILE" ]]; then
         while IFS='=' read -r key value; do
@@ -704,6 +709,7 @@ load_state() {
             local count="${value##*:}"
             PREV_STATE["$key"]="$state"
             PREV_COUNT["$key"]="${count:-0}"
+            CURR_STATE["$key"]="$state"
         done < "$STATE_FILE"
     fi
     
@@ -6269,6 +6275,13 @@ run_digest() {
     # Digest reports all current states — bypass confirmation logic
     local saved_confirm_count="${CONFIRMATION_COUNT:-3}"
     CONFIRMATION_COUNT=1
+
+    # Reset per-run globals (same hygiene as main) so stale keys from the
+    # persisted state file don't linger after load_state
+    ALERTS=""
+    TOP_PROCESSES_INFO=""
+    CURR_STATE=()
+    STATE_DETAIL=()
 
     # Run all enabled checks (same as normal run)
     run_all_checks
