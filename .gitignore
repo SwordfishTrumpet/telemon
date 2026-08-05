@@ -1,27 +1,31 @@
-
+# --- backup / temp files ---
 *~
-AGENTS.md
-.backup-*
-# Backup directories
-backups/
-.DS_Store
-# Editor files
-.env
-.idea/
-# Internal documentation (not for GitHub)
-*.log
-# Log files
-# OS files
-# State files
 *.swo
 *.swp
+.DS_Store
+Thumbs.db
+.backup-*
+backups/
+
+# --- editor / IDE ---
+.env
+.idea/
+.vscode/
+
+# --- telemon runtime artifacts ---
+*.log
 telemon_cron.log
-# Telemon - Environment Configuration
 .telemon_first_run_done
 .telemon_state*
-Thumbs.db
 /tmp/telemon_*
+
+# --- site-specific plugins (not part of telemon) ---
+checks.d/legalize-daemons.sh
+checks.d/timemachine-ct101.sh
+
+# --- internal docs (not for public repo) ---
+AGENTS.md
 TODO.md
-.vscode/
+
+# --- weave agent ---
 .weave/
-# Weave agent working files
