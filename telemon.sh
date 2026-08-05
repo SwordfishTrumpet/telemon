@@ -219,70 +219,69 @@ _log_lock_contention() {
 acquire_lock() {
     # Try flock first (most reliable)
     if command -v flock &>/dev/null; then
-        # Write our PID and timestamp to lock file for stale detection
-        # Do this before trying flock so other processes can check age
-        echo "$$ $(date +%s)" > "$LOCK_FILE" 2>/dev/null || true
-
-        # Open file descriptor for lock file
+        # Open file descriptor for lock file. NOTE: `>` truncates the file,
+        # which wiped the PID write below it in older versions — stale-lock
+        # detection never fired. PID/timestamp now live in a sidecar file
+        # (${LOCK_FILE}.pid) written only after we actually hold the lock.
         exec 200>"$LOCK_FILE"
-        if ! flock -n 200 2>/dev/null; then
-            # Check if the existing lock is stale (holder crashed)
-            local lock_info
-            lock_info=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
-            if [[ -n "$lock_info" ]]; then
-                local old_pid old_epoch current_epoch lock_age
-                old_pid=$(echo "$lock_info" | awk '{print $1}')
-                old_epoch=$(echo "$lock_info" | awk '{print $2}')
-                current_epoch=$(date +%s)
-                # Validate that we have numeric values before calculating
-                if is_valid_number "$old_pid" && is_valid_number "$old_epoch"; then
-                    lock_age=$((current_epoch - old_epoch))
-                    # Check if lock is very old (>10 min) - force break regardless of PID
-                    if _is_lock_stale "$lock_age"; then
-                        echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] Stale lock detected (age ${lock_age}s > ${LOCK_STALE_AGE_SEC}s) - force breaking lock" >&2
-                        flock -u 200 2>/dev/null || true
+        if flock -n 200 2>/dev/null; then
+            # We hold the lock — record our PID/timestamp for stale detection
+            echo "$$ $(date +%s)" > "${LOCK_FILE}.pid" 2>/dev/null || true
+            return 0
+        fi
+
+        # Lock is held by another instance — check if the holder is stale
+        local lock_info
+        lock_info=$(cat "${LOCK_FILE}.pid" 2>/dev/null || echo "")
+        if [[ -n "$lock_info" ]]; then
+            local old_pid old_epoch current_epoch lock_age
+            old_pid=$(echo "$lock_info" | awk '{print $1}')
+            old_epoch=$(echo "$lock_info" | awk '{print $2}')
+            current_epoch=$(date +%s)
+            # Validate that we have numeric values before calculating
+            if is_valid_number "$old_pid" && is_valid_number "$old_epoch"; then
+                lock_age=$((current_epoch - old_epoch))
+                # Check if lock is very old (>10 min) - force break regardless of PID
+                if _is_lock_stale "$lock_age"; then
+                    echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] Stale lock detected (age ${lock_age}s > ${LOCK_STALE_AGE_SEC}s) - force breaking lock" >&2
+                    exec 200>&- 2>/dev/null || true
+                    rm -f "$LOCK_FILE" "${LOCK_FILE}.pid"
+                    # Re-try once
+                    exec 200>"$LOCK_FILE"
+                    if flock -n 200 2>/dev/null; then
+                        echo "$$ $(date +%s)" > "${LOCK_FILE}.pid" 2>/dev/null || true
+                        return 0
+                    fi
+                fi
+                if [[ $lock_age -gt $LOCK_TIMEOUT_SEC ]]; then
+                    # Lock is stale based on age - verify process is dead AND is actually telemon
+                    if ! kill -0 "$old_pid" 2>/dev/null; then
+                        echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] Stale lock detected (PID $old_pid not running, age ${lock_age}s) - breaking lock" >&2
                         exec 200>&- 2>/dev/null || true
-                        rm -f "$LOCK_FILE"
+                        rm -f "$LOCK_FILE" "${LOCK_FILE}.pid"
                         # Re-try once
-                        echo "$$ $(date +%s)" > "$LOCK_FILE" 2>/dev/null || true
                         exec 200>"$LOCK_FILE"
                         if flock -n 200 2>/dev/null; then
+                            echo "$$ $(date +%s)" > "${LOCK_FILE}.pid" 2>/dev/null || true
                             return 0
                         fi
-                    fi
-                    if [[ $lock_age -gt $LOCK_TIMEOUT_SEC ]]; then
-                        # Lock is stale based on age - verify process is dead AND is actually telemon
-                        if ! kill -0 "$old_pid" 2>/dev/null; then
-                            echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] Stale lock detected (PID $old_pid not running, age ${lock_age}s) - breaking lock" >&2
-                            flock -u 200 2>/dev/null || true
-                            exec 200>&- 2>/dev/null || true
-                            rm -f "$LOCK_FILE"
-                            # Re-try once
-                            echo "$$ $(date +%s)" > "$LOCK_FILE" 2>/dev/null || true
-                            exec 200>"$LOCK_FILE"
-                            if flock -n 200 2>/dev/null; then
-                                return 0
-                            fi
-                        elif ! _is_telemon_process "$old_pid"; then
-                            # PID exists but is NOT a telemon process (PID reuse)
-                            echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] Stale lock detected (PID $old_pid is not telemon - possible PID reuse, age ${lock_age}s) - breaking lock" >&2
-                            flock -u 200 2>/dev/null || true
-                            exec 200>&- 2>/dev/null || true
-                            rm -f "$LOCK_FILE"
-                            # Re-try once
-                            echo "$$ $(date +%s)" > "$LOCK_FILE" 2>/dev/null || true
-                            exec 200>"$LOCK_FILE"
-                            if flock -n 200 2>/dev/null; then
-                                return 0
-                            fi
+                    elif ! _is_telemon_process "$old_pid"; then
+                        # PID exists but is NOT a telemon process (PID reuse)
+                        echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] Stale lock detected (PID $old_pid is not telemon - possible PID reuse, age ${lock_age}s) - breaking lock" >&2
+                        exec 200>&- 2>/dev/null || true
+                        rm -f "$LOCK_FILE" "${LOCK_FILE}.pid"
+                        # Re-try once
+                        exec 200>"$LOCK_FILE"
+                        if flock -n 200 2>/dev/null; then
+                            echo "$$ $(date +%s)" > "${LOCK_FILE}.pid" 2>/dev/null || true
+                            return 0
                         fi
                     fi
                 fi
             fi
-            _log_lock_contention "Another instance is running - exiting"
-            exit 0
         fi
-        return 0
+        _log_lock_contention "Another instance is running - exiting"
+        exit 0
     fi
 
     # Fallback: atomic mkdir-based lock (avoids TOCTOU race with PID file)
@@ -350,7 +349,7 @@ release_lock() {
         exec 200>&- 2>/dev/null || true
     fi
     rm -rf "${LOCK_FILE}.d" 2>/dev/null || true
-    rm -f "$LOCK_FILE" 2>/dev/null || true
+    rm -f "$LOCK_FILE" "${LOCK_FILE}.pid" 2>/dev/null || true
 }
 
 # Acquire lock on startup
