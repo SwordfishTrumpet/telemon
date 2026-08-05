@@ -130,7 +130,7 @@ SERVER_LABEL="${SERVER_LABEL:-$(hostname)}"
 # ---------------------------------------------------------------------------
 _determine_fingerprint_location() {
     local primary="${SCRIPT_DIR}/.telemon_first_run_done"
-    local fallback_home="${HOME}/.telemon_first_run_done"
+    local fallback_home="${HOME:-/root}/.telemon_first_run_done"
     local fallback_tmp="/tmp/.telemon_first_run_done"
     
     # Test if we can write to SCRIPT_DIR (primary location)
@@ -140,7 +140,7 @@ _determine_fingerprint_location() {
     fi
     
     # Try HOME as fallback
-    if [[ -d "$HOME" && -w "$HOME" ]]; then
+    if [[ -d "${HOME:-/root}" && -w "${HOME:-/root}" ]]; then
         echo "$fallback_home"
         return
     fi
@@ -372,8 +372,8 @@ migrate_state_file() {
         local persistent_dir=""
         if [[ -d "$SCRIPT_DIR" && -w "$SCRIPT_DIR" ]]; then
             persistent_dir="$SCRIPT_DIR"
-        elif [[ -d "$HOME/.local/share" && -w "$HOME/.local/share" ]]; then
-            persistent_dir="$HOME/.local/share/telemon"
+        elif [[ -d "${HOME:-/root}/.local/share" && -w "${HOME:-/root}/.local/share" ]]; then
+            persistent_dir="${HOME:-/root}/.local/share/telemon"
             mkdir -p "$persistent_dir"
         elif [[ -d "/var/lib" && -w "/var/lib" ]]; then
             persistent_dir="/var/lib/telemon"
@@ -2051,7 +2051,7 @@ check_pm2_processes() {
     if ! command -v pm2 &>/dev/null; then
         # Try common paths
         pm2_bin=""
-        for candidate in "${HOME}/.local/bin/pm2" "${HOME}/.npm-global/bin/pm2" /usr/local/bin/pm2 /usr/bin/pm2; do
+        for candidate in "${HOME:-/root}/.local/bin/pm2" "${HOME:-/root}/.npm-global/bin/pm2" /usr/local/bin/pm2 /usr/bin/pm2; do
             if [[ -x "$candidate" ]]; then
                 pm2_bin="$candidate"
                 break

@@ -3206,7 +3206,7 @@ test_first_run_fingerprint() {
     assert_true "First-run: Fingerprint path uses SCRIPT_DIR/.telemon_first_run_done as primary"
     
     # Test 3: Fingerprint has fallback locations (HOME and /tmp)
-    grep -q 'fallback_home="${HOME}/.telemon_first_run_done"' "$telemon_script" && \
+    grep -q 'fallback_home="${HOME:-/root}/.telemon_first_run_done"' "$telemon_script" && \
     grep -q 'fallback_tmp="/tmp/.telemon_first_run_done"' "$telemon_script"
     assert_true "First-run: Fingerprint has fallback locations (HOME and /tmp)"
     
