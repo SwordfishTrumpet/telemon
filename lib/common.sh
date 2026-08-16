@@ -96,6 +96,75 @@ portable_stat() {
 }
 
 # ===========================================================================
+# Check if a command exists (portable, quiet)
+# Usage: _cmd_exists <command>
+# ===========================================================================
+_cmd_exists() { command -v "$1" &>/dev/null; }
+
+# ===========================================================================
+# Sanitize state key: strip characters that would corrupt key=STATE:count format
+# Shared by telemon.sh (state keys) and telemon-admin.sh (heartbeat files).
+# The lowercase step is significant: send_heartbeat writes heartbeat files with
+# this function, so admin status/backup MUST use the identical transformation
+# or mixed-case labels are never found.
+# ===========================================================================
+sanitize_state_key() {
+    local key="$1"
+    # Replace anything not alphanumeric, underscore, hyphen, or dot with underscore,
+    # then convert to lowercase for consistent state keys
+    printf '%s' "$key" | tr -c 'a-zA-Z0-9_.-' '_' | tr '[:upper:]' '[:lower:]'
+}
+
+# ===========================================================================
+# HTML escaping helper for Telegram
+# ===========================================================================
+html_escape() {
+    local text="$1"
+    # Escape & first (must use \& in replacement to get literal &)
+    text="${text//&/\&amp;}"
+    text="${text//</\&lt;}"
+    text="${text//>/\&gt;}"
+    text="${text//\"/\&quot;}"
+    text="${text//\'/\&#39;}"
+    printf '%s' "$text"
+}
+
+# ===========================================================================
+# Strip HTML for plain-text channels (webhook, email, escalation)
+# Converts %0A encoded newlines back to real ones, strips HTML tags, and
+# decodes entities — both named (&amp;) and numeric (&#128308;). Numeric emoji
+# entities render fine in Telegram (parse_mode=HTML) but leak as literal
+# "&#128308;" text into Slack/Discord/ntfy/email payloads, so they must be
+# decoded here. Uses python3 html.unescape when available (python3 is already
+# a declared dependency for webhook/escalation); falls back to a named-entity
+# sed pipeline otherwise (numeric entities remain literal — acceptable on
+# minimal systems without python3).
+# ===========================================================================
+strip_html_for_plain_text() {
+    local message="$1"
+    if command -v python3 &>/dev/null; then
+        printf '%s\n' "$message" | sed 's/%0A/\n/g; s/<[^>]*>//g' \
+            | python3 -c "import html,sys; sys.stdout.write(html.unescape(sys.stdin.read()))" 2>/dev/null
+    else
+        printf '%s\n' "$message" | sed 's/%0A/\n/g; s/<[^>]*>//g; s/&amp;/\&/g; s/&lt;/</g; s/&gt;/>/g; s/&quot;/"/g'
+    fi
+}
+
+# ===========================================================================
+# Parse a heartbeat file line (tab-separated, 7 fields):
+#   label  timestamp  status  check_count  warn_count  crit_count  uptime_sec
+# Emits each field on its own line (empty string for missing fields) so both
+# telemon.sh (check_fleet_heartbeats) and telemon-admin.sh (cmd_fleet_status)
+# share a single source of truth for the heartbeat format — preventing
+# field-count drift between the two parsers.
+# Usage: IFS=$'\n' read -r l ts st cc wc cr up < <(parse_heartbeat_line "$(head -1 "$file")")
+# ===========================================================================
+parse_heartbeat_line() {
+    local line="$1"
+    printf '%s\n' "$line" | awk -F'\t' '{printf "%s\n%s\n%s\n%s\n%s\n%s\n%s\n", $1, $2, $3, $4, $5, $6, $7}'
+}
+
+# ===========================================================================
 # Get list of state file variants for backup/restore/reset operations
 # Returns a space-separated list of state file paths
 # Usage: get_state_file_variants [include_main] [include_lock] [include_drift_baseline]

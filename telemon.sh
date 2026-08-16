@@ -539,7 +539,13 @@ run_with_timeout() {
         return $?
     fi
     
-    # Fallback: bash timeout using background job
+    # Fallback: bash timeout using background job.
+    # Effectively dead on Linux (coreutils `timeout` is present on every
+    # supported target and the Dockerfile installs coreutils) — kept only for
+    # hypothetical timeout-less systems (e.g. minimal BusyBox builds). The
+    # kill-on-EXIT trap uses $pid captured at definition time, which is correct
+    # here because the trap is explicitly cleared with `trap - EXIT` before this
+    # function returns on every exit path (success, timeout, or error).
     local pid
     "$@" &
     pid=$!
@@ -787,9 +793,11 @@ save_state() {
             cooldown_content+="${key}=${ALERT_LAST_SENT[$key]}"$'\n'
         fi
     done
-    if [[ -n "$cooldown_content" ]]; then
-        safe_write_state_file "$cooldown_file" "$cooldown_content"
-    fi
+    # Always write the sidecar files — even when empty — so stale entries from
+    # disabled/removed checks are cleared. Previously the empty case skipped the
+    # write, leaving stale .cooldown/.detail files on disk that could re-apply
+    # outdated cooldowns/details when a check was later re-enabled.
+    safe_write_state_file "$cooldown_file" "$cooldown_content"
 
     # Save state details for digest/escalation across runs
     local detail_file="${STATE_FILE}.detail"
@@ -800,9 +808,8 @@ save_state() {
             detail_content+="${key}=${STATE_DETAIL[$key]}"$'\n'
         fi
     done
-    if [[ -n "$detail_content" ]]; then
-        safe_write_state_file "$detail_file" "$detail_content"
-    fi
+    # Always write the detail sidecar too (see cooldown note above)
+    safe_write_state_file "$detail_file" "$detail_content"
 }
 
 # Helper to safely write state file variants (symlink check + permissions)
@@ -1099,30 +1106,6 @@ check_state_change() {
 }
 
 # ===========================================================================
-# HTML escaping helper for Telegram
-# ===========================================================================
-html_escape() {
-    local text="$1"
-    # Escape & first (must use \& in replacement to get literal &)
-    text="${text//&/\&amp;}"
-    text="${text//</\&lt;}"
-    text="${text//>/\&gt;}"
-    text="${text//\"/\&quot;}"
-    text="${text//\'/\&#39;}"
-    printf '%s' "$text"
-}
-
-# ===========================================================================
-# Sanitize state key: strip characters that would corrupt key=STATE:count format
-# ===========================================================================
-sanitize_state_key() {
-    local key="$1"
-    # Replace anything not alphanumeric, underscore, hyphen, or dot with underscore,
-    # then convert to lowercase for consistent state keys
-    printf '%s' "$key" | tr -c 'a-zA-Z0-9_.-' '_' | tr '[:upper:]' '[:lower:]'
-}
-
-# ===========================================================================
 # Cross-platform date-to-epoch parser
 # Handles both GNU date (-d) and BSD date (-j -f) for macOS compatibility
 # ===========================================================================
@@ -1275,8 +1258,8 @@ check_prediction() {
         return 0
     }
 
-    local slope intercept
-    read -r slope intercept <<< "$result"
+    local slope _
+    read -r slope _ <<< "$result"
 
     # Check if slope is positive (resource growing toward exhaustion)
     local slope_positive
@@ -1339,7 +1322,7 @@ check_prediction() {
 #   ok_detail: detail message when OK
 #   warn_detail: detail message when WARNING (optional, defaults to crit_detail)
 #   crit_detail: detail message when CRITICAL (optional, defaults to warn_detail)
-# Returns: sets global THRESHOLD_STATE and THRESHOLD_DETAIL variables
+# Returns: sets global THRESHOLD_STATE variable
 # ===========================================================================
 check_threshold() {
     local key="$1"
@@ -1396,7 +1379,8 @@ check_threshold() {
     
     # Set global variables for caller to check
     THRESHOLD_STATE="$state"
-    THRESHOLD_DETAIL="$detail"
+    # NOTE: THRESHOLD_DETAIL was removed (2026-08-16 TODO #10) — written but
+    # never read anywhere; callers use STATE_DETAIL instead.
 }
 
 # ===========================================================================
@@ -1561,6 +1545,19 @@ check_memory() {
 # CHECK: Disk Space
 # ===========================================================================
 check_disk() {
+    # Snapshot inode usage ONCE for all filesystems (avoids N df -i subprocesses
+    # per cycle in the predictive-alerts branch). Only computed when needed.
+    local -A inode_pcts=()
+    if [[ "${ENABLE_PREDICTIVE_ALERTS:-false}" == "true" ]]; then
+        while IFS= read -r inode_line; do
+            [[ "$inode_line" == Filesystem* ]] && continue
+            # df -P -i: Filesystem Inodes IUsed IFree IUse% Mounted on
+            if [[ "$inode_line" =~ ^([^[:space:]]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)[[:space:]]+([0-9]+)%[[:space:]]+(.+)$ ]]; then
+                inode_pcts["${BASH_REMATCH[6]}"]="${BASH_REMATCH[5]}"
+            fi
+        done < <(df -P -i 2>/dev/null | tail -n +2)
+    fi
+
     # Parse df output, skip tmpfs/devtmpfs/overlay/squashfs/loop
     # POSIX format: Filesystem 1024-blocks Used Available Capacity Mounted on
     # With -P, each filesystem is on one line, and "Mounted on" is the last field (can contain spaces)
@@ -1627,9 +1624,9 @@ check_disk() {
         check_prediction "$predict_key" "Disk ${mountpoint}" "$usage"
 
         # Predictive: track inode usage trend (if available)
+        # Uses the single df -P -i snapshot taken at the top of check_disk
         if [[ "${ENABLE_PREDICTIVE_ALERTS:-false}" == "true" ]]; then
-            local inode_pct_raw
-            inode_pct_raw=$(df -i "$mountpoint" 2>/dev/null | awk 'NR==2 {print $5}')
+            local inode_pct_raw="${inode_pcts[$mountpoint]:-}"
             if [[ -n "$inode_pct_raw" ]]; then
                 local inode_usage
                 inode_usage=$(printf '%s' "$inode_pct_raw" | tr -dc '0-9')
@@ -1736,7 +1733,7 @@ check_swap() {
         # Skip header line, sum up all swap partitions
         swap_total=0
         swap_used=0
-        while read -r device type size used priority; do
+        while read -r device type size used _; do
             [[ "$device" == "Filename" ]] && continue
             swap_total=$((swap_total + size))
             swap_used=$((swap_used + used))
@@ -1891,13 +1888,17 @@ get_top_processes() {
     fi
     # Single compact list: PID, percentage, process name only (no full command
     # line — full args bloated alerts past Telegram's 4096-char limit)
+    # Snapshot both CPU and memory columns in ONE ps call, cached for reuse
+    if [[ -z "$TOP_PROCESSES_PS_CACHE" ]]; then
+        TOP_PROCESSES_PS_CACHE=$(ps -eo pid,pcpu,pmem,comm 2>/dev/null)
+    fi
     local raw label
     if [[ "$mode" == "mem" ]]; then
         label="Memory"
-        raw=$(ps -eo pid,pmem,comm --sort=-pmem | awk 'NR>1 && $3 != "ps"' | head -${count} | awk '{printf "  %s %5s%% %s\n", $1, $2, $3}')
+        raw=$(printf '%s\n' "$TOP_PROCESSES_PS_CACHE" | awk 'NR>1 && $4 != "ps"' | sort -k3 -nr | head -${count} | awk '{printf "  %s %5s%% %s\n", $1, $3, $4}')
     else
         label="CPU"
-        raw=$(ps -eo pid,pcpu,comm --sort=-pcpu | awk 'NR>1 && $3 != "ps"' | head -${count} | awk '{printf "  %s %5s%% %s\n", $1, $2, $3}')
+        raw=$(printf '%s\n' "$TOP_PROCESSES_PS_CACHE" | awk 'NR>1 && $4 != "ps"' | sort -k2 -nr | head -${count} | awk '{printf "  %s %5s%% %s\n", $1, $2, $4}')
     fi
     # Escape HTML entities to prevent Telegram parse errors from process names
     raw=$(html_escape "$raw")
@@ -1910,6 +1911,9 @@ get_top_processes() {
 
 # Global variable to store top processes info for alerts
 TOP_PROCESSES_INFO=""
+# Cache of the raw ps snapshot (pid pcpu pmem comm) within one invocation, so a
+# cycle where both CPU and memory are stressed forks ps only once.
+TOP_PROCESSES_PS_CACHE=""
 
 # ===========================================================================
 # CHECK: System Processes (via pgrep / systemctl)
@@ -2223,7 +2227,6 @@ check_sites() {
         # Parse optional parameters from URL format:
         # https://example.com|expected_status=200|max_response_ms=5000|check_ssl=true
         local url="${site%%|*}"
-        local params="${site#*|}"
         
         # Skip if no URL
         [[ -z "$url" ]] && continue
@@ -2320,20 +2323,25 @@ check_sites() {
             fi
         fi
         
+        # Cap curl's own --max-time at the outer CHECK_TIMEOUT bound so a large
+        # max_response_ms cannot make curl outlive run_with_timeout's kill
+        local curl_max_time=$(( max_response_ms / 1000 + 5 ))
+        if [[ "$curl_max_time" -gt "$CHECK_TIMEOUT" ]]; then
+            curl_max_time="$CHECK_TIMEOUT"
+        fi
+
         # Perform the HTTP check (direct curl, no shell interpolation)
         local response
         response=$(run_with_timeout "$CHECK_TIMEOUT" \
             curl -s -o /dev/null \
-                -w '%{http_code}|%{time_total}|%{redirect_url}|%{ssl_verify_result}' \
-                --max-time $(( max_response_ms / 1000 + 5 )) \
+                -w '%{http_code}|%{time_total}|%{ssl_verify_result}' \
+                --max-time "$curl_max_time" \
                 -L \
-                "$url" 2>/dev/null) || response="000|0|||1"
+                "$url" 2>/dev/null) || response="000|0|1"
         
         local http_code="${response%%|*}"
         local rest="${response#*|}"
         local response_time="${rest%%|*}"
-        rest="${rest#*|}"
-        local redirect_url="${rest%%|*}"
         rest="${rest#*|}"
         local ssl_verify="${rest%%|*}"
         
@@ -2743,7 +2751,6 @@ check_dns_records() {
         key=$(sanitize_state_key "$key")
 
         # Query DNS based on record type
-        local resolved_values=""
         local query_result=""
 
         case "$record_type" in
@@ -2947,7 +2954,14 @@ check_databases() {
             else
                 # Check replication lag if applicable
                 local repl_lag
-                repl_lag=$(run_with_timeout "$check_timeout" mysql ${mysql_opts} -e "SHOW SLAVE STATUS\G" 2>/dev/null | awk '/Seconds_Behind_Master:/ {print $2}')
+                # SECURITY: pass the password via env var exactly like the connection
+                # test above — without MYSQL_PWD this query fails auth on any
+                # password-protected server and replication lag is never detected.
+                repl_lag=$(run_with_timeout "$check_timeout" bash -c '
+                    export MYSQL_PWD="$1"
+                    shift
+                    mysql "$@" -e "SHOW SLAVE STATUS\G"
+                ' _ "$mysql_pass" ${mysql_opts} "$mysql_name" 2>/dev/null | awk '/Seconds_Behind_Master:/ {print $2}')
                 if [[ -n "$repl_lag" && "$repl_lag" != "NULL" ]]; then
                     if is_valid_number "$repl_lag"; then
                         if [[ "$repl_lag" -gt 300 ]]; then
@@ -3377,7 +3391,7 @@ check_network_bandwidth() {
     # Handle counter wraparound: report OK and let next cycle use fresh baseline
     if [[ "$rx_bytes" -lt "$prev_rx" ]] || [[ "$tx_bytes" -lt "$prev_tx" ]]; then
         log "DEBUG" "check_network_bandwidth: counter wraparound detected on ${iface} — skipping rate calculation"
-        local iface_key_wrap="net_$(printf '%s' "$iface" | tr -c 'a-zA-Z0-9_' '_')"
+        local iface_key_wrap="net_$(sanitize_state_key "$iface")"
         check_state_change "$iface_key_wrap" "OK" "Network ${safe_iface}: counter wraparound (awaiting next sample)"
         return
     fi
@@ -3398,8 +3412,8 @@ check_network_bandwidth() {
     local state="OK"
     local detail="Network ${safe_iface}: RX ${rx_mbps} Mbit/s, TX ${tx_mbps} Mbit/s"
     
-    # Use consistent key format: net_<iface> (replace non-alphanumeric with underscore)
-    local iface_key="net_$(printf '%s' "$iface" | tr -c 'a-zA-Z0-9_' '_')"
+    # Use consistent key format: net_<iface> via shared sanitize_state_key
+    local iface_key="net_$(sanitize_state_key "$iface")"
 
     if (( max_mbps >= crit )); then
         state="CRITICAL"
@@ -3494,12 +3508,16 @@ check_file_integrity() {
 
     # Compute current checksums and save
     local new_checksums=""
+    # Track which paths are in the current watch list (post safety-check) so a
+    # file removed from INTEGRITY_WATCH_FILES does not trigger a deletion alert
+    declare -A current_files=()
     for filepath in $watch_files; do
         # SECURITY: Validate path to prevent directory traversal and file inclusion attacks
         if ! is_safe_path "$filepath"; then
             log "WARN" "Integrity check: unsafe path '${filepath}' — skipping (contains .., *, ?, or $)"
             continue
         fi
+        current_files["$filepath"]=1
         
         [[ -f "$filepath" ]] || continue
 
@@ -3526,6 +3544,22 @@ check_file_integrity() {
             # First time seeing this file — baseline
             check_state_change "$key" "OK" "File <code>${safe_fname}</code> integrity baselined"
         fi
+    done
+
+    # Alert on previously-tracked files that have been DELETED. A deletion is the
+    # single most important integrity event — the old code silently continued
+    # past missing files, dropping them out of monitoring with no alert.
+    local prev_path
+    for prev_path in "${!prev_checksums[@]}"; do
+        # Only consider files still in the current watch list (config removals
+        # must not trigger deletion alerts) that are now missing
+        [[ -n "${current_files[$prev_path]:-}" ]] || continue
+        [[ -f "$prev_path" ]] && continue
+        local dkey dname dsafe
+        dkey=$(make_state_key "integrity" "$prev_path")
+        dname=$(basename "$prev_path")
+        dsafe=$(html_escape "$dname")
+        check_state_change "$dkey" "CRITICAL" "File <code>${dsafe}</code> was <b>DELETED</b> since last check"
     done
 
     # Save new checksums
@@ -3699,12 +3733,16 @@ check_drift_detection() {
     fi
 
     local new_meta=""
+    # Track which paths are in the current watch list (post safety-check) so a
+    # file removed from DRIFT_WATCH_FILES does not trigger a deletion alert
+    declare -A current_files=()
     for filepath in $watch_files; do
         # SECURITY: Validate path to prevent directory traversal and file inclusion attacks
         if ! is_safe_path "$filepath"; then
             log "WARN" "Drift detection: unsafe path '${filepath}' — skipping (contains .., *, ?, or $)"
             continue
         fi
+        current_files["$filepath"]=1
         
         [[ -f "$filepath" ]] || continue
 
@@ -3768,6 +3806,19 @@ check_drift_detection() {
         local baseline_file="${baseline_dir}/$(printf '%s' "$filepath" | portable_sha256 | cut -c1-12)"
         cp -f "$filepath" "$baseline_file" 2>/dev/null || true
         chmod 600 "$baseline_file" 2>/dev/null || true
+    done
+
+    # Alert on previously-tracked files that have been DELETED (same rationale as
+    # check_file_integrity — a deletion is the most important drift event).
+    local prev_path
+    for prev_path in "${!prev_meta[@]}"; do
+        [[ -n "${current_files[$prev_path]:-}" ]] || continue
+        [[ -f "$prev_path" ]] && continue
+        local dkey dname dsafe
+        dkey=$(make_state_key "drift" "$prev_path")
+        dname=$(basename "$prev_path")
+        dsafe=$(html_escape "$dname")
+        check_state_change "$dkey" "CRITICAL" "File <code>${dsafe}</code> was <b>DELETED</b> since last check"
     done
 
     # Save metadata
@@ -3936,10 +3987,11 @@ check_fleet_heartbeats() {
         # Skip self (don't alert on our own heartbeat)
         [[ "$filename" == "$self_label" ]] && continue
 
-        # Read heartbeat line (first line only, tab-separated)
-        # Only parse fields needed for monitoring (label, timestamp, status, check_count)
-        local hb_label hb_timestamp hb_status hb_check_count _
-        IFS=$'\t' read -r hb_label hb_timestamp hb_status hb_check_count _ < "$file" || continue
+        # Read heartbeat line (first line only) via the shared parser so both
+        # telemon.sh and telemon-admin.sh agree on the tab-separated format
+        local hb_label hb_timestamp hb_status hb_check_count hb_warn hb_crit hb_uptime
+        IFS=$'\n' read -r hb_label hb_timestamp hb_status hb_check_count hb_warn hb_crit hb_uptime \
+            < <(parse_heartbeat_line "$(head -1 "$file" 2>/dev/null)") || continue
 
         # Validate minimum field count: label, timestamp, and status must be non-empty
         if [[ -z "${hb_label:-}" || -z "${hb_timestamp:-}" || -z "${hb_status:-}" ]]; then
@@ -4157,11 +4209,19 @@ check_proxmox_storage() {
         [[ "$line" =~ ^Name ]] && continue
         [[ -z "$line" ]] && continue
 
-        local name type active usage
-        name=$(echo "$line" | awk '{print $1}')
-        type=$(echo "$line" | awk '{print $2}')
-        active=$(echo "$line" | awk '{print $3}')
-        usage=$(echo "$line" | awk '{print $7}' | tr -d '%')
+        # Parse the whole line with one read (avoids 4 awk subprocesses per line).
+        # pvesm prints the % column as a float with 2 decimals (e.g. "45.52%");
+        # normalize it to a rounded integer so the threshold comparisons below
+        # actually run (the old integer-only regex silently skipped every pool
+        # whose usage was a decimal percentage — capacity alerts never fired).
+        local name type active usage usage_raw
+        IFS=' ' read -r name type active _ _ _ usage_raw <<< "$line"
+        usage_raw="${usage_raw//%/}"
+        if [[ "$usage_raw" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            usage=$(awk -v u="$usage_raw" 'BEGIN {printf "%.0f", u}')
+        else
+            usage=""
+        fi
 
         # Skip ignored pools
         if [[ -n "$ignore_list" ]]; then
@@ -4279,7 +4339,25 @@ check_proxmox_tasks() {
 
     local json_output failed_tasks
     json_output=$(run_with_timeout "$CHECK_TIMEOUT" pvesh get "/cluster/tasks" --output-format json 2>/dev/null) || json_output="[]"
-    failed_tasks=$(printf '%s' "$json_output" | python3 -c "import json,sys; data=json.load(sys.stdin); print(sum(1 for t in data if isinstance(t,dict) and t.get('status') in ('FAILED','ERROR')))" 2>/dev/null || echo "0")
+    # Filter to the configured lookback window: pvesh /cluster/tasks returns the
+    # full task log, so without this PROXMOX_TASK_MINUTES was dead config and the
+    # check counted every historical failure regardless of age. Only tasks whose
+    # starttime is within the window (or cannot be determined) are counted.
+    failed_tasks=$(printf '%s' "$json_output" | PROXMOX_TASK_MINUTES="$task_minutes" python3 -c "
+import json, sys, os, time
+minutes = int(os.environ.get('PROXMOX_TASK_MINUTES', '60'))
+cutoff = time.time() - minutes * 60
+data = json.load(sys.stdin)
+count = 0
+for t in data:
+    if not isinstance(t, dict) or t.get('status') not in ('FAILED', 'ERROR'):
+        continue
+    starttime = t.get('starttime')
+    if isinstance(starttime, (int, float)) and starttime < cutoff:
+        continue
+    count += 1
+print(count)
+" 2>/dev/null || echo "0")
     failed_tasks=$(printf '%s' "$failed_tasks" | head -1 | tr -d '\n')
 
     if [[ "$failed_tasks" -ge "$task_crit" ]]; then
@@ -4992,9 +5070,11 @@ send_heartbeat() {
 # ===========================================================================
 ALERT_QUEUE_FILE="${STATE_FILE:-/tmp/telemon_sys_alert_state}.queue"
 
-dispatch_with_retry() {
-    local message="$1"
-
+# Retry any queued alerts from previous cycles. Called unconditionally at the
+# start of every dispatch phase (and from dispatch_with_retry for bootstrap), so
+# a failed Telegram alert cannot sit undelivered indefinitely just because no
+# NEW alert ever fires afterwards.
+retry_alert_queue() {
     # Export hostname for all dispatchers
     export TELEMON_HOSTNAME
     TELEMON_HOSTNAME="$(hostname)"
@@ -5014,6 +5094,13 @@ dispatch_with_retry() {
             fi
         fi
     fi
+}
+
+dispatch_with_retry() {
+    local message="$1"
+
+    # First try to send any queued alerts from previous failures
+    retry_alert_queue
 
     # Now try to send the current message to all channels
     # Track individual channel failures for proper retry logic
@@ -5092,8 +5179,10 @@ is_in_maintenance_window() {
 
     local current_day
     current_day=$(date '+%a')  # Mon, Tue, Wed, Thu, Fri, Sat, Sun
+    # Portable minute-of-day: GNU-only %-H/%-M (no zero padding) fail on BusyBox
+    # and macOS; 10# forces base-10 so padded values like "08" parse correctly.
     local current_minutes
-    current_minutes=$(( $(date '+%-H') * 60 + $(date '+%-M') ))
+    current_minutes=$(( 10#$(date '+%H') * 60 + 10#$(date '+%M') ))
 
     # Parse schedule entries separated by semicolons: "Sun 02:00-04:00;Sat 03:00-05:00"
     local IFS=';'
@@ -5208,7 +5297,7 @@ check_escalation() {
         fi
 
         local plain_msg
-        plain_msg=$(printf '%s\n' "$esc_message" | sed 's/%0A/\n/g; s/<[^>]*>//g; s/&amp;/\&/g; s/&lt;/</g; s/&gt;/>/g; s/&quot;/"/g')
+        plain_msg=$(strip_html_for_plain_text "$esc_message")
 
         local json_payload
         json_payload=$(TELEMON_HOSTNAME="$(hostname)" TELEMON_SERVER_LABEL="${SERVER_LABEL}" TELEMON_TIMESTAMP="$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
@@ -5619,7 +5708,8 @@ run_validate() {
             echo "  ON:   ${pmx_ck} (${pmx_dep})"
             enabled=$((enabled + 1))
             # Validate dependencies for Proxmox checks
-            if ! _cmd_exists "$pmx_dep" 2>/dev/null && ! command -v "$pmx_dep" &>/dev/null; then
+            # (_cmd_exists lives in lib/common.sh; command -v is the single source of truth)
+            if ! command -v "$pmx_dep" &>/dev/null; then
                 echo "        ⚠ ${pmx_dep} not found — will skip on non-Proxmox systems"
             fi
         else
@@ -6058,7 +6148,7 @@ run_validate() {
     # Threshold validation
     echo ""
     echo "[Thresholds]"
-    validate_thresholds 2>&1 | grep -v "Monitor run" || echo "  All thresholds valid."
+    validate_thresholds 2>&1 || echo "  All thresholds valid."
     
     # Additional parameter validation
     echo ""
@@ -6456,9 +6546,10 @@ send_webhook() {
     local webhook_url="${WEBHOOK_URL:-}"
     [[ -z "$webhook_url" ]] && return 0
 
-    # Strip HTML tags for plain-text webhook payload
+    # Strip HTML tags + decode entities for the plain-text webhook payload
+    # (shared helper also decodes numeric emoji entities, e.g. &#128308;)
     local plain_message
-    plain_message=$(printf '%s\n' "$message" | sed 's/%0A/\n/g; s/<[^>]*>//g; s/&amp;/\&/g; s/&lt;/</g; s/&gt;/>/g; s/&quot;/"/g')
+    plain_message=$(strip_html_for_plain_text "$message")
 
     local hostname
     hostname=$(hostname)
@@ -6532,9 +6623,10 @@ send_email() {
     local subject
     subject=$(printf '[Telemon] %s — alert' "$hostname" | tr -d '\n\r\t\0')
     
-    # Strip HTML tags for plain-text email
+    # Strip HTML tags + decode entities for plain-text email
+    # (shared helper also decodes numeric emoji entities, e.g. &#128308;)
     local plain_message
-    plain_message=$(printf '%s\n' "$message" | sed 's/%0A/\n/g; s/<[^>]*>//g; s/&amp;/\&/g; s/&lt;/</g; s/&gt;/>/g; s/&quot;/"/g')
+    plain_message=$(strip_html_for_plain_text "$message")
 
     # Method 1: Native SMTP via curl (if SMTP_HOST is configured)
     local smtp_host="${SMTP_HOST:-}"
@@ -6927,6 +7019,10 @@ main() {
 
     # Send heartbeat (dead man's switch)
     send_heartbeat
+
+    # Retry queued alerts from previous failures even when nothing new fired —
+    # otherwise a failed Telegram alert could sit undelivered indefinitely
+    retry_alert_queue
 
     # Build summary counts
     local crit_count=0 warn_count=0 ok_count=0

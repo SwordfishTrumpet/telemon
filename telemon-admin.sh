@@ -105,9 +105,10 @@ cmd_backup() {
     if [[ "${ENABLE_HEARTBEAT:-false}" == "true" ]] && [[ "${HEARTBEAT_MODE:-file}" == "file" ]]; then
         local hb_dir="${HEARTBEAT_DIR:-/tmp/telemon_heartbeats}"
         local server_label="${SERVER_LABEL:-$(hostname)}"
-        # Sanitize label same way as telemon.sh (replace non-alnum with _)
+        # Sanitize label the same way telemon.sh does (shared sanitize_state_key
+        # in lib/common.sh — must match send_heartbeat's lowercase transformation)
         local sanitized_label
-        sanitized_label=$(printf '%s' "$server_label" | tr -c 'a-zA-Z0-9_.-' '_')
+        sanitized_label=$(sanitize_state_key "$server_label")
         local hb_file="${hb_dir}/${sanitized_label}"
         if [[ -f "$hb_file" ]]; then
             if cp -p "$hb_file" "$backup_path/heartbeat_${sanitized_label}" 2>/dev/null; then
@@ -407,7 +408,7 @@ cmd_status() {
             local hb_dir="${HEARTBEAT_DIR:-/tmp/telemon_heartbeats}"
             local server_label="${SERVER_LABEL:-$(hostname)}"
             local sanitized_label
-            sanitized_label=$(printf '%s' "$server_label" | tr -c 'a-zA-Z0-9_.-' '_')
+            sanitized_label=$(sanitize_state_key "$server_label")
             local hb_file="${hb_dir}/${sanitized_label}"
             if [[ -f "$hb_file" ]]; then
                 local hb_ts
@@ -615,7 +616,8 @@ cmd_fleet_status() {
         filename=$(basename "$file")
 
         local hb_label hb_timestamp hb_status hb_check_count hb_warn hb_crit hb_uptime
-        IFS=$'\t' read -r hb_label hb_timestamp hb_status hb_check_count hb_warn hb_crit hb_uptime < "$file" 2>/dev/null || continue
+        IFS=$'\n' read -r hb_label hb_timestamp hb_status hb_check_count hb_warn hb_crit hb_uptime \
+            < <(parse_heartbeat_line "$(head -1 "$file" 2>/dev/null)") || continue
 
         if ! [[ "$hb_timestamp" =~ ^[0-9]+$ ]]; then
             fleet_labels+=("$filename")
@@ -722,10 +724,8 @@ _systemd_is_active() {
     systemctl is-active "$service" &>/dev/null
 }
 
-# Helper: Check if a command exists
-_cmd_exists() {
-    command -v "$1" &>/dev/null
-}
+# Helper: Check if a command exists (shared — defined in lib/common.sh)
+# Kept as a thin wrapper for backward compatibility with admin-internal callers.
 
 # Helper: Get total system memory in GB for threshold calculations
 _get_total_memory_gb() {

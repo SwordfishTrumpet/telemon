@@ -153,8 +153,8 @@ fi
 - **Network Bandwidth** — Interface throughput monitoring
 - **NVMe / SMART Health** — Critical warning byte, endurance wear, temperature, media errors
 - **Log Pattern Matching** — Watch log files for regex patterns
-- **File Integrity** — SHA256 checksum monitoring for critical files
-- **Config Drift Detection** — Rich change tracking with unified diffs
+- **File Integrity** — SHA256 checksum monitoring for critical files (incl. **deletion alerts**)
+- **Config Drift Detection** — Rich change tracking with unified diffs (incl. **deletion alerts**)
 - **Cron Job Heartbeats** — Detect stale cron jobs via heartbeat file age
 
 ### Predictive & Fleet Features
@@ -169,7 +169,7 @@ fi
 - **Security-First** — Timeout protection, symlinks skipped, output validated
 
 ### Database Health Checks
-- **MySQL/MariaDB** — Connection check and replication lag monitoring
+- **MySQL/MariaDB** — Connection check and replication lag monitoring (password delivered via env, works on password-protected servers)
 - **PostgreSQL** — Connection check and streaming replication lag
 - **Redis** — Connection check, authentication, master/replica status
 - **SQLite3** — File integrity, size thresholds, corruption detection
@@ -177,7 +177,7 @@ fi
 
 ### Alert Channels & Intelligence
 - **Multi-Channel** — Telegram (primary), webhooks (Slack/Discord/ntfy), email
-- **Retry/Queue** — Failed Telegram alerts queue to disk and retry
+- **Retry/Queue** — Failed Telegram alerts queue to disk and retry every cycle (even quiet ones); plain-text channels (webhook/email/escalation) get fully decoded messages incl. emoji
 - **Rate Limiting** — Per-key cooldown prevents alert floods
 - **Escalation** — Separate webhook for unresolved alerts after N minutes
 - **Top Processes** — Auto-capture CPU/memory hogs in alerts
@@ -844,8 +844,12 @@ Controlled by `ALERT_COOLDOWN_SEC` (default: 900s). Set to 0 to disable.
 
 ### Alert Dispatch Chain
 
+Queued alerts from failed deliveries are retried at the start of **every** cycle
+(via `retry_alert_queue()`), so an alert never sits undelivered just because no
+new alert fires afterwards.
+
 ```
-Normal cycle:     dispatch_with_retry() → Telegram (queue on fail) + Webhook + Email
+Normal cycle:     retry_alert_queue() → dispatch_with_retry() → Telegram (queue on fail) + Webhook + Email
 Digest mode:      dispatch_alert()      → Telegram + Webhook + Email (no retry)
 Escalation:       check_escalation()    → Escalation webhook only
 ```
@@ -941,16 +945,7 @@ systemctl --user start telemon.timer
 
 See [systemd/README.md](systemd/README.md) for detailed reference.
 
-### Docker
-
-```bash
-# Build and run with docker-compose
-docker-compose up -d
-
-# Or build manually
-docker build -t telemon .
-docker run -v $(pwd)/.env:/opt/telemon/.env:ro telemon
-```
+> **Note:** The Docker deployment (previously in `docker-compose.yml` / `Dockerfile`) was **deprecated and removed** — Telemon runs as a host cron job or systemd timer, never inside a container. Running it in Docker would require mounting the Docker socket (a privilege-escalation vector) and duplicates the scheduler. See `CHANGELOG.md` for the deprecation history.
 
 ---
 

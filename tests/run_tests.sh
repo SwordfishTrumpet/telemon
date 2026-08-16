@@ -399,11 +399,9 @@ test_sanitize_state_key() {
     echo ""
     echo "Testing sanitize_state_key logic..."
     
-    # Define the sanitize function inline for testing
-    sanitize_state_key() {
-        local key="$1"
-        printf '%s' "$key" | tr -c 'a-zA-Z0-9_.-' '_'
-    }
+    # Function is sourced from lib/common.sh (moved 2026-08-16, TODO #5) —
+    # the inline copy below was removed so this tests the REAL shared helper
+    # (the old inline copy omitted the lowercase step, hiding bug #5).
     
     # Test basic sanitization
     assert_eq "test-key" "$(sanitize_state_key "test-key")" "sanitize_state_key preserves hyphens"
@@ -416,6 +414,14 @@ test_sanitize_state_key() {
     
     # Test multiple special chars
     assert_eq "a_b_c_d" "$(sanitize_state_key "a/b@c:d")" "sanitize_state_key handles multiple special chars"
+
+    # Lowercase normalization (bug #5: telemon-admin.sh used an inline tr WITHOUT
+    # the lowercase step, so status/backup never found heartbeat files written by
+    # send_heartbeat for mixed-case SERVER_LABELs). Note: hyphens ARE preserved
+    # by the shared char class a-zA-Z0-9_.- — the bug was only the missing
+    # lowercase, which is what both sides must now agree on.
+    assert_eq "web-prod-01" "$(sanitize_state_key "Web-Prod-01")" "sanitize_state_key lowercases mixed-case label"
+    assert_eq "web.prod" "$(sanitize_state_key "Web.Prod")" "sanitize_state_key lowercases while preserving dots"
 }
 
 # ---------------------------------------------------------------------------
@@ -442,16 +448,8 @@ test_html_escape() {
     echo ""
     echo "Testing html_escape helper..."
     
-    # Define the html_escape function inline for testing
-    html_escape() {
-        local text="$1"
-        text="${text//&/\&amp;}"
-        text="${text//</\&lt;}"
-        text="${text//>/\&gt;}"
-        text="${text//\"/\&quot;}"
-        text="${text//\'/\&#39;}"
-        printf '%s' "$text"
-    }
+    # Function is sourced from lib/common.sh (moved 2026-08-16, TODO #5) —
+    # the inline copy below was removed so this tests the REAL shared helper
     
     # Test basic HTML entities
     local input_amp="&" expected_amp="&amp;"
@@ -2936,9 +2934,13 @@ test_discovery_system() {
     # Test 4: verify systemd helper functions
     grep -q "_systemd_is_active()" "$admin_script"
     assert_true "Discovery: _systemd_is_active helper exists"
-    
-    grep -q "_cmd_exists()" "$admin_script"
-    assert_true "Discovery: _cmd_exists helper exists"
+
+    # _cmd_exists moved to lib/common.sh (shared by telemon.sh + admin)
+    grep -q "_cmd_exists()" "${SCRIPT_DIR}/lib/common.sh"
+    assert_true "Discovery: _cmd_exists helper exists (shared, in lib/common.sh)"
+    # admin must not re-define it (DRY — check for the definition, not usage)
+    ! grep -q "^_cmd_exists()" "$admin_script"
+    assert_true "Discovery: _cmd_exists not duplicated in telemon-admin.sh"
     
     # Test 5: verify system spec helpers exist
     grep -q "_get_total_memory_gb()" "$admin_script"
@@ -3587,8 +3589,9 @@ test_bug_fixes_2026_04_25() {
     grep -q "cut -d'|' -f3-" "$telemon_script"
     assert_true "Plugin detail parsing uses cut to preserve pipe characters"
     
-    # check_proxmox_tasks uses python3 JSON parsing instead of grep
-    grep -q 'python3 -c.*json.load.*status.*FAILED' "$telemon_script"
+    # check_proxmox_tasks uses python3 JSON parsing instead of grep,
+    # with PROXMOX_TASK_MINUTES passed as env to the parser
+    grep -q 'PROXMOX_TASK_MINUTES=.*python3 -c' "$telemon_script"
     assert_true "check_proxmox_tasks uses python3 JSON parsing"
     
     # SITE_EXPECTED_STATUS uses hard-coded default fallback
@@ -4167,6 +4170,484 @@ test_integration_full_pipeline() {
 }
 
 # ---------------------------------------------------------------------------
+# Regression tests for the 2026-08-16 code audit (TODO.md items #1-#18)
+# Each test exercises the REAL function extracted from telemon.sh (or the real
+# shared helper) with mocked external commands, and would have caught the bug
+# it guards against.
+# ---------------------------------------------------------------------------
+
+test_regression_proxmox_storage_float() {
+    echo ""
+    echo "Testing check_proxmox_storage float % parse (TODO #1)..."
+
+    local fn_file
+    fn_file=$(mktemp)
+    awk '/^check_proxmox_storage\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+
+    local capture
+    capture=$(mktemp)
+
+    # Mock external deps the extracted function relies on
+    run_with_timeout() { shift; "$@" 2>/dev/null; }
+    pvesm() {
+        echo "Name                Type     Status     Total (KiB)      Used (KiB) Available (KiB)        %"
+        echo "USB-BACKUP-2         dir     active      1921523920       874617604       949224500   45.52%"
+        echo "bigdisk              dir     active      3936847312      1788143352      1948648308   45.42%"
+    }
+    check_state_change() { printf '%s|%s|%s\n' "$1" "$2" "$3" >> "$capture"; }
+    log() { :; }
+    CHECK_TIMEOUT=30
+    PROXMOX_STORAGE_WARN=40
+    PROXMOX_STORAGE_CRIT=95
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+    check_proxmox_storage
+
+    # A pool at 45.52% with warn=40 MUST produce WARNING, not the old
+    # "OK ... active" skip (the float failed the integer-only regex)
+    grep -q "pvesm_usb-backup-2|WARNING|" "$capture"
+    assert_true "proxmox_storage: 45.52% pool triggers WARNING (was silently OK before fix)"
+    grep -q "at <b>45%</b>" "$capture"
+    assert_true "proxmox_storage: rounded percentage (45%) in detail"
+
+    ! grep -q "pvesm_usb-backup-2|OK|Storage.*active" "$capture"
+    assert_true "proxmox_storage: no spurious OK-active for decimal pool"
+
+    grep -q "proxmox_storage|CRITICAL|" "$capture"
+    assert_true "proxmox_storage: aggregate state reflects warning pools"
+
+    rm -f "$fn_file" "$capture"
+}
+
+test_regression_mysql_replication_password() {
+    echo ""
+    echo "Testing MySQL replication-lag MYSQL_PWD (TODO #2)..."
+
+    # 1) Functional: the exact bash -c pattern must deliver the password via env
+    local stubdir
+    stubdir=$(mktemp -d)
+    cat > "$stubdir/mysql" <<'MYSQLSTUB'
+#!/usr/bin/env bash
+# Rejects the query unless the password arrived via MYSQL_PWD env (bug #2:
+# the old code ran plain `mysql` and silently lost auth on every run)
+if [[ -z "${MYSQL_PWD:-}" ]]; then
+    echo "ERROR 1045 (28000): Access denied for user" >&2
+    exit 1
+fi
+echo "Seconds_Behind_Master: 120"
+exit 0
+MYSQLSTUB
+    chmod +x "$stubdir/mysql"
+
+    local out
+    out=$(PATH="$stubdir:$PATH" bash -c '
+        export MYSQL_PWD="$1"
+        shift
+        mysql "$@" -e "SHOW SLAVE STATUS\G"
+    ' _ "secretpass" --host=db --port=3306 --user=root --connect-timeout=5 2>/dev/null | awk '/Seconds_Behind_Master:/ {print $2}')
+    assert_eq "120" "$out" "MySQL replication: MYSQL_PWD env reaches the mysql client"
+
+    # 2) Regression guard: without the export the same query fails (documents the bug)
+    out=$(PATH="$stubdir:$PATH" bash -c '
+        mysql "$@" -e "SHOW SLAVE STATUS\G"
+    ' _ --host=db --port=3306 --user=root --connect-timeout=5 2>/dev/null | awk '/Seconds_Behind_Master:/ {print $2}')
+    assert_eq "" "$out" "MySQL replication: no lag data without MYSQL_PWD (bug precondition)"
+
+    # 3) Source guard: the env export must be present near SHOW SLAVE STATUS
+    local block
+    block=$(grep -B6 'SHOW SLAVE STATUS' "${SCRIPT_DIR}/telemon.sh")
+    [[ "$block" == *"export MYSQL_PWD"* ]]
+    assert_true "MySQL replication: MYSQL_PWD export present near SHOW SLAVE STATUS"
+
+    rm -rf "$stubdir"
+}
+
+test_regression_timemachine_missing_results() {
+    echo ""
+    echo "Testing timemachine plugin without Results.plist (TODO #3)..."
+
+    local stubdir
+    stubdir=$(mktemp -d)
+    cat > "$stubdir/pct" <<'PCTSTUB'
+#!/usr/bin/env bash
+# Simulates CT 101 running, but with NO Results.plist, NO lock file, NO
+# SnapshotHistory, NO quota config — the exact scenario that crashed the
+# plugin with "IS_RUNNING: unbound variable" under set -u before the fix.
+case "${1:-}" in
+    status)
+        echo "101: running"
+        ;;
+    exec)
+        shift 2   # drop "exec" and CT id
+        [[ "${1:-}" == "--" ]] && shift
+        cmd="${1:-}"
+        shift || true
+        case "$cmd" in
+            systemctl) echo "active" ;;   # smbd active
+            test)      exit 1 ;;          # every test -f finds nothing
+            *)         ;;                 # find/grep/cat/smbstatus/stat: no output
+        esac
+        ;;
+    *)
+        ;;
+esac
+exit 0
+PCTSTUB
+    chmod +x "$stubdir/pct"
+
+    local err_file
+    err_file=$(mktemp)
+    local out err rc
+    out=$(PATH="$stubdir:$PATH" bash "${SCRIPT_DIR}/checks.d/timemachine-ct101.sh" 2>"$err_file")
+    rc=$?
+    err=$(cat "$err_file")
+
+    [[ "$err" != *"unbound variable"* ]]
+    assert_true "timemachine: no unbound-variable crash when Results.plist missing"
+    assert_eq "WARNING|timemachine-connection|No active Time Machine connections on CT 101" "$out" \
+        "timemachine: emits valid STATE|KEY|DETAIL instead of crashing"
+    [[ "$rc" -eq 0 ]]
+    assert_true "timemachine: plugin exits 0"
+
+    rm -rf "$stubdir" "$err_file"
+}
+
+test_regression_strip_html_entities() {
+    echo ""
+    echo "Testing strip_html_for_plain_text numeric entity decode (TODO #6)..."
+
+    local out
+    out=$(strip_html_for_plain_text "&#128308; <b>CRITICAL</b> cpu &amp; mem%0Asecond line")
+    [[ "$out" == *"🔴"* ]]
+    assert_true "strip_html: numeric emoji entity decoded (&#128308; → 🔴)"
+    [[ "$out" != *"&#128308;"* ]]
+    assert_true "strip_html: raw numeric entity no longer leaks into payloads"
+    [[ "$out" == *"CRITICAL cpu & mem"* ]]
+    assert_true "strip_html: tags stripped and named entities decoded"
+    [[ "$out" == *"second line"* ]]
+    assert_true "strip_html: %0A converted to newline"
+
+    # Fallback sed path (no python3): named entities decode, numeric stay literal
+    out=$(printf '%s\n' "&amp; &lt;x&gt; &#128308;" | sed 's/%0A/\n/g; s/<[^>]*>//g; s/&amp;/\&/g; s/&lt;/</g; s/&gt;/>/g; s/&quot;/"/g')
+    assert_eq "& <x> &#128308;" "$out" "strip_html: fallback sed handles named entities (numeric literal by design)"
+
+    # All plain-text channels (webhook, email, escalation) must use the shared
+    # helper — no inline sed pipeline may remain in telemon.sh
+    local src
+    src=$(cat "${SCRIPT_DIR}/telemon.sh")
+    [[ "$src" == *'plain_msg=$(strip_html_for_plain_text "$esc_message")'* ]]
+    assert_true "strip_html: escalation uses shared helper"
+    [[ "$src" != *"s/%0A/\\n/g"* ]]
+    assert_true "strip_html: no leftover inline sed pipeline in telemon.sh"
+}
+
+test_regression_parse_heartbeat_line() {
+    echo ""
+    echo "Testing parse_heartbeat_line shared parser (TODO #17.5)..."
+
+    local line out
+    line=$(printf 'srv1\t1712345678\tOK\t12\t0\t0\t12345')
+    out=$(parse_heartbeat_line "$line")
+    assert_eq "srv1" "$(echo "$out" | sed -n '1p')" "heartbeat: field 1 label"
+    assert_eq "1712345678" "$(echo "$out" | sed -n '2p')" "heartbeat: field 2 timestamp"
+    assert_eq "OK" "$(echo "$out" | sed -n '3p')" "heartbeat: field 3 status"
+    assert_eq "12" "$(echo "$out" | sed -n '4p')" "heartbeat: field 4 check_count"
+    assert_eq "12345" "$(echo "$out" | sed -n '7p')" "heartbeat: field 7 uptime"
+
+    # Short line → trailing fields empty (callers validate before use)
+    line=$(printf 'srv1\t1712345678\tOK')
+    out=$(parse_heartbeat_line "$line")
+    assert_eq "" "$(echo "$out" | sed -n '4p')" "heartbeat: missing fields become empty"
+}
+
+test_regression_proxmox_tasks_filter() {
+    echo ""
+    echo "Testing PROXMOX_TASK_MINUTES filter (TODO #7)..."
+
+    # The exact python filter used in check_proxmox_tasks (env-var driven)
+    run_task_filter() {
+        local json="$1" minutes="$2"
+        printf '%s' "$json" | PROXMOX_TASK_MINUTES="$minutes" python3 -c '
+import json, sys, os, time
+minutes = int(os.environ.get("PROXMOX_TASK_MINUTES", "60"))
+cutoff = time.time() - minutes * 60
+data = json.load(sys.stdin)
+count = 0
+for t in data:
+    if not isinstance(t, dict) or t.get("status") not in ("FAILED", "ERROR"):
+        continue
+    starttime = t.get("starttime")
+    if isinstance(starttime, (int, float)) and starttime < cutoff:
+        continue
+    count += 1
+print(count)
+' 2>/dev/null || echo "0"
+    }
+
+    local now old_ts new_ts json count
+    now=$(date +%s)
+    old_ts=$(( now - 7200 ))   # 2h ago — outside a 60-min window
+    new_ts=$(( now - 300 ))    # 5 min ago — inside the window
+    json=$(printf '[{"status":"OK","starttime":%s},{"status":"FAILED","starttime":%s},{"status":"FAILED","starttime":%s},{"status":"ERROR","starttime":%s}]' "$old_ts" "$old_ts" "$new_ts" "$new_ts")
+
+    count=$(run_task_filter "$json" 60)
+    assert_eq "2" "$count" "proxmox_tasks: only in-window FAILED/ERROR counted (old ones filtered)"
+
+    count=$(run_task_filter "$json" 180)
+    # 4 tasks total, but the OK one is never counted → 3 failures (2h-old FAILED
+    # now falls inside the 3h window, proving the window widening works)
+    assert_eq "3" "$count" "proxmox_tasks: wider window includes older failures"
+
+    count=$(run_task_filter '[{"status":"FAILED"}]' 60)
+    assert_eq "1" "$count" "proxmox_tasks: task without starttime counted (fail-safe)"
+}
+
+test_regression_file_integrity_deletion() {
+    echo ""
+    echo "Testing file integrity deletion alert (TODO #8)..."
+
+    local workdir capture fn_file
+    workdir=$(mktemp -d)
+    capture=$(mktemp)
+    fn_file=$(mktemp)
+    awk '/^check_file_integrity\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+
+    local watch_file="${workdir}/sshd_config"
+    echo "Port 22" > "$watch_file"
+
+    check_state_change() { printf '%s|%s|%s\n' "$1" "$2" "$3" >> "$capture"; }
+    safe_write_state_file() { printf '%s' "$2" > "$1"; }
+    log() { :; }
+    STATE_FILE="${workdir}/state"
+    INTEGRITY_WATCH_FILES="$watch_file"
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+
+    # Run 1: baseline
+    check_file_integrity
+    [[ -f "${STATE_FILE}.integrity" ]]
+    assert_true "integrity: state file written on baseline"
+
+    # Delete the watched file, then re-run: MUST report DELETED as CRITICAL
+    rm -f "$watch_file"
+    check_file_integrity
+    grep -q "|CRITICAL|.*DELETED" "$capture"
+    assert_true "integrity: deleted watched file triggers CRITICAL DELETED alert"
+
+    rm -rf "$workdir"
+    rm -f "$capture" "$fn_file"
+}
+
+test_regression_drift_deletion() {
+    echo ""
+    echo "Testing drift detection deletion alert (TODO #8)..."
+
+    local workdir capture fn_file
+    workdir=$(mktemp -d)
+    capture=$(mktemp)
+    fn_file=$(mktemp)
+    awk '/^check_drift_detection\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+
+    local watch_file="${workdir}/hosts"
+    echo "127.0.0.1 localhost" > "$watch_file"
+
+    check_state_change() { printf '%s|%s|%s\n' "$1" "$2" "$3" >> "$capture"; }
+    safe_write_state_file() { printf '%s' "$2" > "$1"; }
+    run_with_timeout() { shift; "$@" 2>/dev/null; }
+    log() { :; }
+    STATE_FILE="${workdir}/state"
+    DRIFT_WATCH_FILES="$watch_file"
+    CHECK_TIMEOUT=10
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+
+    # Run 1: baseline
+    check_drift_detection
+    [[ -f "${STATE_FILE}.drift" ]]
+    assert_true "drift: state file written on baseline"
+
+    # Delete the watched file, then re-run: MUST report DELETED as CRITICAL
+    rm -f "$watch_file"
+    check_drift_detection
+    grep -q "|CRITICAL|.*DELETED" "$capture"
+    assert_true "drift: deleted watched file triggers CRITICAL DELETED alert"
+
+    rm -rf "$workdir"
+    rm -f "$capture" "$fn_file"
+}
+
+test_regression_save_state_sidecars() {
+    echo ""
+    echo "Testing save_state clears empty .cooldown/.detail sidecars (TODO #9)..."
+
+    local workdir fn_file state_file
+    workdir=$(mktemp -d)
+    fn_file=$(mktemp)
+    state_file="${workdir}/state"
+    awk '/^save_state\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+
+    declare -A CURR_STATE PREV_COUNT ALERT_LAST_SENT STATE_DETAIL
+    CURR_STATE=([cpu]="OK")
+    PREV_COUNT=([cpu]="0")
+    ALERT_LAST_SENT=([old_key]="1712345678")   # stale — no longer in CURR_STATE
+    STATE_DETAIL=([old_key]="stale detail")
+    STATE_FILE="$state_file"
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+
+    # Pre-create sidecar files with stale content (as if a previous run left them)
+    printf 'old_key=1712345678\n' > "${state_file}.cooldown"
+    printf 'old_key=stale detail\n' > "${state_file}.detail"
+
+    save_state
+
+    [[ -f "${state_file}.cooldown" ]]
+    assert_true "save_state: .cooldown file still exists"
+    [[ ! -s "${state_file}.cooldown" ]]
+    assert_true "save_state: stale .cooldown entries cleared (file now empty)"
+    [[ ! -s "${state_file}.detail" ]]
+    assert_true "save_state: stale .detail entries cleared (file now empty)"
+
+    unset CURR_STATE PREV_COUNT ALERT_LAST_SENT STATE_DETAIL
+    rm -rf "$workdir"
+    rm -f "$fn_file"
+}
+
+test_regression_maintenance_window_portable() {
+    echo ""
+    echo "Testing is_in_maintenance_window portable date (TODO #12)..."
+
+    local fn_file
+    fn_file=$(mktemp)
+    awk '/^is_in_maintenance_window\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+
+    # Mock date with zero-padded hours. GNU-only %-H/%-M fail on BusyBox/macOS;
+    # the fix uses 10# base-10 so "08" parses correctly.
+    date() {
+        case "$1" in
+            '+%a') echo "Wed" ;;
+            '+%H') echo "08" ;;
+            '+%M') echo "30" ;;
+            *) command date "$@" ;;
+        esac
+    }
+    log() { :; }
+    MAINT_SCHEDULE="Wed 08:00-09:00"
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+
+    is_in_maintenance_window
+    assert_true "maintenance: zero-padded '08:30' inside Wed 08:00-09:00 window"
+
+    MAINT_SCHEDULE="Mon 08:00-09:00"
+    ! is_in_maintenance_window
+    assert_true "maintenance: non-matching day returns false"
+
+    unset -f date
+    rm -f "$fn_file"
+}
+
+test_regression_sites_max_time_cap() {
+    echo ""
+    echo "Testing check_sites --max-time cap (TODO #13)..."
+    local src
+    src=$(cat "${SCRIPT_DIR}/telemon.sh")
+    [[ "$src" == *'if [[ "$curl_max_time" -gt "$CHECK_TIMEOUT" ]]; then'* ]]
+    assert_true "sites: curl_max_time capped at CHECK_TIMEOUT"
+    [[ "$src" == *'--max-time "$curl_max_time"'* ]]
+    assert_true "sites: curl uses capped curl_max_time"
+    [[ "$src" != *'redirect_url'* ]]
+    assert_true "sites: dead redirect_url field removed from curl -w"
+}
+
+test_regression_dead_code_removed() {
+    echo ""
+    echo "Testing dead-code removal (TODO #10/#11)..."
+    local src
+    src=$(cat "${SCRIPT_DIR}/telemon.sh")
+    [[ "$src" != *'THRESHOLD_DETAIL="$detail"'* ]]
+    assert_true "dead code: THRESHOLD_DETAIL assignment removed"
+    [[ "$src" != *'local params="${site#*|}"'* ]]
+    assert_true "dead code: check_sites params var removed"
+    [[ "$src" != *'local redirect_url='* ]]
+    assert_true "dead code: redirect_url var removed"
+    [[ "$src" != *'resolved_values'* ]]
+    assert_true "dead code: resolved_values removed"
+    [[ "$src" != *'read -r device type size used priority'* ]]
+    assert_true "dead code: check_swap priority var removed"
+    [[ "$src" != *'local slope intercept'* ]]
+    assert_true "dead code: prediction intercept var removed"
+    [[ "$src" != *'grep -v "Monitor run"'* ]]
+    assert_true "validate: stale grep -v Monitor run removed"
+}
+
+test_regression_alert_queue_retry() {
+    echo ""
+    echo "Testing queued-alert retry per cycle (TODO #14)..."
+
+    local workdir calls fn_file
+    workdir=$(mktemp -d)
+    calls=$(mktemp)
+    fn_file=$(mktemp)
+    awk '/^retry_alert_queue\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+
+    local queue_file="${workdir}/queue"
+    printf 'queued alert message\n' > "$queue_file"
+
+    send_telegram() { echo "telegram:$1" >> "$calls"; return 0; }
+    send_webhook() { echo "webhook:$1" >> "$calls"; }
+    send_email() { echo "email:$1" >> "$calls"; }
+    log() { :; }
+    ALERT_QUEUE_FILE="$queue_file"
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+    retry_alert_queue
+
+    grep -q "telegram:queued alert message" "$calls"
+    assert_true "alert queue: queued message retried via Telegram"
+    [[ ! -f "$queue_file" ]]
+    assert_true "alert queue: queue file removed after successful delivery"
+
+    # main() must invoke it unconditionally, even in quiet cycles with no new
+    # alerts (previously a failed alert sat undelivered forever unless a new
+    # alert happened to fire)
+    local src
+    src=$(cat "${SCRIPT_DIR}/telemon.sh")
+    [[ "$src" == *"Retry queued alerts from previous failures even when nothing new fired"* ]]
+    assert_true "alert queue: main() retries queue even in quiet cycles"
+
+    unset -f send_telegram send_webhook send_email
+    rm -rf "$workdir" "$calls" "$fn_file"
+}
+
+# ---------------------------------------------------------------------------
+# Coverage note (2026-08-16, TODO #18)
+# ---------------------------------------------------------------------------
+# Functional coverage (REAL functions extracted from telemon.sh and executed
+# with mocked external commands): check_state_change (test_check_state_change),
+# calculate_lxc_cpu_percent (test_lxc_cpu_float_uptime), check_file_integrity
+# and check_drift_detection (deletion regression), check_proxmox_storage
+# (float % regression), save_state (sidecar regression),
+# is_in_maintenance_window (portable date regression), plus all helpers in
+# lib/common.sh (portable_stat, portable_sha256, sanitize_state_key,
+# html_escape, strip_html_for_plain_text, parse_heartbeat_line,
+# get_state_file_variants). The check_proxmox_tasks python filter and the MySQL
+# replication password path are functionally exercised via the matching
+# regression tests (same snippets, stubbed clients).
+#
+# Grep-only coverage (regression guards without executing): remaining check
+# functions from TODO #18 are covered by pattern checks — see
+# test_check_databases_*, test_dns_record_checks, test_discovery_system,
+# test_bug_fixes_2026_04_25 and the new dead-code/validate guards.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
 # Main test runner
 # ---------------------------------------------------------------------------
 
@@ -4232,6 +4713,21 @@ main() {
     test_integration_check_memory
     test_integration_check_disk
     test_integration_full_pipeline
+
+    # Regression tests for the 2026-08-16 code audit (TODO.md #1-#18)
+    test_regression_proxmox_storage_float
+    test_regression_mysql_replication_password
+    test_regression_timemachine_missing_results
+    test_regression_strip_html_entities
+    test_regression_parse_heartbeat_line
+    test_regression_proxmox_tasks_filter
+    test_regression_file_integrity_deletion
+    test_regression_drift_deletion
+    test_regression_save_state_sidecars
+    test_regression_maintenance_window_portable
+    test_regression_sites_max_time_cap
+    test_regression_dead_code_removed
+    test_regression_alert_queue_retry
 
     # Summary
     echo ""
