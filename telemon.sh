@@ -28,8 +28,15 @@ fi
 umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Source shared helpers
-source "${SCRIPT_DIR}/lib/common.sh"
+# Source shared helpers. Guarded: a missing lib/common.sh under set -euo pipefail
+# would kill the run with only a bare stderr line (no log(), no state update,
+# no alert) = silent monitoring gap. Fail loudly with an actionable message.
+if [[ -f "${SCRIPT_DIR}/lib/common.sh" ]]; then
+    source "${SCRIPT_DIR}/lib/common.sh"
+else
+    echo "FATAL: lib/common.sh not found at ${SCRIPT_DIR}/lib/common.sh" >&2
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Load configuration
@@ -936,6 +943,11 @@ calculate_lxc_cpu_percent() {
         local uptime_sec=0
         if [[ -f /proc/uptime ]]; then
             read -r uptime_sec _ < /proc/uptime 2>/dev/null || uptime_sec=0
+            # /proc/uptime is a float (e.g. "174757.74") — strip the fractional
+            # part for integer arithmetic below. Without this, [[ -gt ]] errors
+            # with "invalid arithmetic operator" and silently skips the
+            # boot-average fallback (returns baseline 0 on first run).
+            uptime_sec=${uptime_sec%.*}
         fi
         if [[ "$uptime_sec" -gt 0 && "$total_usec" -gt 0 ]]; then
             local cores

@@ -3343,6 +3343,105 @@ test_lxc_code_paths() {
 }
 
 # ---------------------------------------------------------------------------
+# Test calculate_lxc_cpu_percent with float /proc/uptime (bug #1 regression)
+# ---------------------------------------------------------------------------
+
+test_lxc_cpu_float_uptime() {
+    echo ""
+    echo "Testing LXC CPU first-run path with float /proc/uptime (bug #1 regression)..."
+
+    # Extract the REAL function from telemon.sh so the test exercises the
+    # production code (not a copy). /proc/uptime is a float on every real
+    # system (e.g. "174757.74"), which used to crash the [[ -gt ]] test with
+    # "invalid arithmetic operator" and silently skip the boot-average
+    # fallback on the first run (no baseline state file yet).
+    local fn_file
+    fn_file=$(mktemp)
+    awk '/^calculate_lxc_cpu_percent\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+
+    local state_file
+    state_file=$(mktemp)
+    local err_file
+    err_file=$(mktemp)
+
+    # Dependencies the function calls (mocked)
+    get_lxc_cpu_usage_usec() { echo "1000000 500000"; }
+    safe_write_state_file() { :; }
+    nproc() { echo "4"; }
+    STATE_FILE="$state_file"
+
+    # shellcheck disable=SC1090  # temp file generated above; cannot follow
+    source "$fn_file"
+
+    # First run (no baseline state file) -> falls into the /proc/uptime branch
+    local out err
+    out=$(calculate_lxc_cpu_percent 2>"$err_file")
+    err=$(cat "$err_file")
+
+    # Test 1: no arithmetic syntax error on stderr
+    [[ "$err" != *"syntax error: invalid arithmetic operator"* ]]
+    assert_true "LXC CPU: float /proc/uptime no longer triggers arithmetic syntax error"
+
+    # Test 2: output is a valid integer percentage
+    [[ "$out" =~ ^[0-9]+$ ]]
+    assert_true "LXC CPU: first-run fallback returns valid integer (got: '$out')"
+
+    # Test 3: boot-average estimate branch fires (INFO) instead of being skipped (DEBUG)
+    [[ "$err" == *"boot-average estimate"* ]]
+    assert_true "LXC CPU: boot-average estimate fallback used (not silently skipped)"
+
+    # Test 4: the fix expression itself — ${uptime_sec%.*} on a float value
+    local uptime_sec="174757.74"
+    uptime_sec=${uptime_sec%.*}
+    [[ "$uptime_sec" -eq 174757 ]]
+    assert_true "LXC CPU: uptime_sec float truncation strips fractional part"
+
+    # Test 5: source keeps the truncation inside the /proc/uptime branch
+    local telemon_content
+    telemon_content=$(cat "${SCRIPT_DIR}/telemon.sh")
+    [[ "$telemon_content" == *"uptime_sec=\${uptime_sec%.*}"* ]]
+    assert_true "LXC CPU: telemon.sh contains uptime_sec float truncation"
+
+    rm -f "$fn_file" "$state_file" "$err_file"
+}
+
+# ---------------------------------------------------------------------------
+# Test guarded source of lib/common.sh (bug #2 regression)
+# ---------------------------------------------------------------------------
+
+test_common_sh_source_guard() {
+    echo ""
+    echo "Testing guarded source of lib/common.sh (bug #2)..."
+
+    local telemon_content
+    telemon_content=$(cat "${SCRIPT_DIR}/telemon.sh")
+
+    # Test 1: source is guarded with an existence check (not bare `source`
+    # under set -euo pipefail, which would die with a bare stderr line =
+    # silent monitoring gap)
+    [[ "$telemon_content" == *'if [[ -f "${SCRIPT_DIR}/lib/common.sh" ]]; then'* ]]
+    assert_true "common.sh: source statement is guarded with existence check"
+
+    # Test 2: guard fails loudly with a FATAL message + path
+    [[ "$telemon_content" == *"FATAL: lib/common.sh not found"* ]]
+    assert_true "common.sh: guard emits FATAL message with path"
+
+    # Test 3: functional — run telemon.sh from a dir missing lib/common.sh;
+    # must exit non-zero with the FATAL message (not a bare 'No such file')
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    cp "${SCRIPT_DIR}/telemon.sh" "$tmp_dir/"
+    local out rc
+    out=$(bash "$tmp_dir/telemon.sh" 2>&1)
+    rc=$?
+    [[ $rc -ne 0 ]]
+    assert_true "common.sh: missing lib/common.sh exits non-zero (rc=$rc)"
+    [[ "$out" == *"FATAL: lib/common.sh not found"* ]]
+    assert_true "common.sh: missing lib/common.sh produces FATAL message"
+    rm -rf "$tmp_dir"
+}
+
+# ---------------------------------------------------------------------------
 # Test safe_atomic_mv helper (symlink/TOCTOU protection)
 # ---------------------------------------------------------------------------
 
@@ -4126,6 +4225,8 @@ main() {
     test_bug_fixes_2026_04_25
     test_plugin_detail_pipes
     test_lxc_code_paths
+    test_lxc_cpu_float_uptime
+    test_common_sh_source_guard
     test_safe_atomic_mv
     test_integration_check_cpu
     test_integration_check_memory

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **LXC first-run CPU fallback broken by float `/proc/uptime`** — `calculate_lxc_cpu_percent()` compared the raw float (e.g. `174757.74`) with `[[ -gt ]]`, producing `invalid arithmetic operator` on the first run (no baseline state file) and silently skipping the boot-average CPU estimate. `uptime_sec` is now truncated with `${uptime_sec%.*}` before the comparison, so the fallback fires correctly. Regression tests: `test_lxc_cpu_float_uptime`.
+- **Unguarded `source` of `lib/common.sh`** — under `set -euo pipefail`, a missing `lib/common.sh` (partial deploy) killed the run at startup with only a bare stderr line: no log, no state update, no alert (silent monitoring gap). The source is now guarded and exits with an actionable `FATAL: lib/common.sh not found at <path>` message. Regression tests: `test_common_sh_source_guard`.
 ## [1.2.0] — 2026-08-05
 
 ### Fixed
