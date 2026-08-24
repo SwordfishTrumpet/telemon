@@ -62,6 +62,8 @@ assert_true() {
 }
 
 assert_false() {
+    # shellcheck disable=SC2319  # $? is the if-condition exit status from the caller;
+    # expanded before `local` runs, so the capture is correct
     local result=$?
     local msg="$1"
     TESTS_RUN=$((TESTS_RUN + 1))
