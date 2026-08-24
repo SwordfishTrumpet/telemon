@@ -1329,6 +1329,30 @@ check_prediction() {
         check_state_change "$key" "WARNING" \
             "&#9888; <b>PREDICTION</b>: ${safe_label} at ${current_value}% — estimated full in ${hours_display} at current rate"
     else
+        # Not within horizon. GH #10: implement the documented
+        # PREDICT_HYSTERESIS_HOURS deadband — once a prediction WARNING is
+        # active, clearing to OK requires hours-to-full to exceed
+        # horizon + hysteresis, so a prediction hovering near the boundary
+        # does not flap WARNING/OK. (The slope<0 / no-prediction paths above
+        # still resolve immediately: a reversed trend is a genuine recovery.)
+        local hysteresis_hours="${PREDICT_HYSTERESIS_HOURS:-0}"
+        if [[ "$hysteresis_hours" =~ ^[0-9]+$ ]] && [[ "$hysteresis_hours" -gt 0 ]] && [[ "${PREV_STATE[$key]:-OK}" == "WARNING" ]]; then
+            local past_deadband
+            past_deadband=$(awk -v h="$hours_to_full" -v hz="$horizon_hours" -v hy="$hysteresis_hours" \
+                'BEGIN { print (h > hz + hy) ? "1" : "0" }')
+            if [[ "$past_deadband" != "1" ]]; then
+                # Still inside the deadband — hold the WARNING with updated info
+                local hours_display_hold
+                hours_display_hold=$(awk -v h="$hours_to_full" 'BEGIN {
+                    if (h < 1) printf "< 1h"
+                    else if (h < 10) printf "~%.1fh", h
+                    else printf "~%.0fh", h
+                }')
+                check_state_change "$key" "WARNING" \
+                    "&#9888; <b>PREDICTION</b>: ${safe_label} at ${current_value}% — estimated full in ${hours_display_hold} at current rate"
+                return 0
+            fi
+        fi
         check_state_change "$key" "OK" \
             "${safe_label} at ${current_value}% — no exhaustion predicted within ${horizon_hours}h"
     fi
