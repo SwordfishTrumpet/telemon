@@ -5085,6 +5085,260 @@ test_regression_predict_hysteresis() {
     rm -f "$fn_file" "$capture" "$trend" "${trend}.trend"
 }
 
+test_regression_escalation_functional() {
+    echo ""
+    echo "Testing check_escalation functional (GH #13)..."
+
+    local fn_file workdir state_file esc_calls
+    fn_file=$(mktemp)
+    workdir=$(mktemp -d)
+    state_file="${workdir}/state"
+    esc_calls="${workdir}/calls"
+    awk '
+        /^check_escalation\(\) \{/ { f=1 }
+        f {
+            print
+            # Brace-count: the function embeds a python dict whose closing
+            # brace sits at column 0, so the naive "stop at first ^}$" pattern
+            # would cut the extraction mid-function (unterminated quote)
+            depth += gsub(/{/, "x") - gsub(/}/, "x")
+            if (depth <= 0) exit
+        }
+    ' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+
+    log() { :; }
+    audit_log() { :; }
+    safe_write_state_file() {
+        local target="$1" content="$2" tmp_target
+        tmp_target=$(mktemp "${target}.XXXXXX") || return 1
+        echo "$content" > "$tmp_target"
+        chmod 600 "$tmp_target" 2>/dev/null || true
+        mv "$tmp_target" "$target"
+    }
+    run_with_timeout() { shift; "$@"; }
+    # Fake curl: capture the -d JSON payload
+    curl() {
+        local prev=""
+        for a in "$@"; do
+            [[ "$prev" == "-d" ]] && printf '%s\n' "$a" >> "$ESC_CALLS"
+            prev="$a"
+        done
+        return 0
+    }
+    FAKE_NOW=1710000000
+    date() {
+        if [[ "${1:-}" == "+%s" ]]; then printf '%s' "$FAKE_NOW"
+        else echo "2026-08-25 10:00:00 UTC"; fi
+    }
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+    declare -A CURR_STATE STATE_DETAIL
+    ESCALATION_WEBHOOK_URL="https://hooks.example.com/esc"
+    ESCALATION_AFTER_MIN=30
+    CHECK_TIMEOUT=30
+    SERVER_LABEL="testhost"
+    STATE_FILE="$state_file"
+
+    # Run 1: fresh CRITICAL -> first_seen persisted, no escalation yet
+    CURR_STATE=([web_crit]="CRITICAL")
+    STATE_DETAIL=([web_crit]="site down")
+    : > "$esc_calls"
+    ESC_CALLS="$esc_calls" check_escalation
+    [[ ! -s "$esc_calls" ]]
+    assert_true "escalation: fresh CRITICAL not escalated before ESCALATION_AFTER_MIN"
+    grep -q "web_crit=${FAKE_NOW}" "${state_file}.escalation"
+    assert_true "escalation: first_seen timestamp persisted"
+
+    # Run 2: still CRITICAL 40 min later -> escalation fires once
+    FAKE_NOW=$(( FAKE_NOW + 2400 ))
+    ESC_CALLS="$esc_calls" check_escalation
+    grep -q "ESCALATION" "$esc_calls"
+    assert_true "escalation: CRITICAL past ESCALATION_AFTER_MIN triggers webhook"
+    grep -q "web_crit" "$esc_calls"
+    assert_true "escalation: payload contains the escalated key"
+    grep -q "web_crit_escalated=1" "${state_file}.escalation"
+    assert_true "escalation: escalated marker persisted (once-only)"
+
+    # Run 3: still CRITICAL -> NOT re-escalated
+    FAKE_NOW=$(( FAKE_NOW + 300 ))
+    : > "$esc_calls"
+    ESC_CALLS="$esc_calls" check_escalation
+    [[ ! -s "$esc_calls" ]]
+    assert_true "escalation: already-escalated key not re-escalated"
+
+    # Run 4: key resolves to OK -> pruned from escalation tracking (the real
+    # safe_write_state_file echoes content, so an emptied file is a single
+    # newline — assert no tracked keys remain, not zero bytes)
+    CURR_STATE=([web_crit]="OK")
+    : > "$esc_calls"
+    ESC_CALLS="$esc_calls" check_escalation
+    ! grep -q '^web_crit' "${state_file}.escalation"
+    assert_true "escalation: resolved key pruned from escalation tracking"
+
+    unset ESCALATION_WEBHOOK_URL ESCALATION_AFTER_MIN CHECK_TIMEOUT SERVER_LABEL STATE_FILE FAKE_NOW ESC_CALLS
+    unset CURR_STATE STATE_DETAIL
+    unset -f log audit_log safe_write_state_file run_with_timeout curl date check_escalation
+    rm -f "$fn_file"
+    rm -rf "$workdir"
+}
+
+test_regression_cron_jobs_functional() {
+    echo ""
+    echo "Testing check_cron_jobs functional (GH #13)..."
+
+    local fn_file capture touchfile
+    fn_file=$(mktemp)
+    capture=$(mktemp)
+    touchfile=$(mktemp)
+    awk '/^check_cron_jobs\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+
+    log() { :; }
+    check_state_change() { printf '%s|%s|%s\n' "$1" "$2" "$3" >> "$capture"; }
+    FAKE_NOW=1710000000
+    FAKE_MTIME=1709999940   # 60s ago
+    date() { printf '%s' "$FAKE_NOW"; }
+    portable_stat() { echo "$FAKE_MTIME"; }
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+
+    # Case A: heartbeat file missing -> CRITICAL
+    CRON_WATCH_JOBS="nightly:/nonexistent/touch:60"
+    : > "$capture"
+    check_cron_jobs
+    grep -q "cron_nightly|CRITICAL|.*missing" "$capture"
+    assert_true "cron: missing heartbeat file -> CRITICAL"
+
+    # Case B: heartbeat older than max age -> WARNING (100 min vs 60 max)
+    FAKE_MTIME=$(( FAKE_NOW - 6000 ))
+    CRON_WATCH_JOBS="nightly:${touchfile}:60"
+    : > "$capture"
+    check_cron_jobs
+    grep -q "cron_nightly|WARNING|.*last run .*100m ago" "$capture"
+    assert_true "cron: stale heartbeat (100m > 60m) -> WARNING"
+
+    # Case C: heartbeat fresh -> OK
+    FAKE_MTIME=$(( FAKE_NOW - 60 ))
+    : > "$capture"
+    check_cron_jobs
+    grep -q "cron_nightly|OK|.*last run 1m ago" "$capture"
+    assert_true "cron: fresh heartbeat -> OK"
+
+    # Case D: malformed entry (empty max_age) skipped without state change
+    CRON_WATCH_JOBS="bad:/tmp/x:"
+    : > "$capture"
+    check_cron_jobs
+    [[ ! -s "$capture" ]]
+    assert_true "cron: malformed entry skipped"
+
+    unset CRON_WATCH_JOBS FAKE_NOW FAKE_MTIME
+    unset -f log check_state_change date portable_stat check_cron_jobs
+    rm -f "$fn_file" "$capture" "$touchfile"
+}
+
+test_regression_network_bandwidth_functional() {
+    echo ""
+    echo "Testing check_network_bandwidth functional (GH #13)..."
+
+    local fn_file workdir state_file capture
+    fn_file=$(mktemp)
+    workdir=$(mktemp -d)
+    state_file="${workdir}/state"
+    capture=$(mktemp)
+    awk '/^check_network_bandwidth\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+
+    log() { :; }
+    check_state_change() { printf '%s|%s|%s\n' "$1" "$2" "$3" >> "$capture"; }
+    safe_write_state_file() {
+        local target="$1" content="$2" tmp_target
+        tmp_target=$(mktemp "${target}.XXXXXX") || return 1
+        echo "$content" > "$tmp_target"
+        chmod 600 "$tmp_target" 2>/dev/null || true
+        mv "$tmp_target" "$target"
+    }
+    FAKE_NOW=1710000000
+    date() { printf '%s' "$FAKE_NOW"; }
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+    NETWORK_INTERFACE="lo"   # always present in /proc/net/dev
+    NETWORK_THRESHOLD_WARN=800
+    NETWORK_THRESHOLD_CRIT=950
+    STATE_FILE="$state_file"
+
+    # Run 1: no baseline yet -> only writes counters, no rate
+    : > "$capture"
+    check_network_bandwidth
+    [[ ! -s "$capture" ]]
+    assert_true "bandwidth: first run establishes baseline, no state change"
+    [[ -f "${state_file}.net" ]]
+    assert_true "bandwidth: baseline counters persisted"
+
+    # Run 2: 60s later -> rate computed and reported (OK below thresholds)
+    FAKE_NOW=$(( FAKE_NOW + 60 ))
+    check_network_bandwidth
+    grep -q "net_lo|OK|Network lo: RX" "$capture"
+    assert_true "bandwidth: second run reports rate via check_state_change"
+
+    unset NETWORK_INTERFACE NETWORK_THRESHOLD_WARN NETWORK_THRESHOLD_CRIT STATE_FILE FAKE_NOW
+    unset -f log check_state_change safe_write_state_file date check_network_bandwidth
+    rm -f "$fn_file" "$capture"
+    rm -rf "$workdir"
+}
+
+test_regression_send_telegram_truncation() {
+    echo ""
+    echo "Testing send_telegram truncation + tag closing (GH #13)..."
+
+    local fn_file text_capture
+    fn_file=$(mktemp)
+    text_capture=$(mktemp)
+    awk '/^send_telegram\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+
+    # Fake curl: capture the --data-urlencode text arg, return a success JSON
+    curl() {
+        local prev=""
+        for a in "$@"; do
+            [[ "$prev" == "--data-urlencode" ]] && printf '%s\n' "$a" > "$CAPTURE_TEXT"
+            prev="$a"
+        done
+        echo '{"ok": true}'
+    }
+    log() { :; }
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+    TELEGRAM_BOT_TOKEN="test-token"
+    TELEGRAM_CHAT_ID="12345"
+
+    # Long message (> 4000 chars) with an unclosed <b> tag at the cut
+    local long_msg="<b>"
+    local pad
+    pad=$(printf 'x%.0s' $(seq 1 4300))
+    long_msg+="$pad"
+    CAPTURE_TEXT="$text_capture" send_telegram "$long_msg"
+    local sent
+    sent=$(cat "$text_capture")
+    [[ ${#sent} -le 4100 ]]
+    assert_true "telegram: over-limit message truncated near 4000 chars"
+    [[ "$sent" == *"... (truncated,"* ]]
+    assert_true "telegram: truncation note appended"
+    local open_tags close_tags
+    open_tags=$(grep -o '<b>' <<< "$sent" | wc -l)
+    close_tags=$(grep -o '</b>' <<< "$sent" | wc -l)
+    assert_eq "$open_tags" "$close_tags" "telegram: truncated HTML tags balanced (was: 405 'can't parse entities')"
+
+    # Short message passes through unchanged (curl stub captures the
+    # --data-urlencode arg, which carries the text= prefix)
+    CAPTURE_TEXT="$text_capture" send_telegram "short message"
+    assert_eq "text=short message" "$(cat "$text_capture")" "telegram: short message sent unchanged"
+
+    unset TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID CAPTURE_TEXT
+    unset -f curl log send_telegram
+    rm -f "$fn_file" "$text_capture"
+}
+
 # ---------------------------------------------------------------------------
 # Coverage note (2026-08-16, TODO #18)
 # ---------------------------------------------------------------------------
@@ -5193,6 +5447,10 @@ main() {
     test_regression_detail_newline_roundtrip
     test_regression_sites_ssl_port
     test_regression_predict_hysteresis
+    test_regression_escalation_functional
+    test_regression_cron_jobs_functional
+    test_regression_network_bandwidth_functional
+    test_regression_send_telegram_truncation
 
     # Summary
     echo ""
