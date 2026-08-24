@@ -1023,11 +1023,19 @@ detect_hardware() {
                 hw_info+=$'\n'
             done
             hw_info+=$'\n'
+            # GH #8: telemon only reads NETWORK_INTERFACE (singular) — suggest
+            # the default-route interface (the one check_network_bandwidth uses
+            # when the var is unset), falling back to the first physical one.
+            local suggested_iface
+            if _cmd_exists ip; then
+                suggested_iface=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')
+            fi
+            [[ -z "$suggested_iface" ]] && suggested_iface=$(echo "$physical_ifaces" | head -1)
             hw_suggestions+="# Network bandwidth monitoring"
             hw_suggestions+=$'\n'
             hw_suggestions+="ENABLE_NETWORK_CHECK=true"
             hw_suggestions+=$'\n'
-            hw_suggestions+="NETWORK_INTERFACES=\"${physical_ifaces//$'\n'/ }\""
+            hw_suggestions+="NETWORK_INTERFACE=\"${suggested_iface}\""
             hw_suggestions+=$'\n'
             hw_suggestions+="# NETWORK_THRESHOLD_WARN=800"
             hw_suggestions+=$'\n'
