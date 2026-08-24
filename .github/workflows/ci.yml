@@ -11,7 +11,7 @@ jobs:
     name: ShellCheck
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     
     - name: Run ShellCheck
       uses: ludeeus/action-shellcheck@master
@@ -25,7 +25,7 @@ jobs:
     name: Bash Syntax Check
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     
     - name: Check telemon.sh syntax
       run: bash -n telemon.sh
@@ -49,7 +49,7 @@ jobs:
     name: Test Run (Dry Mode)
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     
     - name: Create test .env
       run: |
@@ -82,7 +82,7 @@ jobs:
     name: Markdown Lint
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     
     - name: Run markdownlint
       uses: DavidAnson/markdownlint-cli2-action@v14
