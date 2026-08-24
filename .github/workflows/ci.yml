@@ -74,7 +74,8 @@ jobs:
         grep -q "check_memory()" telemon.sh || exit 1
         grep -q "check_disk()" telemon.sh || exit 1
         grep -q "send_telegram()" telemon.sh || exit 1
-        grep -q "portable_stat()" telemon.sh || exit 1
+        # portable_stat lives in lib/common.sh (moved there in the 2026-08-16 audit)
+        grep -q "portable_stat()" lib/common.sh || exit 1
         echo "All required functions found"
 
   markdown-lint:
