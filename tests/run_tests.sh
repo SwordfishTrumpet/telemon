@@ -4980,6 +4980,74 @@ OSSLSTUB
     rm -rf "$fn_file" "$captures"
 }
 
+test_regression_predict_hysteresis() {
+    echo ""
+    echo "Testing PREDICT_HYSTERESIS_HOURS deadband (GH #10)..."
+
+    local fn_file capture trend
+    fn_file=$(mktemp)
+    capture=$(mktemp)
+    trend=$(mktemp)
+    awk '/^check_prediction\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+
+    log() { :; }
+    check_state_change() { printf '%s|%s|%s\n' "$1" "$2" "$3" >> "$capture"; }
+    # Mocked regression: slope in %/sec; hours_to_full = (100 - cv) / slope / 3600
+    SLOPE=0.001
+    linear_regression() { echo "$SLOPE 1"; }
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+
+    declare -A PREV_STATE CURR_STATE PREV_COUNT STATE_DETAIL ALERT_LAST_SENT
+    ENABLE_PREDICTIVE_ALERTS=true
+    PREDICT_MIN_DATAPOINTS=12
+    PREDICT_HORIZON_HOURS=24
+    PREDICT_HYSTERESIS_HOURS=2
+    STATE_FILE="$trend"
+    printf 'disk=%s\n' "$(seq -s, 1 12)" > "${trend}.trend"
+
+    # Scenario 1: 25h to full (horizon+1, INSIDE 2h deadband), previous state
+    # WARNING -> must HOLD WARNING instead of flapping to OK
+    # hours = (100 - 10) / 0.001 / 3600 = 25.0
+    SLOPE=0.001
+    PREV_STATE=([disk]="WARNING")
+    : > "$capture"
+    check_prediction "disk" "Disk" "10"
+    grep -q "disk|WARNING|.*estimated full in ~25h" "$capture"
+    assert_true "hysteresis: hours-to-full inside deadband holds WARNING (was flapping to OK)"
+
+    # Scenario 2: 26.4h to full (horizon+2.4, PAST deadband), previous WARNING
+    # -> must resolve to OK
+    # hours = (100 - 5) / 0.001 / 3600 = 26.39
+    PREV_STATE=([disk]="WARNING")
+    : > "$capture"
+    check_prediction "disk" "Disk" "5"
+    grep -q "disk|OK|.*no exhaustion predicted" "$capture"
+    assert_true "hysteresis: hours-to-full past deadband resolves to OK"
+
+    # Scenario 3: inside deadband but previous state OK -> stays OK (no
+    # spurious new WARNING from the deadband hold logic)
+    PREV_STATE=([disk]="OK")
+    : > "$capture"
+    check_prediction "disk" "Disk" "10"
+    grep -q "disk|OK|.*no exhaustion predicted" "$capture"
+    assert_true "hysteresis: inside deadband with previous OK stays OK (no spurious WARNING)"
+
+    # Scenario 4: within horizon (22.2h) -> WARNING as before
+    # hours = (100 - 20) / 0.001 / 3600 = 22.2
+    PREV_STATE=([disk]="OK")
+    : > "$capture"
+    check_prediction "disk" "Disk" "20"
+    grep -q "disk|WARNING|" "$capture"
+    assert_true "hysteresis: within horizon still warns normally"
+
+    unset ENABLE_PREDICTIVE_ALERTS PREDICT_MIN_DATAPOINTS PREDICT_HORIZON_HOURS \
+        PREDICT_HYSTERESIS_HOURS STATE_FILE SLOPE PREV_STATE CURR_STATE PREV_COUNT STATE_DETAIL ALERT_LAST_SENT
+    unset -f log check_state_change linear_regression check_prediction
+    rm -f "$fn_file" "$capture" "$trend" "${trend}.trend"
+}
+
 # ---------------------------------------------------------------------------
 # Coverage note (2026-08-16, TODO #18)
 # ---------------------------------------------------------------------------
@@ -5087,6 +5155,7 @@ main() {
     test_regression_plugin_multiline_output
     test_regression_detail_newline_roundtrip
     test_regression_sites_ssl_port
+    test_regression_predict_hysteresis
 
     # Summary
     echo ""
