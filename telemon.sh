@@ -1079,16 +1079,24 @@ check_state_change() {
     fi
     
     if [[ "$should_alert" == "true" ]]; then
-        # Rate limiting: skip if we alerted for this key within cooldown period
+        # Rate limiting: skip if we alerted for this key within cooldown period.
+        # RESOLUTION alerts (state -> OK) are EXEMPT from the cooldown: a
+        # recovery that happens within ALERT_COOLDOWN_SEC of the original alert
+        # must still be announced, or operators are left unsure whether the
+        # outage ever resolved (the OK transition is never re-evaluated later
+        # because PREV_STATE is loaded once per run).
         local now_epoch
         now_epoch=$(date +%s)
         local last_sent="${ALERT_LAST_SENT[$key]:-0}"
         local time_since_last=$(( now_epoch - last_sent ))
         # Guard against clock skew (NTP corrections): negative delta means clock went backwards
         [[ "$time_since_last" -lt 0 ]] && time_since_last=$((ALERT_COOLDOWN_SEC))
-        if [[ "$ALERT_COOLDOWN_SEC" -gt 0 ]] && [[ "$time_since_last" -lt "$ALERT_COOLDOWN_SEC" ]]; then
+        local cooldown_blocked=false
+        if [[ "$new_state" != "OK" ]] && [[ "$ALERT_COOLDOWN_SEC" -gt 0 ]] && [[ "$time_since_last" -lt "$ALERT_COOLDOWN_SEC" ]]; then
             log "DEBUG" "Rate limited alert for ${key}: cooldown active (${ALERT_COOLDOWN_SEC}s)"
-        else
+            cooldown_blocked=true
+        fi
+        if [[ "$cooldown_blocked" == "false" ]]; then
                 local emoji=""
                 case "$new_state" in
                     CRITICAL) emoji="&#128308;" ;;  # Red circle
