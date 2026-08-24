@@ -44,7 +44,7 @@ TELEGRAM_BOT_TOKEN="xxx" TELEGRAM_CHAT_ID="yyy" \
 
 Telemon uses **stateful tracking** — it remembers the previous state of each check and only notifies on *transitions*. This eliminates false alarms and alert spam:
 
-```
+```text
 Check 1: CPU=85% → count=1/3, silent (collecting evidence)
 Check 2: CPU=88% → count=2/3, silent (still collecting)
 Check 3: CPU=87% → count=3/3, ALERT SENT (confirmed problem)
@@ -346,7 +346,7 @@ Scans your system and generates `.env` suggestions for:
 
 ### Discovery Output Example
 
-```
+```text
 === Hardware ===
 ✓ NVMe drives detected (2): /dev/nvme0n1, /dev/nvme1n1
 ✓ NVIDIA GPU detected: NVIDIA GeForce RTX 3080
@@ -670,7 +670,7 @@ ENABLE_PLUGINS=true
 ```
 
 Plugins output `STATE|KEY|DETAIL`:
-```
+```text
 OK|my_check|Everything is working
 WARNING|my_check|Resource at 85%
 CRITICAL|my_check|Service not responding
@@ -826,7 +826,7 @@ FLEET_HEARTBEAT_DIR="/shared/telemon/heartbeats"
 
 Alerts only fire after a problem persists:
 
-```
+```text
 Check 1: CPU=85% (CRITICAL) → count=1/3, no alert
 Check 2: CPU=88% (CRITICAL) → count=2/3, no alert
 Check 3: CPU=87% (CRITICAL) → count=3/3, ALERT SENT
@@ -840,7 +840,7 @@ Set `CONFIRMATION_COUNT=1` for immediate alerts.
 
 Per-key cooldown prevents alert floods:
 
-```
+```text
 12:00 — CPU goes CRITICAL → alert sent
 12:05 — CPU resolves to OK → recovery alert sent
 12:10 — CPU goes CRITICAL again → cooldown active, no alert
@@ -861,7 +861,7 @@ Queued alerts from failed deliveries are retried at the start of **every** cycle
 (via `retry_alert_queue()`), so an alert never sits undelivered just because no
 new alert fires afterwards.
 
-```
+```text
 Normal cycle:     retry_alert_queue() → dispatch_with_retry() → Telegram (queue on fail) + Webhook + Email
 Digest mode:      dispatch_alert()      → Telegram + Webhook + Email (no retry)
 Escalation:       check_escalation()    → Escalation webhook only
@@ -872,7 +872,7 @@ Escalation:       check_escalation()    → Escalation webhook only
 Default: `/tmp/telemon_sys_alert_state`
 
 Format: `key=STATE:count`
-```
+```text
 cpu=CRITICAL:3
 mem=OK:0
 disk_root=WARNING:2

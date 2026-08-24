@@ -2,7 +2,7 @@
 
 ## Quick Diagnostic Flowchart
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                    Problem: No Alerts                       │
 └─────────────────────────────────────────────────────────────┘
@@ -192,7 +192,7 @@ Telemon includes multi-layered stale lock detection:
 3. **Force-break Old Locks**: Locks older than 10 minutes are force-broken regardless of PID status
 
 You'll see log messages like:
-```
+```text
 [WARN] Stale lock detected (PID 12345 not running, age 360s) - breaking lock
 [WARN] Stale lock detected (PID 12345 is not telemon - possible PID reuse, age 600s) - breaking lock
 [WARN] Stale lock detected (age 900s > 600s) - force breaking lock
@@ -357,7 +357,7 @@ If the above doesn't solve your issue:
    ```
 
 2. **Open an issue:**
-   - Go to: https://github.com/yourusername/telemon/issues
+   - Go to: <https://github.com/yourusername/telemon/issues>
    - Use the "Bug report" template
    - Attach debug.txt (remove sensitive data)
 

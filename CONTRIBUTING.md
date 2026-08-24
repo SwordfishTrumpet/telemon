@@ -85,7 +85,7 @@ We welcome:
 
 ### File Structure
 
-```
+```text
 telemon/
 ├── telemon.sh          # Main monitoring script
 ├── install.sh          # Installation script
@@ -224,7 +224,7 @@ cmd || {
 
 Use clear, descriptive commit messages:
 
-```
+```text
 Add feature: brief description
 
 Longer explanation if needed. Explain what changed

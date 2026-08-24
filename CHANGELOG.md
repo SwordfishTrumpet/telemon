@@ -371,6 +371,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - .env.example with all configuration options
 - MIT License
 
-[Unreleased]: https://github.com/SwordfishTrumpet/telemon/compare/v1.0.1...HEAD
 [1.0.1]: https://github.com/SwordfishTrumpet/telemon/releases/tag/v1.0.1
 [1.0.0]: https://github.com/SwordfishTrumpet/telemon/releases/tag/v1.0.0

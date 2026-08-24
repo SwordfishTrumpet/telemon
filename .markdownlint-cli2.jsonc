@@ -1,0 +1,20 @@
+{
+  // markdownlint-cli2 options
+  "gitignore": true, // skip gitignored files (TODO.md/AGENTS.md are local-only)
+  // markdownlint rules — the project's intentional dense-docs style:
+  //   - CHANGELOG follows Keep-a-Changelog with single-line bullets
+  //   - README/docs use long prose lines and occasional inline HTML
+  //   - tables use compact pipe style without column alignment
+  // These rules conflict with that style, so they are disabled.
+  // All other rules stay active (MD007, MD009, MD034, MD040, MD041, MD053, ...).
+  "config": {
+    "MD013": false, // line length (changelog bullets are intentionally single-line)
+    "MD022": false, // headings surrounded by blank lines (dense docs style)
+    "MD024": false, // duplicate headings (changelog repeats ### Fixed/### Added per version)
+    "MD031": false, // fenced code surrounded by blank lines (dense docs style)
+    "MD032": false, // lists surrounded by blank lines (dense docs style)
+    "MD033": false, // inline HTML (README uses <br>/<details> intentionally)
+    "MD058": false, // tables surrounded by blank lines (dense docs style)
+    "MD060": false  // table column alignment (docs use compact tables)
+  }
+}

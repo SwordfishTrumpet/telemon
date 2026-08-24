@@ -20,10 +20,10 @@ Steps to reproduce the behavior:
 A clear and concise description of what you expected to happen.
 
 **Environment (please complete the following information):**
- - OS: [e.g. Ubuntu 22.04, Debian 11]
- - Telemon version: [e.g. 1.0.0 or git commit hash]
- - Shell: [e.g. bash 5.1]
- - Installation method: [e.g. git clone, manual download]
+- OS: [e.g. Ubuntu 22.04, Debian 11]
+- Telemon version: [e.g. 1.0.0 or git commit hash]
+- Shell: [e.g. bash 5.1]
+- Installation method: [e.g. git clone, manual download]
 
 **Configuration**
 Please provide your `.env` file (remove sensitive data like Telegram tokens):
@@ -33,7 +33,7 @@ Please provide your `.env` file (remove sensitive data like Telegram tokens):
 
 **Logs**
 If applicable, add relevant log output:
-```
+```text
 # Paste logs from telemon.log or telemon_cron.log
 ```
 

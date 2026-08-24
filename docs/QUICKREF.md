@@ -111,5 +111,5 @@ FLEET_EXPECTED_SERVERS="web-prod-01 db-prod-01"
 
 ## Support
 
-- Issues: https://github.com/yourusername/telemon/issues
-- Docs: https://github.com/yourusername/telemon/blob/main/README.md
+- Issues: <https://github.com/yourusername/telemon/issues>
+- Docs: <https://github.com/yourusername/telemon/blob/main/README.md>
