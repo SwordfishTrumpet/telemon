@@ -4626,6 +4626,99 @@ test_regression_alert_queue_retry() {
     rm -rf "$workdir" "$calls" "$fn_file"
 }
 
+test_regression_recovery_alert_cooldown() {
+    echo ""
+    echo "Testing recovery (resolution) alert vs ALERT_COOLDOWN_SEC (GH #2)..."
+
+    # Extract the REAL check_state_change (not a re-implementation) so this
+    # regression proves the production behavior — the exact reason the old
+    # inline-copy test (GH #11) shipped the bug green.
+    local fn_file
+    fn_file=$(mktemp)
+    awk '/^check_state_change\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+
+    # Mock external deps the extracted function relies on
+    log() { :; }
+    audit_log() { :; }
+    # Control the clock so cooldown arithmetic is deterministic
+    FAKE_NOW=1000000
+    date() { printf '%s' "$FAKE_NOW"; }
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+
+    # Global state arrays the function reads/writes (mirrors main())
+    declare -A PREV_STATE CURR_STATE PREV_COUNT STATE_DETAIL ALERT_LAST_SENT
+    ALERTS=""
+    CONFIRMATION_COUNT=3
+    ALERT_COOLDOWN_SEC=900   # default 15 min; cron cycle = 5 min
+
+    # Persist between "runs" exactly like save_state/load_state do: the real
+    # function does NOT write PREV_STATE itself (unlike the divergent test
+    # copy), so each simulated cron run starts from the persisted state.
+    persist_state() {
+        PREV_STATE["$1"]="${CURR_STATE[$1]}"
+    }
+
+    # CYCLE 1: first CRITICAL — counting, no alert
+    ALERTS=""
+    check_state_change "cpu" "CRITICAL" "CPU at 99%"
+    persist_state "cpu"
+    [[ -z "$ALERTS" ]]
+    assert_true "cooldown/resolution: cycle 1 CRITICAL silent (counting)"
+
+    # CYCLE 2: second CRITICAL — still counting, no alert
+    FAKE_NOW=$(( FAKE_NOW + 300 ))
+    ALERTS=""
+    check_state_change "cpu" "CRITICAL" "CPU at 99%"
+    persist_state "cpu"
+    [[ -z "$ALERTS" ]]
+    assert_true "cooldown/resolution: cycle 2 CRITICAL silent (counting)"
+
+    # CYCLE 3: third CRITICAL — confirmed, alert fires
+    FAKE_NOW=$(( FAKE_NOW + 300 ))
+    ALERTS=""
+    check_state_change "cpu" "CRITICAL" "CPU at 99%"
+    persist_state "cpu"
+    [[ "$ALERTS" == *"<b>cpu</b>"* ]]
+    assert_true "cooldown/resolution: cycle 3 CRITICAL alerts (confirmed)"
+
+    # CYCLE 4: still CRITICAL 5 min later — cooldown suppresses re-alert
+    FAKE_NOW=$(( FAKE_NOW + 300 ))
+    ALERTS=""
+    check_state_change "cpu" "CRITICAL" "CPU at 98%"
+    persist_state "cpu"
+    [[ -z "$ALERTS" ]]
+    assert_true "cooldown/resolution: cycle 4 CRITICAL re-alert rate-limited (correct)"
+
+    # CYCLE 5: resolves to OK, only 600s after the last alert (< 900s cooldown)
+    # The resolution alert MUST still fire — it is exempt from the cooldown.
+    FAKE_NOW=$(( FAKE_NOW + 300 ))
+    ALERTS=""
+    check_state_change "cpu" "OK" "CPU normal"
+    persist_state "cpu"
+    [[ "$ALERTS" == *"<b>cpu</b>"* ]]
+    assert_true "cooldown/resolution: recovery within cooldown window still alerts (was silently dropped)"
+    [[ "${ALERT_LAST_SENT[cpu]}" == "$FAKE_NOW" ]]
+    assert_true "cooldown/resolution: ALERT_LAST_SENT refreshed on resolution"
+
+    # Non-OK alerts must STILL be rate-limited (guard against over-exemption)
+    FAKE_NOW=$(( FAKE_NOW + 300 ))
+    ALERTS=""
+    PREV_STATE[cpu]="OK"
+    PREV_COUNT[cpu]=0
+    check_state_change "cpu" "CRITICAL" "CPU at 97%"
+    check_state_change "cpu" "CRITICAL" "CPU at 96%"
+    check_state_change "cpu" "CRITICAL" "CPU at 95%"
+    persist_state "cpu"
+    [[ -z "$ALERTS" ]]
+    assert_true "cooldown/resolution: non-OK alerts still rate-limited after exemption"
+
+    unset FAKE_NOW CONFIRMATION_COUNT ALERT_COOLDOWN_SEC ALERTS PREV_STATE CURR_STATE PREV_COUNT STATE_DETAIL ALERT_LAST_SENT
+    unset -f date log audit_log persist_state check_state_change
+    rm -f "$fn_file"
+}
+
 # ---------------------------------------------------------------------------
 # Coverage note (2026-08-16, TODO #18)
 # ---------------------------------------------------------------------------
@@ -4728,6 +4821,7 @@ main() {
     test_regression_sites_max_time_cap
     test_regression_dead_code_removed
     test_regression_alert_queue_retry
+    test_regression_recovery_alert_cooldown
 
     # Summary
     echo ""
