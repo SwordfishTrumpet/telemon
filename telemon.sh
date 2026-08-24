@@ -6662,6 +6662,7 @@ send_email_native_smtp() {
     local smtp_user="${SMTP_USER:-}"
     local smtp_pass="${SMTP_PASS:-}"
     local smtp_tls="${SMTP_TLS:-yes}"
+    local auth_config=""   # curl --config file for SMTP credentials (GH #3)
     
     if ! command -v curl &>/dev/null; then
         log "WARN" "Native SMTP requires curl — not found"
@@ -6698,12 +6699,21 @@ EOF
     
     # Add authentication if configured
     if [[ -n "$smtp_user" && -n "$smtp_pass" ]]; then
-        # SECURITY: URL-encode password to handle special characters (@, #, %, &, etc)
-        # Order matters: encode % first, then other characters
-        # This prevents curl from misinterpreting characters like @ in passwords
-        local encoded_pass
-        encoded_pass=$(printf '%s' "$smtp_pass" | sed 's/%/%25/g; s/@/%40/g; s/#/%23/g; s/&/%26/g; s/=/%3D/g; s/?/%3F/g')
-        curl_args+=(--user "${smtp_user}:${encoded_pass}")
+        # SECURITY: pass credentials via a curl --config file (same pattern as
+        # send_telegram's bot token) so the password never appears in process
+        # args and needs NO percent-encoding. Percent-encoding --user is wrong:
+        # curl does not percent-decode --user values (it sends the literal
+        # %XX), so any password containing % @ = ? fails SMTP auth silently;
+        # curl-version-dependent handling of # additionally truncates the
+        # password. A --config file carries the raw bytes verbatim (GH #3).
+        auth_config=$(mktemp) || { log "ERROR" "send_email_native_smtp: failed to create temp auth config"; return 1; }
+        chmod 600 "$auth_config" 2>/dev/null || true
+        # ${auth_config:-} guards a stray later firing of this RETURN trap:
+        # bash keeps function-level traps active, so the trap would otherwise
+        # re-fire (and hit an unbound local) when an enclosing function returns
+        trap 'rm -f "${auth_config:-}" 2>/dev/null' RETURN
+        printf 'user = "%s:%s"\n' "$smtp_user" "$smtp_pass" > "$auth_config"
+        curl_args+=(--config "$auth_config")
     fi
     
     # Add TLS/SSL options
@@ -6724,6 +6734,13 @@ EOF
     local curl_output
     curl_output=$(curl "${curl_args[@]}" --mail-from "$email_from" --mail-rcpt "$email_to" <<< "$email_content" 2>&1)
     local curl_exit=$?
+    # Credentials config is no longer needed — remove it and clear the RETURN
+    # trap so it cannot leak into enclosing functions (bash does not
+    # auto-restore function-level traps; send_telegram uses the same pattern)
+    if [[ -n "$auth_config" ]]; then
+        rm -f "$auth_config" 2>/dev/null
+        trap - RETURN
+    fi
     
     if [[ $curl_exit -eq 0 ]]; then
         log "DEBUG" "Email alert sent to ${email_to} via SMTP ${smtp_host}:${smtp_port}"
