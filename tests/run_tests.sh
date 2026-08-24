@@ -2986,6 +2986,13 @@ test_discovery_system() {
     grep -q "Smart Thresholds" "$admin_script"
     assert_true "Discovery: Smart Thresholds section in output"
     
+    # GH #8: discover must suggest NETWORK_INTERFACE (singular, default-route
+    # iface) — the plural NETWORK_INTERFACES is dead config telemon never reads
+    ! grep -q "NETWORK_INTERFACES" "$admin_script"
+    assert_true "Discovery: no dead NETWORK_INTERFACES (plural) suggestion"
+    grep -q 'NETWORK_INTERFACE=\\"${suggested_iface}\\"' "$admin_script"
+    assert_true "Discovery: suggests NETWORK_INTERFACE (singular) with default-route iface"
+    
     # Test 8: verify smart thresholds generates expected keys
     grep -q "MEM_THRESHOLD_WARN" "$admin_script"
     assert_true "Discovery: generates MEM_THRESHOLD_WARN"
