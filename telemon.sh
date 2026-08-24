@@ -738,7 +738,16 @@ load_state() {
     local detail_file="${STATE_FILE}.detail"
     if [[ -f "$detail_file" ]]; then
         while IFS='=' read -r key detail; do
-            [[ -n "$key" ]] && STATE_DETAIL["$key"]="$detail"
+            [[ -n "$key" ]] || continue
+            # GH #5: save_state encodes backslashes (\\ -> \\) and real
+            # newlines (-> \n) so the line-oriented file stays intact; decode
+            # here. Order matters: escaped backslash is replaced via a
+            # placeholder FIRST, otherwise a literal backslash followed by 'n'
+            # would be mistaken for an encoded newline.
+            detail="${detail//\\\\/$'\x1f'}"
+            detail="${detail//\\n/$'\n'}"
+            detail="${detail//$'\x1f'/\\}"
+            STATE_DETAIL["$key"]="$detail"
         done < "$detail_file"
     fi
 }
@@ -805,7 +814,14 @@ save_state() {
     for key in "${!STATE_DETAIL[@]}"; do
         # Only persist details for keys that are still active in this run
         if [[ -n "${CURR_STATE[$key]+x}" ]]; then
-            detail_content+="${key}=${STATE_DETAIL[$key]}"$'\n'
+            # GH #5: encode backslashes and real newlines so the line-oriented
+            # file format survives details that legitimately contain newlines
+            # (e.g. drift diffs). Previously a raw newline made every diff line
+            # a bogus key on the next load_state and truncated the real detail.
+            local detail_enc="${STATE_DETAIL[$key]}"
+            detail_enc="${detail_enc//\\/\\\\}"
+            detail_enc="${detail_enc//$'\n'/\\n}"
+            detail_content+="${key}=${detail_enc}"$'\n'
         fi
     done
     # Always write the detail sidecar too (see cooldown note above)

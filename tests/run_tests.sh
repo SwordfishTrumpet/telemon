@@ -4832,6 +4832,66 @@ PLUGIN3
     rm -rf "$plugdir"
 }
 
+test_regression_detail_newline_roundtrip() {
+    echo ""
+    echo "Testing .detail newline encoding round-trip (GH #5)..."
+
+    local fn_file workdir state_file
+    fn_file=$(mktemp)
+    workdir=$(mktemp -d)
+    state_file="${workdir}/state"
+
+    # Extract BOTH real functions (save_state calls safe_write_state_file,
+    # which is mocked below with functional write behavior)
+    awk '/^save_state\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+    awk '/^load_state\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" >> "$fn_file"
+
+    log() { :; }
+    # Functional mock matching the real safe_write_state_file write semantics
+    safe_write_state_file() {
+        local target="$1" content="$2"
+        local tmp_target
+        tmp_target=$(mktemp "${target}.XXXXXX") || return 1
+        echo "$content" > "$tmp_target"
+        chmod 600 "$tmp_target" 2>/dev/null || true
+        mv "$tmp_target" "$target"
+    }
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+
+    declare -A CURR_STATE PREV_STATE PREV_COUNT ALERT_LAST_SENT STATE_DETAIL
+    STATE_FILE="$state_file"
+
+    # Drift-style detail with REAL newlines (the issue's corruption case) plus
+    # a literal backslash-n and a plain detail for full round-trip coverage
+    local drift_detail
+    drift_detail=$'<b>File:</b> <code>/etc/nginx/nginx.conf</code>%0A<b>Changes:</b>%0A<pre>- old line\n+ new line\n context\n</pre>'
+    CURR_STATE=([drift_x]="WARNING" [literal]="WARNING" [plain]="OK")
+    PREV_COUNT=([drift_x]="3" [literal]="3" [plain]="0")
+    STATE_DETAIL=([drift_x]="$drift_detail" [literal]="path \\ with backslash-n \\n" [plain]='all good')
+
+    save_state
+
+    # On-disk .detail must be one NON-EMPTY physical line per key — no raw
+    # newlines leaked from detail content (the trailing blank line is the
+    # pre-existing echo artifact also present in production writes)
+    local nonempty_lines
+    nonempty_lines=$(grep -cv '^$' "${state_file}.detail")
+    assert_eq "3" "$nonempty_lines" "detail: on-disk .detail has one line per key (was 4+ corrupt)"
+
+    # Round-trip: load_state must restore each detail byte-exactly
+    load_state
+    assert_eq "$drift_detail" "${STATE_DETAIL[drift_x]}" "detail: drift detail with newlines round-trips exactly"
+    assert_eq "path \\ with backslash-n \\n" "${STATE_DETAIL[literal]}" "detail: literal backslash-n round-trips exactly"
+    assert_eq "all good" "${STATE_DETAIL[plain]}" "detail: plain detail round-trips"
+
+    unset CURR_STATE PREV_COUNT ALERT_LAST_SENT STATE_DETAIL STATE_FILE
+    unset -f log safe_write_state_file save_state load_state
+    rm -f "$fn_file"
+    rm -rf "$workdir"
+}
+
 # ---------------------------------------------------------------------------
 # Coverage note (2026-08-16, TODO #18)
 # ---------------------------------------------------------------------------
@@ -4937,6 +4997,7 @@ main() {
     test_regression_recovery_alert_cooldown
     test_regression_smtp_password_raw
     test_regression_plugin_multiline_output
+    test_regression_detail_newline_roundtrip
 
     # Summary
     echo ""
