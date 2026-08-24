@@ -3922,11 +3922,31 @@ check_plugins() {
         
         # Parse plugin output: STATE|KEY|DETAIL
         # State must be OK, WARNING, or CRITICAL
-        # Use cut to preserve pipe characters in the detail field
+        # Use cut to preserve pipe characters in the detail field.
+        # Only the FIRST line matching STATE|KEY|DETAIL is used — a leading
+        # banner / "checking..." line, trailing blank line, or debug output
+        # must not leak embedded newlines into STATE/KEY (multi-line STATE/KEY
+        # failed the validations below and silently dropped the plugin's whole
+        # monitoring contribution every cycle, GH #4). Note: head -1 alone
+        # cannot fix the banner-first case from the issue's proof, so we scan
+        # for the first line whose leading field is a valid state.
         local plugin_state plugin_key plugin_detail
-        plugin_state=$(printf '%s' "$plugin_output" | cut -d'|' -f1)
-        plugin_key=$(printf '%s' "$plugin_output" | cut -d'|' -f2)
-        plugin_detail=$(printf '%s' "$plugin_output" | cut -d'|' -f3-)
+        local plugin_line=""
+        while IFS= read -r line; do
+            local line_state="${line%%|*}"
+            case "$line_state" in
+                OK|WARNING|CRITICAL) plugin_line="$line"; break ;;
+            esac
+        done <<< "$plugin_output"
+
+        if [[ -z "$plugin_line" ]]; then
+            log "WARN" "Plugin ${safe_plugin_name} returned no STATE|KEY|DETAIL line"
+            continue
+        fi
+
+        plugin_state=$(printf '%s' "$plugin_line" | cut -d'|' -f1)
+        plugin_key=$(printf '%s' "$plugin_line" | cut -d'|' -f2)
+        plugin_detail=$(printf '%s' "$plugin_line" | cut -d'|' -f3-)
         
         # Validate state
         case "$plugin_state" in

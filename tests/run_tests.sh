@@ -4782,6 +4782,56 @@ CURLSTUB
     rm -rf "$fn_file" "$capture_args" "$capture_config" "$stubdir"
 }
 
+test_regression_plugin_multiline_output() {
+    echo ""
+    echo "Testing multi-line plugin output (GH #4)..."
+
+    local fn_file capture plugdir
+    fn_file=$(mktemp)
+    awk '/^check_plugins\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+    capture=$(mktemp)
+    plugdir=$(mktemp -d)
+
+    run_with_timeout() { shift; "$@" 2>/dev/null; }
+    log() { :; }
+    check_state_change() { printf '%s|%s|%s\n' "$1" "$2" "$3" >> "$capture"; }
+
+    # Plugin 1: banner line BEFORE the STATE|KEY|DETAIL line (issue proof case)
+    cat > "$plugdir/banner-plugin" <<'PLUGIN1'
+#!/usr/bin/env bash
+echo "checking service X..."
+echo "WARNING|svc_check|Service X degraded|with|pipes"
+PLUGIN1
+    # Plugin 2: STATE line first, then debug output + trailing blank line
+    cat > "$plugdir/debug-plugin" <<'PLUGIN2'
+#!/usr/bin/env bash
+echo "OK|health_check|All good"
+echo "debug: took 0.3s"
+echo ""
+PLUGIN2
+    # Plugin 3: invalid output (no valid STATE|KEY|DETAIL line) — still skipped
+    cat > "$plugdir/bad-plugin" <<'PLUGIN3'
+#!/usr/bin/env bash
+echo "no state format here"
+PLUGIN3
+    chmod +x "$plugdir"/*
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+    CHECKS_DIR="$plugdir" CHECK_TIMEOUT=30 check_plugins
+
+    grep -q "svc_check|WARNING|Service X degraded|with|pipes" "$capture"
+    assert_true "plugin multi-line: banner + STATE|KEY|DETAIL parsed (was dropped before fix)"
+    grep -q "health_check|OK|All good" "$capture"
+    assert_true "plugin multi-line: STATE line with trailing debug + blank line parsed"
+    ! grep -q "bad-plugin" "$capture"
+    assert_true "plugin multi-line: invalid output (no STATE line) still skipped"
+
+    unset -f run_with_timeout log check_state_change check_plugins
+    rm -f "$fn_file" "$capture"
+    rm -rf "$plugdir"
+}
+
 # ---------------------------------------------------------------------------
 # Coverage note (2026-08-16, TODO #18)
 # ---------------------------------------------------------------------------
@@ -4886,6 +4936,7 @@ main() {
     test_regression_alert_queue_retry
     test_regression_recovery_alert_cooldown
     test_regression_smtp_password_raw
+    test_regression_plugin_multiline_output
 
     # Summary
     echo ""
