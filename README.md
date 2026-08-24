@@ -630,6 +630,13 @@ PREDICT_MIN_DATAPOINTS=12
 
 Telemon uses linear regression on historical datapoints to predict when a resource will reach 100%. If the trend line projects exhaustion within 24 hours, a WARNING alert fires.
 
+```bash
+# Optional hysteresis deadband (hours): once a prediction WARNING is active,
+# clearing to OK requires hours-to-full to exceed horizon + this value.
+# Prevents WARNING/OK flapping when the prediction hovers near the boundary.
+PREDICT_HYSTERESIS_HOURS=2
+```
+
 ### Fleet Monitoring
 
 ```bash
@@ -841,6 +848,12 @@ Per-key cooldown prevents alert floods:
 ```
 
 Controlled by `ALERT_COOLDOWN_SEC` (default: 900s). Set to 0 to disable.
+
+**Recovery (resolution) alerts are exempt from the cooldown:** a check that
+recovers to OK within the cooldown window still sends its "resolved"
+notification immediately (e.g. `12:05 — CPU resolves to OK → recovery alert
+sent` fires even if the original alert was at 12:01). Non-OK re-alerts remain
+rate-limited.
 
 ### Alert Dispatch Chain
 
