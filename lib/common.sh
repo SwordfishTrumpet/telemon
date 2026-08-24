@@ -280,7 +280,7 @@ is_internal_ip() {
     [[ "$host" == "localhost" ]] && return 0               # Localhost name
     # Check for IPv6 loopback/link-local
     [[ "$host" =~ ^::1$ ]] && return 0                     # IPv6 loopback
-    [[ "$host" =~ ^fc00: ]] && return 0                  # IPv6 ULA
+    [[ "$host" =~ ^[fF][cCdD][0-9a-fA-F]{2}: ]] && return 0   # IPv6 ULA fc00::/7 (fc00–fdff, both cases)
     [[ "$host" =~ ^fe80: ]] && return 0                  # IPv6 link-local
     # Not an internal IP
     return 1
