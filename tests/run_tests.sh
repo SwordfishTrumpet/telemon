@@ -4719,6 +4719,69 @@ test_regression_recovery_alert_cooldown() {
     rm -f "$fn_file"
 }
 
+test_regression_smtp_password_raw() {
+    echo ""
+    echo "Testing SMTP password NOT percent-encoded (GH #3)..."
+
+    local fn_file capture_args capture_config stubdir
+    fn_file=$(mktemp)
+    awk '/^send_email_native_smtp\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+    capture_args=$(mktemp)
+    capture_config=$(mktemp)
+    stubdir=$(mktemp -d)
+
+    # Fake curl: records its argv and copies any --config file it is handed
+    cat > "$stubdir/curl" <<'CURLSTUB'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$CAPTURE_ARGS"
+config=""
+prev=""
+for a in "$@"; do
+    [[ "$prev" == "--config" ]] && config="$a"
+    prev="$a"
+done
+[[ -n "$config" ]] && cp "$config" "$CAPTURE_CONFIG"
+exit 0
+CURLSTUB
+    chmod +x "$stubdir/curl"
+
+    log() { :; }
+    SMTP_HOST="smtp.example.com"
+    SMTP_PORT="587"
+    SMTP_USER="alert@example.com"
+    SMTP_PASS="p@ss%w#rd&q=u?x"   # every character from the old encode list
+    SMTP_TLS="yes"
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+    CAPTURE_ARGS="$capture_args" CAPTURE_CONFIG="$capture_config" \
+        PATH="$stubdir:$PATH" \
+        send_email_native_smtp "from@example.com" "to@example.com" "subject" "body"
+
+    # Credentials must travel via --config, never --user (curl does not
+    # percent-decode --user, so %40 etc. were sent literally -> auth failure)
+    ! grep -q -- "--user" "$capture_args"
+    assert_true "SMTP: --user arg eliminated (GH #3)"
+    grep -q -- "--config" "$capture_args"
+    assert_true "SMTP: credentials passed via --config file"
+
+    # The config file carries the RAW password — no %XX encoding
+    grep -q 'user = "alert@example.com:p@ss%w#rd&q=u?x"' "$capture_config"
+    assert_true "SMTP: raw password (with @ %% # & = ?) in config file"
+    ! grep -qE '%(25|40|23|26|3D|3F)' "$capture_config"
+    assert_true "SMTP: no percent-encoded sequences in auth config"
+
+    # Guard: the old encoding pipeline is gone from the source
+    local src
+    src=$(cat "${SCRIPT_DIR}/telemon.sh")
+    [[ "$src" != *'encoded_pass'* ]]
+    assert_true "SMTP: percent-encoding pipeline removed from source"
+
+    unset SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASS SMTP_TLS CAPTURE_ARGS CAPTURE_CONFIG
+    unset -f log send_email_native_smtp
+    rm -rf "$fn_file" "$capture_args" "$capture_config" "$stubdir"
+}
+
 # ---------------------------------------------------------------------------
 # Coverage note (2026-08-16, TODO #18)
 # ---------------------------------------------------------------------------
@@ -4822,6 +4885,7 @@ main() {
     test_regression_dead_code_removed
     test_regression_alert_queue_retry
     test_regression_recovery_alert_cooldown
+    test_regression_smtp_password_raw
 
     # Summary
     echo ""
