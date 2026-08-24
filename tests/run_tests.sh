@@ -826,8 +826,27 @@ test_rotate_logs() {
 
 test_check_state_change() {
     echo ""
-    echo "Testing check_state_change core logic..."
-    
+    echo "Testing check_state_change core logic (REAL function, GH #11)..."
+
+    # GH #11: this test previously re-implemented check_state_change inline
+    # with materially different semantics (wrote PREV_STATE itself, disabled
+    # the cooldown) — the exact reason the recovery-alert bug (GH #2) shipped
+    # green. Now the REAL function is extracted from telemon.sh and executed
+    # with mocked log/audit_log/date; between simulated cron runs the state is
+    # persisted exactly like save_state/load_state do (the real function does
+    # NOT write PREV_STATE itself).
+    local fn_file
+    fn_file=$(mktemp)
+    awk '/^check_state_change\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+
+    log() { :; }
+    audit_log() { :; }
+    FAKE_NOW=1000000
+    date() { printf '%s' "$FAKE_NOW"; }
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+
     # Global state arrays (mocked for testing)
     declare -A PREV_STATE
     declare -A PREV_COUNT
@@ -836,135 +855,143 @@ test_check_state_change() {
     declare -A STATE_DETAIL
     local ALERTS=""
     local CONFIRMATION_COUNT=3
-    local ALERT_COOLDOWN_SEC=0  # Disable cooldown for testing
-    
-    # Define check_state_change inline for testing (simplified version)
-    check_state_change() {
-        local key="$1"
-        local new_state="$2"
-        local detail="$3"
-        
-        CURR_STATE["$key"]="$new_state"
-        STATE_DETAIL["$key"]="$detail"
-        
-        local prev_state="${PREV_STATE[$key]:-OK}"
-        local prev_count="${PREV_COUNT[$key]:-0}"
-        local confirm_count="${CONFIRMATION_COUNT:-3}"
-        
-        local should_alert=false
-        
-        if [[ "$new_state" == "$prev_state" ]]; then
-            # State unchanged
-            if [[ "$prev_count" -lt "$confirm_count" ]]; then
-                prev_count=$((prev_count + 1))
-                PREV_COUNT["$key"]=$prev_count
-                if [[ "$prev_count" -eq "$confirm_count" && "$new_state" != "OK" ]]; then
-                    should_alert=true
-                fi
-            fi
-        else
-            # State changed
-            PREV_COUNT["$key"]=1
-            
-            if [[ "$confirm_count" -le 1 ]]; then
-                if [[ "$new_state" != "OK" ]]; then
-                    should_alert=true
-                elif [[ "$prev_state" != "OK" ]]; then
-                    should_alert=true
-                fi
-            else
-                if [[ "$new_state" == "OK" && "$prev_state" != "OK" && "$prev_count" -ge "$confirm_count" ]]; then
-                    should_alert=true
-                fi
-            fi
-        fi
-        
-        if [[ "$should_alert" == "true" ]]; then
-            ALERTS+="${key}:${new_state} "
-            ALERT_LAST_SENT["$key"]=$(date +%s)
-        fi
-        
-        PREV_STATE["$key"]="$new_state"
+    local ALERT_COOLDOWN_SEC=0  # Disable cooldown for the core-logic cases
+
+    # Persist between "runs" exactly like save_state/load_state do
+    persist_state() {
+        PREV_STATE["$1"]="${CURR_STATE[$1]}"
     }
-    
+
     # Test 1: Initial OK state - no alert
     ALERTS=""
     check_state_change "cpu" "OK" "CPU normal"
     [[ -z "$ALERTS" ]]
     assert_true "check_state_change: OK state produces no alert"
-    [[ "${PREV_COUNT[cpu]}" == "0" || "${PREV_COUNT[cpu]}" == "1" ]]
+    persist_state "cpu"
+    [[ "${PREV_COUNT[cpu]:-0}" -le 1 ]]
     assert_true "check_state_change: OK count initialized"
-    
+
     # Test 2: First WARNING - no alert yet (counting)
     ALERTS=""
     check_state_change "cpu" "WARNING" "CPU at 75%"
+    persist_state "cpu"
     [[ -z "$ALERTS" ]]
     assert_true "check_state_change: first WARNING produces no alert (counting)"
     [[ "${PREV_COUNT[cpu]}" == "1" ]]
     assert_true "check_state_change: count is 1 after first WARNING"
-    
+
     # Test 3: Second WARNING - no alert yet
     check_state_change "cpu" "WARNING" "CPU at 76%"
+    persist_state "cpu"
     [[ -z "$ALERTS" ]]
     assert_true "check_state_change: second WARNING produces no alert"
     [[ "${PREV_COUNT[cpu]}" == "2" ]]
     assert_true "check_state_change: count is 2 after second WARNING"
-    
+
     # Test 4: Third WARNING - alert triggered (confirmation reached)
     check_state_change "cpu" "WARNING" "CPU at 77%"
-    [[ "$ALERTS" == *"cpu:WARNING"* ]]
+    persist_state "cpu"
+    [[ "$ALERTS" == *"<b>cpu</b>"* ]]
     assert_true "check_state_change: third WARNING triggers alert (confirmed)"
     [[ "${PREV_COUNT[cpu]}" == "3" ]]
     assert_true "check_state_change: count is 3 after confirmation"
-    
+
     # Test 5: Fourth WARNING - no alert (already confirmed)
     ALERTS=""
     check_state_change "cpu" "WARNING" "CPU at 78%"
+    persist_state "cpu"
     [[ -z "$ALERTS" ]]
     assert_true "check_state_change: fourth WARNING produces no alert (already confirmed)"
     [[ "${PREV_COUNT[cpu]}" == "3" ]]
     assert_true "check_state_change: count stays at 3 after confirmation"
-    
+
     # Test 6: OK after confirmed WARNING - resolution alert
     ALERTS=""
     check_state_change "cpu" "OK" "CPU normal"
-    [[ "$ALERTS" == *"cpu:OK"* ]]
+    persist_state "cpu"
+    [[ "$ALERTS" == *"<b>cpu</b>"* ]]
     assert_true "check_state_change: OK after confirmed WARNING triggers resolution"
-    
+
     # Test 7: Immediate transition to CRITICAL
     PREV_STATE=()
     PREV_COUNT=()
     ALERTS=""
     check_state_change "mem" "CRITICAL" "Memory at 95%"
+    persist_state "mem"
     [[ -z "$ALERTS" ]]
     assert_true "check_state_change: first CRITICAL produces no alert (counting)"
     check_state_change "mem" "CRITICAL" "Memory at 96%"
+    persist_state "mem"
     [[ -z "$ALERTS" ]]
     assert_true "check_state_change: second CRITICAL produces no alert"
     check_state_change "mem" "CRITICAL" "Memory at 97%"
-    [[ "$ALERTS" == *"mem:CRITICAL"* ]]
+    persist_state "mem"
+    [[ "$ALERTS" == *"<b>mem</b>"* ]]
     assert_true "check_state_change: third CRITICAL triggers alert"
-    
+
     # Test 8: Unconfirmed WARNING to OK - no alert (transient spike)
     PREV_STATE=()
     PREV_COUNT=()
     ALERTS=""
     check_state_change "disk" "WARNING" "Disk at 85%"
+    persist_state "disk"
     check_state_change "disk" "OK" "Disk normal"
+    persist_state "disk"
     [[ -z "$ALERTS" ]]
     assert_true "check_state_change: unconfirmed WARNING->OK produces no alert (transient)"
-    
+
     # Test 9: Confirmation count = 1 (immediate alerts)
     CONFIRMATION_COUNT=1
     PREV_STATE=()
     PREV_COUNT=()
     ALERTS=""
     check_state_change "net" "WARNING" "Network slow"
-    [[ "$ALERTS" == *"net:WARNING"* ]]
+    persist_state "net"
+    [[ "$ALERTS" == *"<b>net</b>"* ]]
     assert_true "check_state_change: immediate alert when CONFIRMATION_COUNT=1"
-    
+    CONFIRMATION_COUNT=3
+
+    # Test 10: Cooldown applies to non-OK re-alerts (real ALERT_COOLDOWN_SEC)
+    ALERT_COOLDOWN_SEC=900
+    PREV_STATE=()
+    PREV_COUNT=()
+    ALERT_LAST_SENT=()
+    ALERTS=""
+    check_state_change "svc" "CRITICAL" "down"
+    persist_state "svc"
+    check_state_change "svc" "CRITICAL" "down"
+    persist_state "svc"
+    check_state_change "svc" "CRITICAL" "down"
+    persist_state "svc"
+    [[ "$ALERTS" == *"<b>svc</b>"* ]]
+    assert_true "check_state_change: confirmed CRITICAL fires alert"
+    ALERTS=""
+    FAKE_NOW=$(( FAKE_NOW + 300 ))
+    check_state_change "svc" "CRITICAL" "down"
+    persist_state "svc"
+    [[ -z "$ALERTS" ]]
+    assert_true "check_state_change: non-OK re-alert suppressed within cooldown"
+
+    # Test 11: Resolution within cooldown STILL alerts (GH #2 exemption)
+    ALERTS=""
+    FAKE_NOW=$(( FAKE_NOW + 300 ))
+    check_state_change "svc" "OK" "back up"
+    persist_state "svc"
+    [[ "$ALERTS" == *"<b>svc</b>"* ]]
+    assert_true "check_state_change: resolution alerts even inside cooldown (GH #2)"
+
+    # Test 12: Invalid key rejected (state-file delimiter protection)
+    ALERTS=""
+    PREV_STATE=()
+    PREV_COUNT=()
+    check_state_change "bad=key" "WARNING" "x"
+    [[ -z "$ALERTS" ]]
+    assert_true "check_state_change: key containing = rejected (no alert)"
+
     # Cleanup
-    unset PREV_STATE PREV_COUNT ALERT_LAST_SENT CURR_STATE STATE_DETAIL ALERTS CONFIRMATION_COUNT ALERT_COOLDOWN_SEC check_state_change
+    unset PREV_STATE PREV_COUNT ALERT_LAST_SENT CURR_STATE STATE_DETAIL ALERTS CONFIRMATION_COUNT ALERT_COOLDOWN_SEC FAKE_NOW
+    unset -f log audit_log date persist_state check_state_change
+    rm -f "$fn_file"
 }
 
 # ---------------------------------------------------------------------------
