@@ -6539,8 +6539,13 @@ run_digest() {
                 fleet_has_entries=true
                 local fleet_fname
                 fleet_fname=$(basename "$fleet_file")
-                local fl_label fl_ts fl_status fl_count _
-                IFS=$'\t' read -r fl_label fl_ts fl_status fl_count _ < "$fleet_file" 2>/dev/null || continue
+                # Read via the shared parse_heartbeat_line (GH #12) so the
+                # digest agrees with check_fleet_heartbeats and cmd_fleet_status
+                # on the 7-field tab-separated heartbeat format (single source
+                # of truth in lib/common.sh)
+                local fl_label fl_ts fl_status fl_count fl_warn fl_crit fl_uptime
+                IFS=$'\n' read -r fl_label fl_ts fl_status fl_count fl_warn fl_crit fl_uptime \
+                    < <(parse_heartbeat_line "$(head -1 "$fleet_file" 2>/dev/null)") || continue
                 is_valid_number "$fl_ts" || continue
                 local fl_age=$(( fleet_now - fl_ts ))
                 local fl_age_min=$(( fl_age / 60 ))

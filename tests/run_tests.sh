@@ -4406,6 +4406,16 @@ test_regression_parse_heartbeat_line() {
     line=$(printf 'srv1\t1712345678\tOK')
     out=$(parse_heartbeat_line "$line")
     assert_eq "" "$(echo "$out" | sed -n '4p')" "heartbeat: missing fields become empty"
+
+    # GH #12: run_digest must use the shared parser — no raw IFS=$'\t' read
+    # of heartbeat files left outside the parser definition itself
+    local digest_block telemon_src
+    telemon_src=$(cat "${SCRIPT_DIR}/telemon.sh")
+    [[ "$telemon_src" != *"IFS=\$'\\t' read -r fl_"* ]]
+    assert_true "heartbeat: run_digest uses parse_heartbeat_line (no raw tab read left)"
+    digest_block=$(sed -n '/^run_digest() {/,/^}/p' "${SCRIPT_DIR}/telemon.sh")
+    [[ "$digest_block" == *"parse_heartbeat_line"* ]]
+    assert_true "heartbeat: run_digest fleet summary parses via parse_heartbeat_line"
 }
 
 test_regression_proxmox_tasks_filter() {
