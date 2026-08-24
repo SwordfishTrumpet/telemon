@@ -340,6 +340,16 @@ test_is_internal_ip() {
     is_internal_ip "::1"
     assert_true "is_internal_ip detects IPv6 loopback"
     
+    # IPv6 ULA (fc00::/7 = fc00–fdff) — GH #7: fd00::/8 was not blocked before
+    is_internal_ip "fc00::1"
+    assert_true "is_internal_ip detects IPv6 ULA fc00::"
+    is_internal_ip "fd00::1"
+    assert_true "is_internal_ip detects IPv6 ULA fd00:: (was allowed before fix)"
+    is_internal_ip "fdff:ffff::1"
+    assert_true "is_internal_ip detects IPv6 ULA upper bound fdff::"
+    is_internal_ip "FD12::1"
+    assert_true "is_internal_ip detects IPv6 ULA in uppercase"
+    
     # External IPs - should return 1 (false)
     ! is_internal_ip "8.8.8.8"
     assert_true "is_internal_ip allows public IP (Google DNS)"
@@ -349,6 +359,9 @@ test_is_internal_ip() {
     
     ! is_internal_ip "example.com"
     assert_true "is_internal_ip allows domain name"
+    
+    ! is_internal_ip "2001:db8::1"
+    assert_true "is_internal_ip allows documentation prefix 2001:db8::"
 }
 
 # ---------------------------------------------------------------------------
