@@ -2750,10 +2750,8 @@ check_dns_records() {
     [[ -n "$nameserver" ]] && dig_opts="@${nameserver} ${dig_opts}"
 
     # Parse comma-separated records
-    local IFS=',' record_count=0
+    local IFS=','
     for record in $records; do
-        record_count=$((record_count + 1))
-
         # Parse record format: domain:record_type:expected_value
         local domain record_type expected_value
         domain="${record%%:*}"

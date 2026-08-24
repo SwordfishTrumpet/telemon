@@ -4604,6 +4604,15 @@ test_regression_dead_code_removed() {
     assert_true "dead code: prediction intercept var removed"
     [[ "$src" != *'grep -v "Monitor run"'* ]]
     assert_true "validate: stale grep -v Monitor run removed"
+    # GH #9: write-only record_count in check_dns_records removed (the
+    # run_validate copy that actually reports the count must remain — guard
+    # only the check_dns_records one by asserting the report echo still exists)
+    [[ "$src" == *'${record_count} DNS record(s) configured'* ]]
+    assert_true "dead code: run_validate record_count (used) still present"
+    local cdr
+    cdr=$(sed -n '/^check_dns_records() {/,/^}/p' "${SCRIPT_DIR}/telemon.sh")
+    [[ "$cdr" != *'record_count'* ]]
+    assert_true "dead code: record_count removed from check_dns_records"
 }
 
 test_regression_alert_queue_retry() {
