@@ -4605,7 +4605,7 @@ data = {
     }
 }
 print(json.dumps(data, indent=2))
-" <<< "$state_input" > "$tmp_file" 2>&1)
+" <<< "$state_input" 2>&1 > "$tmp_file")
     local py_exit=$?
 
     if [[ $py_exit -eq 0 ]]; then

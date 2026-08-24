@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`.detail` state file corrupted by real newlines (GH #5)** — `save_state` now encodes backslash → `\\` and newline → `\\n`; `load_state` decodes via a `\\x1f` placeholder first (reversible for literal backslash-n). Regression: `test_regression_detail_newline_roundtrip`.
 - **SSL expiry check hardcoded port 443 (GH #6)** — `check_sites` now extracts the port from the URL (default 443) and passes it to `openssl -connect host:port`; `-servername` keeps the bare host. Regression: `test_regression_sites_ssl_port`.
 - **SSRF gap: `is_internal_ip` missed half of IPv6 ULA space (GH #7)** — matched only `fd00::/8`; now covers the full `fc00::/7` range, case-insensitive. Tests: fc00/fd00/fdff/uppercase internal, 2001:db8 external.
+- **JSON status export never surfaced the Python error (SC2327/SC2328)** — `py_err=$(… > "$tmp_file" 2>&1)` redirected ALL output (stdout + stderr) to the file, so the command-substitution capture was always empty and the failure WARN carried no detail. Redirection order is now `2>&1 > "$tmp_file"` (stderr → `py_err`, stdout → file), so the actual traceback is logged on failure.
+- **CI ShellCheck gate (v0.11) clean (SC2218)** — `check_cpu_mock` in the integration test was redefined per sub-test with hardcoded loads; it is now defined once, parameterized by load (the Test-5 variant already was), satisfying shellcheck's "function only defined later" check without behavior change.
 
 ### Changed
 - **`_cmd_exists` moved to `lib/common.sh`** — was only defined in `telemon-admin.sh` but referenced by `telemon.sh`'s `run_validate` (dead half of an `||`, latent crash if `set -e` re-enabled). `run_validate` now relies solely on `command -v`; the stale `grep -v "Monitor run"` filter was removed.
@@ -49,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Tests
 - **594 → 702 tests** — functional regression suite for the 2026-08-16 audit (extract-real-function + mock pattern), covering storage float %, MySQL replication password, timemachine unbound vars, entity decode, task window filter, integrity/drift deletion, sidecar clearing, portable date, max-time cap, alert queue retry, and dead-code guards. Coverage note added documenting functional vs grep-only coverage.
 - **645 → 702 (GH #13)** — functional coverage added for previously-untested paths: `check_escalation` (brace-counting awk extractor — the function embeds a python dict whose closing `}` sits at column 0), `check_cron_jobs`, network bandwidth, Telegram truncation/tag-closing; SMTP/plugins/detail covered by the GH #3/#4/#5 regressions. Plus regressions for GH #2/#6/#7/#10.
+- **CI portability — timemachine regression skips when the site plugin is absent** — `checks.d/timemachine-ct101.sh` is gitignored (deployment-local), so fresh CI checkouts lack it and the suite failed 2 assertions (``timemachine: emits valid STATE|KEY|DETAIL`` / ``plugin exits 0``). The test now emits a skip note and returns cleanly when the file is missing, matching the suite's existing skip pattern (root/unreadable-file, missing-client cases).
 ## [1.2.0] — 2026-08-05
 
 ### Fixed

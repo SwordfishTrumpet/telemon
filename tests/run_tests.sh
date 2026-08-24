@@ -3672,101 +3672,12 @@ test_integration_check_cpu() {
     echo ""
     echo "Testing integration: check_cpu -> state_change -> alert pipeline..."
 
+    # Defined once, parameterized by load (1-min load average, 4 cores); each
+    # test below calls it with its own load value. (Single definition also keeps
+    # lint's SC2218 happy — previously redefined per test.)
     check_cpu_mock() {
         local cores="4"
-        local load_1m="3.20"  # 80% of 4 cores
-        local load_pct
-        load_pct=$(awk -v ld="$load_1m" -v c="$cores" 'BEGIN {printf "%.0f", (ld / c) * 100}')
-        
-        local state="OK"
-        local detail="CPU load ${load_1m} (${load_pct}% of ${cores} cores)"
-        
-        if [[ "$load_pct" -ge "${CPU_THRESHOLD_CRIT:-80}" ]]; then
-            state="CRITICAL"
-            detail="CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_CRIT:-80}%)"
-        elif [[ "$load_pct" -ge "${CPU_THRESHOLD_WARN:-70}" ]]; then
-            state="WARNING"
-            detail="CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_WARN:-70}%)"
-        fi
-        
-        THRESHOLD_STATE="$state"
-        THRESHOLD_DETAIL="$detail"
-    }
-
-    local mock_dir
-    mock_dir=$(mktemp -d)
-
-    # Test 1: CPU at 80% (WARNING threshold)
-    CPU_THRESHOLD_WARN=70
-    CPU_THRESHOLD_CRIT=80
-    check_cpu_mock
-    
-    # Test 2: Verify THRESHOLD_STATE is WARNING
-    [[ "${THRESHOLD_STATE:-OK}" == "WARNING" || "${THRESHOLD_STATE:-OK}" == "CRITICAL" ]]
-    assert_true "check_cpu_mock: CPU at 80% triggers non-OK state"
-    
-    # Test 3: CPU at 30% (OK)
-    CPU_THRESHOLD_WARN=70
-    check_cpu_mock() {
-        local cores="4"
-        local load_1m="1.20"
-        local load_pct
-        load_pct=$(awk -v ld="$load_1m" -v c="$cores" 'BEGIN {printf "%.0f", (ld / c) * 100}')
-        
-        local state="OK"
-        local detail="CPU load ${load_1m} (${load_pct}% of ${cores} cores)"
-        
-        if [[ "$load_pct" -ge "${CPU_THRESHOLD_CRIT:-80}" ]]; then
-            state="CRITICAL"
-            detail="CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_CRIT:-80}%)"
-        elif [[ "$load_pct" -ge "${CPU_THRESHOLD_WARN:-70}" ]]; then
-            state="WARNING"
-            detail="CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_WARN:-70}%)"
-        fi
-        
-        THRESHOLD_STATE="$state"
-        THRESHOLD_DETAIL="$detail"
-    }
-    check_cpu_mock
-    assert_eq "OK" "${THRESHOLD_STATE:-}" "check_cpu_mock: CPU at 30% is OK"
-    
-    # Test 4: CPU at 90% (CRITICAL)
-    CPU_THRESHOLD_WARN=70
-    CPU_THRESHOLD_CRIT=80
-    check_cpu_mock() {
-        local cores="4"
-        local load_1m="3.60"
-        local load_pct
-        load_pct=$(awk -v ld="$load_1m" -v c="$cores" 'BEGIN {printf "%.0f", (ld / c) * 100}')
-        
-        local state="OK"
-        local detail="CPU load ${load_1m} (${load_pct}% of ${cores} cores)"
-        
-        if [[ "$load_pct" -ge "${CPU_THRESHOLD_CRIT:-80}" ]]; then
-            state="CRITICAL"
-            detail="CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_CRIT:-80}%)"
-        elif [[ "$load_pct" -ge "${CPU_THRESHOLD_WARN:-70}" ]]; then
-            state="WARNING"
-            detail="CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_WARN:-70}%)"
-        fi
-        
-        THRESHOLD_STATE="$state"
-        THRESHOLD_DETAIL="$detail"
-    }
-    check_cpu_mock
-    assert_eq "CRITICAL" "${THRESHOLD_STATE:-}" "check_cpu_mock: CPU at 90% triggers CRITICAL"
-    
-    # Test 5: CPU check with confirmation count via state machine
-    declare -A PREV_STATE=()
-    declare -A PREV_COUNT=()
-    declare -A ALERT_LAST_SENT=()
-    CONFIRMATION_COUNT=3
-    ALERTS=""
-    
-    # Re-define with parameterized load
-    check_cpu_mock() {
-        local cores="4"
-        local load_1m="$1"
+        local load_1m="${1:-3.20}"  # default: 80% of 4 cores
         local load_pct
         load_pct=$(awk -v ld="$load_1m" -v c="$cores" 'BEGIN {printf "%.0f", (ld / c) * 100}')
         
@@ -3785,6 +3696,38 @@ test_integration_check_cpu() {
         THRESHOLD_DETAIL="$detail"
         load_pct_captured="$load_pct"
     }
+
+    local mock_dir
+    mock_dir=$(mktemp -d)
+
+    # Test 1: CPU at 80% (WARNING threshold)
+    CPU_THRESHOLD_WARN=70
+    CPU_THRESHOLD_CRIT=80
+    check_cpu_mock "3.20"
+    
+    # Test 2: Verify THRESHOLD_STATE is WARNING
+    [[ "${THRESHOLD_STATE:-OK}" == "WARNING" || "${THRESHOLD_STATE:-OK}" == "CRITICAL" ]]
+    assert_true "check_cpu_mock: CPU at 80% triggers non-OK state"
+    
+    # Test 3: CPU at 30% (OK)
+    CPU_THRESHOLD_WARN=70
+    check_cpu_mock "1.20"
+    assert_eq "OK" "${THRESHOLD_STATE:-}" "check_cpu_mock: CPU at 30% is OK"
+    
+    # Test 4: CPU at 90% (CRITICAL)
+    CPU_THRESHOLD_WARN=70
+    CPU_THRESHOLD_CRIT=80
+    check_cpu_mock "3.60"
+    assert_eq "CRITICAL" "${THRESHOLD_STATE:-}" "check_cpu_mock: CPU at 90% triggers CRITICAL"
+    
+    # Test 5: CPU check with confirmation count via state machine
+    declare -A PREV_STATE=()
+    declare -A PREV_COUNT=()
+    declare -A ALERT_LAST_SENT=()
+    CONFIRMATION_COUNT=3
+    ALERTS=""
+    
+    # (mock is defined once at the top of this test — parameterized by load)
     
     # Simulate 3 cycles of WARNING CPU -> alert at 3rd
     check_cpu_mock "3.20"
@@ -4315,6 +4258,13 @@ MYSQLSTUB
 test_regression_timemachine_missing_results() {
     echo ""
     echo "Testing timemachine plugin without Results.plist (TODO #3)..."
+
+    # The site plugin checks.d/timemachine-ct101.sh is gitignored (deployment-local),
+    # so it is absent in CI checkouts — skip gracefully instead of failing the suite.
+    if [[ ! -f "${SCRIPT_DIR}/checks.d/timemachine-ct101.sh" ]]; then
+        echo -e "${YELLOW}⚠${NC} Skipping timemachine plugin test (checks.d/timemachine-ct101.sh is site-specific/gitignored — absent in CI)"
+        return 0
+    fi
 
     local stubdir
     stubdir=$(mktemp -d)
