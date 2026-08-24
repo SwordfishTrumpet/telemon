@@ -4892,6 +4892,65 @@ test_regression_detail_newline_roundtrip() {
     rm -rf "$workdir"
 }
 
+test_regression_sites_ssl_port() {
+    echo ""
+    echo "Testing check_sites SSL port from URL (GH #6)..."
+
+    local fn_file captures openssl_calls stubdir
+    fn_file=$(mktemp)
+    captures=$(mktemp -d)
+    openssl_calls="${captures}/openssl_calls"
+    stubdir="${captures}/bin"
+    mkdir -p "$stubdir"
+    awk '/^check_sites\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+
+    # Fake openssl: records the -connect target and feeds a future cert date
+    cat > "$stubdir/openssl" <<'OSSLSTUB'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "s_client" ]]; then
+    prev=""
+    for a in "$@"; do
+        [[ "$prev" == "-connect" ]] && echo "$a" >> "$OSSL_CALLS"
+        prev="$a"
+    done
+    echo "-----BEGIN CERTIFICATE-----"
+    echo "dummy"
+    echo "-----END CERTIFICATE-----"
+elif [[ "${1:-}" == "x509" ]]; then
+    echo "notAfter=Dec  1 12:00:00 2026 GMT"
+fi
+exit 0
+OSSLSTUB
+    chmod +x "$stubdir/openssl"
+
+    log() { :; }
+    run_with_timeout() { shift; "$@" 2>/dev/null; }
+    curl() { echo "200|0.1|0"; }
+    check_state_change() { :; }
+    is_internal_ip() { return 1; }
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+    CHECK_TIMEOUT=30
+
+    # Case 1: explicit non-default port in the URL
+    OSSL_CALLS="$openssl_calls" CRITICAL_SITES="https://example.com:8443|check_ssl=true" \
+        PATH="$stubdir:$PATH" check_sites
+    grep -q "example.com:8443" "$openssl_calls"
+    assert_true "SSL port: -connect uses URL port 8443 (was hardcoded 443)"
+
+    # Case 2: no port in URL — default 443
+    rm -f "$openssl_calls"
+    OSSL_CALLS="$openssl_calls" CRITICAL_SITES="https://example.com|check_ssl=true" \
+        PATH="$stubdir:$PATH" check_sites
+    grep -q "example.com:443" "$openssl_calls"
+    assert_true "SSL port: default port 443 when URL has no port"
+
+    unset CHECK_TIMEOUT OSSL_CALLS
+    unset -f log run_with_timeout curl check_state_change is_internal_ip check_sites
+    rm -rf "$fn_file" "$captures"
+}
+
 # ---------------------------------------------------------------------------
 # Coverage note (2026-08-16, TODO #18)
 # ---------------------------------------------------------------------------
@@ -4998,6 +5057,7 @@ main() {
     test_regression_smtp_password_raw
     test_regression_plugin_multiline_output
     test_regression_detail_newline_roundtrip
+    test_regression_sites_ssl_port
 
     # Summary
     echo ""
