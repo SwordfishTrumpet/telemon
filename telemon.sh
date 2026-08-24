@@ -2328,14 +2328,21 @@ check_sites() {
         if [[ "$url" == https://* ]] && [[ "$check_ssl" == "true" ]]; then
             local host_for_ssl="${url#https://}"
             host_for_ssl="${host_for_ssl%%/*}"
+            # GH #6: honor a non-default port in the URL (https://host:8443).
+            # Previously the port was stripped and openssl always connected to
+            # :443, so non-443 HTTPS sites got the wrong (or no) certificate.
+            local ssl_port="${host_for_ssl##*:}"
+            if [[ "$ssl_port" == "$host_for_ssl" || ! "$ssl_port" =~ ^[0-9]+$ ]]; then
+                ssl_port="443"
+            fi
             host_for_ssl="${host_for_ssl%%:*}"
             if command -v openssl &>/dev/null; then
                 local cert_enddate
                 # Use timeout wrapper to prevent hanging on slow/unresponsive SSL servers
                 cert_enddate=$(run_with_timeout "$CHECK_TIMEOUT" bash -c '
-                    echo | openssl s_client -servername "$1" -connect "$1:443" 2>/dev/null | \
+                    echo | openssl s_client -servername "$1" -connect "$1:$2" 2>/dev/null | \
                     openssl x509 -noout -enddate 2>/dev/null | sed "s/notAfter=//"
-                ' _ "$host_for_ssl" 2>/dev/null) || cert_enddate=""
+                ' _ "$host_for_ssl" "$ssl_port" 2>/dev/null) || cert_enddate=""
                 if [[ -n "$cert_enddate" ]]; then
                     ssl_expiry_epoch=$(parse_date_to_epoch "$cert_enddate")
                     # Guard: treat parse failure (empty or "0") as no SSL data
