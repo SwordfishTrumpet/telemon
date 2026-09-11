@@ -193,11 +193,24 @@ fi
 
 ## Quick Install (One-Liner)
 
-### Interactive Install (Recommended for First Time)
+### One-Liner Install (fastest)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/SwordfishTrumpet/telemon/main/install.sh | bash
 ```
+
+The one-liner cannot prompt for credentials — stdin is the piped installer. It
+installs with a template `.env` and prints what to fill in:
+
+```bash
+# edit ~/telemon/.env and set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID
+bash ~/telemon/telemon.sh --validate
+```
+
+For a fully configured unattended install use the silent one-liner below. For a
+prompted setup, clone the repository and run `bash install.sh` from a terminal
+(the installer only prompts when stdin is a terminal, and it never overwrites an
+existing `.env`).
 
 Or install to a custom directory:
 

@@ -5091,6 +5091,90 @@ test_regression_update_dirty_tree() {
     rm -rf "$repo"
 }
 
+# ---------------------------------------------------------------------------
+# GH #23 — install.sh must never replace an existing .env (update.sh re-runs
+# `install.sh --yes`), and the interactive prompt path must fail fast instead
+# of spinning when stdin is at EOF.
+# ---------------------------------------------------------------------------
+test_regression_install_env_preserved() {
+    echo ""
+    echo "Testing install.sh preserving an existing .env (GH #23)..."
+
+    local root="${SCRIPT_DIR}" fn_file dir out rc fn
+    fn_file=$(mktemp)
+    dir=$(mktemp -d)
+
+    # Extract the real install.sh functions (same awk pattern the other tests use)
+    for fn in step_5_configure_env configure_existing_env step_5_configure_env_interactive \
+              step_5_configure_env_silent set_env_value set_env_value_plain; do
+        awk -v fn="$fn" '$0 == fn "() {" {f=1} f {print} f && $0 == "}" {exit}' \
+            "$root/install.sh" >> "$fn_file"
+    done
+    grep -q '^configure_existing_env() {' "$fn_file"
+    assert_true "install.sh: configuration functions extracted for the .env test"
+
+    # Mock the installer's logging + download helpers (log lines go to a file so
+    # assertions can inspect what was reported, including from a subshell that exits)
+    local mock_log="$dir/mock.log"
+    log_info() { echo "INFO $*" >> "$mock_log"; }
+    log_warn() { echo "WARN $*" >> "$mock_log"; }
+    log_error() { echo "ERROR $*" >> "$mock_log"; }
+    log_success() { echo "OK $*" >> "$mock_log"; }
+    download_file() { :; }
+    # shellcheck disable=SC1090
+    source "$fn_file"
+
+    cp "$root/.env.example" "$dir/.env.example"
+    printf 'TELEGRAM_BOT_TOKEN="111:AAA"\nTELEGRAM_CHAT_ID="42"\nSERVER_LABEL="prod-host"\nCUSTOM_THRESHOLD="99"\nENABLE_HEARTBEAT="true"\nSTATE_FILE="/var/lib/telemon/state"\n' > "$dir/.env"
+    cp "$dir/.env" "$dir/.env.orig"
+
+    # Case A: --yes on an existing install keeps the file byte-identical
+    local INSTALL_DIR="$dir" YES_MODE=true SILENT_MODE=false
+    step_5_configure_env < /dev/null >/dev/null 2>&1
+    rc=$?
+    [[ $rc -eq 0 ]]
+    assert_true "install.sh: --yes on an existing .env exits 0"
+    cmp -s "$dir/.env" "$dir/.env.orig"
+    assert_true "install.sh: --yes preserves the existing .env byte-identical (GH #23)"
+
+    # Case B: values supplied in the environment are applied, nothing else changes
+    TELEGRAM_BOT_TOKEN="555:CCC" step_5_configure_env < /dev/null >/dev/null 2>&1
+    [[ $(grep -c 'TELEGRAM_BOT_TOKEN="555:CCC"' "$dir/.env") -eq 1 ]]
+    assert_true "install.sh: supplied TELEGRAM_BOT_TOKEN is applied"
+    [[ $(diff "$dir/.env.orig" "$dir/.env" | grep -c '^[<>]') -eq 2 ]]
+    assert_true "install.sh: only the supplied key changed (no other value touched)"
+    [[ $(grep -c 'CUSTOM_THRESHOLD="99"' "$dir/.env") -eq 1 && $(grep -c 'STATE_FILE="/var/lib/telemon/state"' "$dir/.env") -eq 1 ]]
+    assert_true "install.sh: unrelated custom keys survive the update"
+
+    # Case C: fresh non-interactive install (curl | bash) gets the template
+    rm -f "$dir/.env"
+    step_5_configure_env < /dev/null > "$dir/out.log" 2>&1
+    rc=$?
+    [[ $rc -eq 0 && -s "$dir/.env" ]]
+    assert_true "install.sh: non-interactive fresh install creates .env from the template"
+
+    # Case D: the interactive prompt function must fail fast without a TTY
+    # (it used to spin: 382k log lines in 5 s). Run it in a subshell because it
+    # calls exit.
+    local before_lines after_lines
+    before_lines=$(wc -l < "$mock_log")
+    ( step_5_configure_env_interactive "$dir/.env" "$dir/.env.example" < /dev/null ) >/dev/null 2>&1
+    rc=$?
+    [[ $rc -ne 0 ]]
+    assert_true "install.sh: interactive configuration without a TTY exits non-zero"
+    grep -q 'needs a terminal' "$mock_log"
+    assert_true "install.sh: it reports that a terminal is required"
+    after_lines=$(wc -l < "$mock_log")
+    [[ $((after_lines - before_lines)) -le 2 ]]
+    assert_true "install.sh: no prompt loop (at most 2 log lines emitted)"
+
+    unset -f log_info log_warn log_error log_success download_file
+    unset -f step_5_configure_env configure_existing_env step_5_configure_env_interactive
+    unset -f step_5_configure_env_silent set_env_value set_env_value_plain
+    rm -f "$fn_file"
+    rm -rf "$dir"
+}
+
 test_regression_detail_newline_roundtrip() {
     echo ""
     echo "Testing .detail newline encoding round-trip (GH #5)..."
@@ -5640,6 +5724,7 @@ main() {
     test_regression_plugin_multiline_output
     test_regression_plugin_failure_health
     test_regression_update_dirty_tree
+    test_regression_install_env_preserved
     test_regression_detail_newline_roundtrip
     test_regression_sites_ssl_port
     test_regression_predict_hysteresis
