@@ -5,6 +5,25 @@ All notable changes to Telemon will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] — 2026-09-11
+
+### Fixed
+- **SSRF guard bypassable with alternate address encodings** — `is_internal_ip` pattern-matched the raw host string, so decimal/hex/octal IPv4 (`2130706433`, `0x7f000001`, `0177.0.0.1`), short forms (`127.1`), IPv4-mapped IPv6 (`::ffff:127.0.0.1`, `::ffff:7f00:1`, and the fully expanded form), uppercase hex (`FE80::1`) and bracketed hosts (`[::1]`, truncated to `[` by the caller's `%%:*` split) all bypassed the check while still resolving to internal addresses. The guard now normalizes the host and canonicalizes IPv4/IPv6 before applying the reserved-range rules; `check_sites` uses the same shared normalizers for its SSRF and SSL host extraction. Regression: `test_regression_internal_ip_encodings`.
+- **A crashing plugin silently removed its checks** — `check_plugins` discarded the plugin exit status (`|| plugin_output=""`) and treated empty output as a log-only warning, so a plugin that crashed stopped reporting with no alert (a production host ran a plugin that exited 1 on every cycle for weeks). The exit status is now captured, and plugins that exit non-zero, print nothing, or print no valid `STATE|KEY|DETAIL` line are aggregated into a `plugin_health` state driven through `check_state_change` — so confirmation counting, cooldown, recovery alerts, escalation and the health digest all apply. Regression: `test_regression_plugin_failure_health`. **Behavior change:** a plugin that exits 0 without output is now reported (after `CONFIRMATION_COUNT` cycles) instead of only being logged.
+- **`update.sh` silently stashed local modifications** — it ran `git stash --quiet` before pulling and never restored the stash, so an operator's edits to tracked files were parked (inactive, unnamed, and never mentioned). It now refuses to update a dirty tree, lists the modified files, and prints how to resolve them. Regression: `test_regression_update_dirty_tree`.
+- **Release archives omitted `lib/common.sh`** — packaging was an inline `cp` list in `release.yml`, so every published archive shipped without `lib/common.sh`, `VERSION`, `systemd/` and `checks.d/`; extracting the official release and starting Telemon died with `FATAL: lib/common.sh not found`. Packaging now lives in `scripts/build-release-archive.sh` (used by the release workflow), which fails loudly if a required entry is missing.
+
+### Changed
+- `check_sites` SSL host/port extraction uses the shared `normalize_host`/`normalize_port` helpers, fixing bracketed IPv6 URLs (the host was mis-parsed and a non-443 port was lost).
+- `is_internal_ip` now also blocks all of `0.0.0.0/8` (previously only the literal `0.0.0.0`) and hex-dotted IPv4 forms, and no longer relies on string prefixes for numeric literals (the prefix rules remain for non-numeric hosts such as `10.0.0.1.nip.io`).
+- README documents the plugin reporting contract (a plugin must always emit a state line; exit non-zero only when the plugin itself is broken) and the `update.sh` dirty-tree requirement.
+
+### Build & CI
+- **ShellCheck gate pinned** — the job tracked `ludeeus/action-shellcheck@master` and the action's default `stable` ShellCheck release, so the gate could change without any repository change (it broke when ShellCheck 0.11 shipped). It is now pinned to a commit SHA (`v2.0.0`) with `version: v0.11.0`, and the pinning policy is documented in `CONTRIBUTING.md`.
+- **Markdown lint enforced** — the job ran with `continue-on-error: true`, so a lint failure still reported success. Removed; the gate now fails the workflow (verified on the PR with a deliberately malformed file).
+- **New `Release Artifact Check` job** — builds the release archive with the packaging script, asserts the required files are present, and smoke-tests the extracted copy on every push and pull request.
+- Added `.markdownlint-cli2.jsonc` (documenting the intentionally disabled style rules) and brought the documentation to zero lint findings.
+
 ## [1.2.1] — 2026-08-24
 
 ### Removed
