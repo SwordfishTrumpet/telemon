@@ -5220,6 +5220,39 @@ test_regression_uninstall_completeness() {
     rm -rf "$tmp"
 }
 
+# ---------------------------------------------------------------------------
+# GH #25 — .env.example is documented as listing "all options". Keep that true:
+# every configuration variable the runtime reads (with a default) must appear in
+# the template. Internal globals that merely look like config are allowlisted.
+# ---------------------------------------------------------------------------
+test_regression_env_example_completeness() {
+    echo ""
+    echo "Testing .env.example completeness (GH #25)..."
+
+    local root="${SCRIPT_DIR}"
+    local read_vars missing="" var
+
+    read_vars=$(grep -ohE '\$\{[A-Z][A-Z0-9_]{2,}:-' \
+        "$root/telemon.sh" "$root/telemon-admin.sh" "$root/lib/common.sh" \
+        | sed 's/^\${//; s/:-$//' | sort -u)
+
+    # Not user configuration: shell built-ins/context and an internal result variable
+    local allow="HOME SCRIPT_DIR THRESHOLD_STATE"
+    for var in $read_vars; do
+        case " $allow " in *" $var "*) continue ;; esac
+        if ! grep -qE "^#?[[:space:]]*${var}=" "$root/.env.example"; then
+            missing+="${var} "
+        fi
+    done
+
+    [[ -z "$missing" ]]
+    assert_true ".env.example documents every runtime configuration variable (missing: ${missing:-none})"
+
+    # The documented DB timeout knob is the one this issue was filed for
+    grep -qE '^# DB_CHECK_TIMEOUT=' "$root/.env.example"
+    assert_true ".env.example documents DB_CHECK_TIMEOUT (GH #25)"
+}
+
 test_regression_detail_newline_roundtrip() {
     echo ""
     echo "Testing .detail newline encoding round-trip (GH #5)..."
@@ -5771,6 +5804,7 @@ main() {
     test_regression_update_dirty_tree
     test_regression_install_env_preserved
     test_regression_uninstall_completeness
+    test_regression_env_example_completeness
     test_regression_detail_newline_roundtrip
     test_regression_sites_ssl_port
     test_regression_predict_hysteresis
