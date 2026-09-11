@@ -5,6 +5,20 @@ All notable changes to Telemon will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.3] — 2026-09-12
+
+### Fixed
+- **`update.sh` destroyed the user's configuration** — `install.sh --yes` logged "merging with new values" but then ran the *interactive* configuration path, which executed `cp .env.example .env` over the existing file and kept only the six values it prompted for. `update.sh` re-runs `install.sh --yes` after every pull, so a routine update silently wiped thresholds, credentials, `STATE_FILE` and feature toggles (GH #23). The same prompt loops also spun forever without a terminal — 382,546 log lines in 5 seconds with stdin at EOF, never terminating. Now an existing `.env` is never replaced: `--yes`/`--silent` apply only the values supplied in the environment, the interactive path copies the template only when no `.env` exists (updating in place otherwise), and it fails fast with instructions when stdin is not a TTY. A non-interactive fresh install (`curl … | bash`) gets the template `.env` plus instructions instead of an unanswerable prompt.
+- **`uninstall.sh` left monitoring running and state behind (GH #24)** — user-level systemd units (`install.sh --systemd` when not running as root) were never removed, so monitoring kept running (and alerting) after a nominally complete uninstall; `--full` removed only the main state file and its lock, leaving nine sidecar state files and the drift baseline. Both scopes are now handled and `--full` uses the shared `get_state_file_variants` enumeration (the same list `telemon-admin.sh reset-state` uses). Also fixed a latent `local`-outside-function error that would have aborted the script under `set -e`.
+
+### Documentation
+- `DB_CHECK_TIMEOUT` is documented in `.env.example` (GH #25), and a new test enforces that every configuration variable the runtime reads appears in the template — the README's "all options" claim is now checked rather than assumed.
+- The README install section describes what the one-liner actually does: no prompts when stdin is piped, a template `.env` plus instructions (or `--silent` for unattended installs), and an existing `.env` is never overwritten.
+- `CONTRIBUTING.md` PR checklist now covers documenting new configuration variables.
+
+### Tests
+- 768 → 787 assertions, including regression tests for all three fixes (real functions extracted from `install.sh`, plus contract checks for `uninstall.sh`).
+
 ## [1.2.2] — 2026-09-11
 
 ### Fixed
