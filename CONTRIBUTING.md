@@ -10,6 +10,7 @@ Thank you for your interest in contributing to Telemon! This document provides g
 - [Making Changes](#making-changes)
 - [Testing](#testing)
 - [Submitting Changes](#submitting-changes)
+- [Releases](#releases)
 - [Style Guidelines](#style-guidelines)
 - [Commit Messages](#commit-messages)
 
@@ -194,6 +195,30 @@ When adding new features, test:
 - [ ] Documentation updated
 - [ ] CHANGELOG.md updated
 - [ ] Commit messages are clear
+
+## Releases
+
+Packaging is a script, not an inline workflow list:
+
+```bash
+# VERSION and CHANGELOG.md must already describe the release
+bash scripts/build-release-archive.sh vX.Y.Z
+```
+
+It stages the runnable tree (`telemon.sh`, `telemon-admin.sh`, `lib/`,
+`install.sh`, `update.sh`, `uninstall.sh`, `checks.d/example-plugin.sh`,
+`systemd/`, `docs/`, `.env.example`, `telemon-logrotate.conf`, `README.md`,
+`LICENSE`, `CHANGELOG.md`, `CONTRIBUTING.md`, `VERSION`), fails if a required
+entry is missing, and writes both `telemon-vX.Y.Z.tar.gz` and `.zip`.
+
+`.github/workflows/release.yml` runs the same script on a tag push, and the CI
+**Release Artifact Check** job builds it on every push/PR, asserts the required
+files are present, and smoke-tests the extracted archive. Never add a second
+file list to the workflow — a duplicated list once omitted `lib/common.sh`, so
+every published archive failed to start (GH #21).
+
+Release steps: update `VERSION` + `CHANGELOG.md`, commit, push, then tag
+(`vX.Y.Z`) and push the tag — the workflow builds and publishes the archives.
 
 ## Style Guidelines
 
