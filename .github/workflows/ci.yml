@@ -91,9 +91,12 @@ jobs:
     steps:
     - uses: actions/checkout@v5
     
+    # This gate is enforced: .markdownlint-cli2.jsonc disables only the rules
+    # that conflict with the intentional dense-docs style, and the docs are
+    # lint-clean. It previously ran with `continue-on-error: true`, so a failing
+    # job still reported success and lint regressions could not be caught.
     - name: Run markdownlint
       uses: DavidAnson/markdownlint-cli2-action@v24.2.0
       with:
         globs: '**/*.md'
         config: '.markdownlint-cli2.jsonc'
-      continue-on-error: true
