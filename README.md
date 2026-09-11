@@ -676,6 +676,13 @@ WARNING|my_check|Resource at 85%
 CRITICAL|my_check|Service not responding
 ```
 
+A plugin that exits non-zero, returns no output, or emits no valid
+`STATE|KEY|DETAIL` line cannot report its checks. Telemon tracks that as
+`plugin_health`: after `CONFIRMATION_COUNT` consecutive cycles with a broken
+plugin it raises a WARNING naming the plugins (and announces the resolution
+when they report again), so a broken plugin cannot silently remove monitoring.
+Each failure is also logged with the plugin's exit code.
+
 See [Plugin Examples](#plugin-examples) below.
 
 ### Database Health Checks
@@ -1005,6 +1012,10 @@ fi
 2. Handle missing dependencies
 3. Keep checks under `CHECK_TIMEOUT` (default 30s)
 4. Output exactly: `STATE|KEY|DETAIL`
+5. Always report something: a plugin that exits non-zero or prints nothing is
+   treated as a failed check (`plugin_health` WARNING after the confirmation
+   count). Exit non-zero only when the plugin itself is broken — use a
+   `WARNING`/`CRITICAL` line to report an unhealthy service.
 
 ---
 
@@ -1065,7 +1076,7 @@ bash telemon-admin.sh reset-state
 | Telegram not sending | Check bot token, chat ID, internet connectivity |
 | SMTP auth fails | Verify password, check if 2FA requires app password |
 | Docker not detected | Ensure user is in `docker` group |
-| Plugin not loading | Check file is executable, check output format |
+| Plugin not loading | Check file is executable, check output format. Repeated "exited N"/"no output" warnings raise a `plugin_health` WARNING alert after `CONFIRMATION_COUNT` cycles |
 | State file errors | Ensure `/tmp` is writable, check disk space |
 
 ---

@@ -3944,6 +3944,11 @@ check_plugins() {
     
     # Iterate through all executable files in the directory
     local plugin_count=0
+    # GH #16: plugins that produced no usable report in this cycle. A plugin
+    # that crashes or reports nothing has silently removed its checks; the
+    # names are collected and surfaced through check_state_change below so the
+    # failure reaches the alert pipeline instead of only the log.
+    local -a failed_plugins=()
     for plugin in "$plugin_dir"/*; do
         [[ -f "$plugin" ]] || continue
         [[ -x "$plugin" ]] || continue
@@ -3955,12 +3960,22 @@ check_plugins() {
         local safe_plugin_name
         safe_plugin_name=$(html_escape "$plugin_name")
         
-        # Run the plugin with timeout
-        local plugin_output
-        plugin_output=$(run_with_timeout "$CHECK_TIMEOUT" "$plugin" 2>/dev/null) || plugin_output=""
+        # Run the plugin with timeout. The exit status is captured (GH #16):
+        # `|| plugin_output=""` used to discard it, so a plugin that crashed
+        # was indistinguishable from a healthy one and its checks simply
+        # stopped being monitored without any alert.
+        local plugin_output plugin_rc=0
+        plugin_output=$(run_with_timeout "$CHECK_TIMEOUT" "$plugin" 2>/dev/null) || plugin_rc=$?
+        
+        if [[ "$plugin_rc" -ne 0 ]]; then
+            log "WARN" "Plugin ${safe_plugin_name} exited ${plugin_rc} — its checks were not reported"
+            failed_plugins+=("$safe_plugin_name")
+            continue
+        fi
         
         if [[ -z "$plugin_output" ]]; then
-            log "WARN" "Plugin ${safe_plugin_name} returned no output"
+            log "WARN" "Plugin ${safe_plugin_name} returned no output (exit 0) — its checks were not reported"
+            failed_plugins+=("$safe_plugin_name")
             continue
         fi
         
@@ -3985,6 +4000,7 @@ check_plugins() {
 
         if [[ -z "$plugin_line" ]]; then
             log "WARN" "Plugin ${safe_plugin_name} returned no STATE|KEY|DETAIL line"
+            failed_plugins+=("$safe_plugin_name")
             continue
         fi
 
@@ -3999,6 +4015,7 @@ check_plugins() {
                 ;;
             *)
                 log "WARN" "Plugin ${safe_plugin_name} returned invalid state: ${plugin_state}"
+                failed_plugins+=("$safe_plugin_name")
                 continue
                 ;;
         esac
@@ -4006,6 +4023,7 @@ check_plugins() {
         # Validate key (alphanumeric, underscore, hyphen, dot only)
         if [[ ! "$plugin_key" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
             log "WARN" "Plugin ${safe_plugin_name} returned invalid key: ${plugin_key}"
+            failed_plugins+=("$safe_plugin_name")
             continue
         fi
         
@@ -4022,8 +4040,27 @@ check_plugins() {
     
     if [[ "$plugin_count" -eq 0 ]]; then
         log "DEBUG" "Plugin check: no executable plugins found in ${plugin_dir}"
+        return
+    fi
+    
+    log "DEBUG" "Plugin check: executed ${plugin_count} plugin(s)"
+    
+    # GH #16: report plugin health through the standard state machine so a
+    # plugin that stopped reporting cannot silently remove monitoring. Driving
+    # check_state_change gives confirmation counting (a single transient
+    # failure does not alert), the alert cooldown, recovery alerts, escalation
+    # and the health digest for free. Skipped entirely when no plugins are
+    # configured, so plugin-less installs get no extra state key.
+    if [[ ${#failed_plugins[@]} -gt 0 ]]; then
+        local failed_detail="" failed_name
+        for failed_name in "${failed_plugins[@]}"; do
+            failed_detail+="${failed_name}, "
+        done
+        failed_detail="${failed_detail%, }"
+        check_state_change "plugin_health" "WARNING" \
+            "${#failed_plugins[@]} of ${plugin_count} plugin(s) did not report: ${failed_detail}"
     else
-        log "DEBUG" "Plugin check: executed ${plugin_count} plugin(s)"
+        check_state_change "plugin_health" "OK" "all ${plugin_count} plugin(s) reported"
     fi
 }
 

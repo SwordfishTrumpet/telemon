@@ -4900,11 +4900,127 @@ PLUGIN3
     assert_true "plugin multi-line: banner + STATE|KEY|DETAIL parsed (was dropped before fix)"
     grep -q "health_check|OK|All good" "$capture"
     assert_true "plugin multi-line: STATE line with trailing debug + blank line parsed"
-    ! grep -q "bad-plugin" "$capture"
-    assert_true "plugin multi-line: invalid output (no STATE line) still skipped"
+    ! grep -qE "^bad-plugin\|" "$capture"
+    assert_true "plugin multi-line: invalid output (no STATE line) creates no plugin state key"
+    grep -qE "^plugin_health\|WARNING\|" "$capture"
+    assert_true "plugin multi-line: invalid plugin is surfaced via plugin_health (GH #16)"
 
     unset -f run_with_timeout log check_state_change check_plugins
     rm -f "$fn_file" "$capture"
+    rm -rf "$plugdir"
+}
+
+# ---------------------------------------------------------------------------
+# GH #16 — a plugin that crashes or reports nothing must not silently remove
+# its checks. check_plugins has to capture the exit status and drive the REAL
+# state machine, so the failure is confirmed/alerts like any other check and
+# recovers when the plugin reports again.
+# ---------------------------------------------------------------------------
+test_regression_plugin_failure_health() {
+    echo ""
+    echo "Testing plugin failure health reporting (GH #16)..."
+
+    local fn_file plugdir logfile i
+    fn_file=$(mktemp)
+    logfile=$(mktemp)
+    plugdir=$(mktemp -d)
+
+    # Real check_plugins AND real check_state_change
+    awk '/^check_plugins\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" >> "$fn_file"
+    awk '/^check_state_change\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" >> "$fn_file"
+
+    run_with_timeout() { shift; "$@" 2>/dev/null; }
+    log() { printf '%s|%s\n' "$1" "$2" >> "$logfile"; }
+    audit_log() { :; }
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+
+    declare -A PREV_STATE=()
+    declare -A PREV_COUNT=()
+    declare -A ALERT_LAST_SENT=()
+    declare -A CURR_STATE=()
+    declare -A STATE_DETAIL=()
+    local ALERTS=""
+    local CONFIRMATION_COUNT=3
+    local ALERT_COOLDOWN_SEC=900
+
+    # One healthy plugin, one that crashes (exit 7), one that exits 0 silently
+    cat > "$plugdir/healthy" <<'PLUGIN'
+#!/usr/bin/env bash
+echo "OK|healthy_check|fine"
+PLUGIN
+    cat > "$plugdir/crashing" <<'PLUGIN'
+#!/usr/bin/env bash
+exit 7
+PLUGIN
+    cat > "$plugdir/silent" <<'PLUGIN'
+#!/usr/bin/env bash
+exit 0
+PLUGIN
+    chmod +x "$plugdir"/*
+
+    # Persist between simulated cron runs like save_state/load_state do
+    persist_state() {
+        local k
+        for k in "${!CURR_STATE[@]}"; do
+            PREV_STATE["$k"]="${CURR_STATE[$k]}"
+        done
+    }
+
+    # Cycles 1-2: failures counted, no alert yet (confirmation threshold)
+    for i in 1 2; do
+        ALERTS=""
+        CHECKS_DIR="$plugdir" CHECK_TIMEOUT=30 check_plugins
+        persist_state
+        [[ -z "$ALERTS" ]]
+        assert_true "plugin health: cycle $i does not alert (confirmation counting)"
+    done
+
+    # The failure is visible in the log, with the exit code
+    grep -qF "WARN|Plugin crashing exited 7" "$logfile"
+    assert_true "plugin health: crashing plugin logs its exit code"
+    grep -qF "Plugin silent returned no output (exit 0)" "$logfile"
+    assert_true "plugin health: silent plugin is distinguished from a crash in the log"
+
+    # Cycle 3: confirmed -> alert through the normal pipeline
+    ALERTS=""
+    CHECKS_DIR="$plugdir" CHECK_TIMEOUT=30 check_plugins
+    persist_state
+    [[ "$ALERTS" == *"<b>plugin_health</b>"* ]]
+    assert_true "plugin health: third consecutive cycle raises an alert"
+    [[ "$ALERTS" == *"crashing"* && "$ALERTS" == *"silent"* ]]
+    assert_true "plugin health: alert names the plugins that did not report"
+    [[ "$ALERTS" != *"healthy"* ]]
+    assert_true "plugin health: healthy plugin is not reported as failing"
+
+    # Recovery: both plugins report again -> resolution is announced
+    cat > "$plugdir/crashing" <<'PLUGIN'
+#!/usr/bin/env bash
+echo "OK|crash_check|recovered"
+PLUGIN
+    cat > "$plugdir/silent" <<'PLUGIN'
+#!/usr/bin/env bash
+echo "OK|silent_check|recovered"
+PLUGIN
+    chmod +x "$plugdir"/*
+    ALERTS=""
+    CHECKS_DIR="$plugdir" CHECK_TIMEOUT=30 check_plugins
+    [[ "$ALERTS" == *"<b>plugin_health</b>"* && "$ALERTS" == *"all 3 plugin(s) reported"* ]]
+    assert_true "plugin health: recovery to OK is announced"
+
+    # No configured plugins -> no plugin_health state at all. CURR_STATE is
+    # rebuilt from scratch on every real run (load_state), so simulate that.
+    mkdir -p "$plugdir/empty"
+    CURR_STATE=()
+    STATE_DETAIL=()
+    ALERTS=""
+    CHECKS_DIR="$plugdir/empty" CHECK_TIMEOUT=30 check_plugins
+    [[ -z "$ALERTS" && -z "${CURR_STATE[plugin_health]:-}" ]]
+    assert_true "plugin health: no plugins configured produces no plugin_health state"
+
+    unset -f run_with_timeout log audit_log check_plugins check_state_change persist_state
+    rm -f "$fn_file" "$logfile"
     rm -rf "$plugdir"
 }
 
@@ -5455,6 +5571,7 @@ main() {
     test_regression_recovery_alert_cooldown
     test_regression_smtp_password_raw
     test_regression_plugin_multiline_output
+    test_regression_plugin_failure_health
     test_regression_detail_newline_roundtrip
     test_regression_sites_ssl_port
     test_regression_predict_hysteresis
