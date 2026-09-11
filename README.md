@@ -944,6 +944,10 @@ bash uninstall.sh        # Remove cron/systemd, keep config
 bash uninstall.sh --full # Remove everything
 ```
 
+`update.sh` refuses to run when tracked files have local modifications: it lists
+them and asks you to commit, stash (`git stash` + `git stash pop`), or discard
+them before updating. It never stashes or discards your changes for you.
+
 ---
 
 ## Alternative Deployment

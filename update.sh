@@ -51,6 +51,33 @@ get_current_version() {
 }
 
 # ---------------------------------------------------------------------------
+# Refuse to update a working tree with local modifications (GH #18)
+# Returns 0 when the tracked tree is clean; otherwise prints what is modified
+# and how to resolve it, and returns 1. The updater must never stash, discard
+# or silently park the operator's changes.
+# ---------------------------------------------------------------------------
+check_working_tree_clean() {
+    local dirty_files
+    dirty_files=$(git -C "$SCRIPT_DIR" status --porcelain --untracked-files=no 2>/dev/null)
+    [[ -z "$dirty_files" ]] && return 0
+
+    echo -e "${RED}ERROR: Local modifications to tracked files — update aborted.${NC}"
+    echo ""
+    echo "  Modified files:"
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && echo "    ${line}"
+    done <<< "$dirty_files"
+    echo ""
+    echo "  Telemon will not stash or discard your changes. Resolve them first:"
+    echo "    git stash                # park them, restore later with 'git stash pop'"
+    echo "    git commit -m \"...\"       # keep them as a commit"
+    echo "    git checkout -- <file>   # discard them"
+    echo ""
+    echo "  Then re-run: bash update.sh"
+    return 1
+}
+
+# ---------------------------------------------------------------------------
 # Check for updates
 # ---------------------------------------------------------------------------
 check_for_updates() {
@@ -134,8 +161,11 @@ apply_update() {
     
     cd "$SCRIPT_DIR"
     
-    # Stash any local changes (shouldn't happen, but just in case)
-    git stash --quiet 2>/dev/null || true
+    # GH #18: never start from a dirty tree. The old code ran
+    # `git stash --quiet` and never restored the stash, so an operator's local
+    # modifications were silently parked — inactive after the update, with the
+    # only trace an unnamed stash entry nobody was told about.
+    check_working_tree_clean || return 1
     
     # Pull latest
     if git pull --quiet origin main 2>/dev/null || git pull --quiet origin master 2>/dev/null; then
@@ -175,12 +205,20 @@ main() {
         fi
         
         echo ""
+        # GH #18: refuse before prompting when tracked files are modified, so an
+        # update that cannot be applied safely never touches the working tree
+        check_working_tree_clean || exit 1
+
         read -rp "Apply update? [Y/n] " answer
         answer="${answer:-Y}"
         
         if [[ "$answer" =~ ^[Yy]$ ]]; then
             create_backup
-            apply_update
+            apply_update || {
+                echo ""
+                echo "Your backup is at: ${BACKUP_DIR}"
+                exit 1
+            }
         else
             echo "Update cancelled."
         fi

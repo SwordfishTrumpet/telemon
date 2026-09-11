@@ -5024,6 +5024,73 @@ PLUGIN
     rm -rf "$plugdir"
 }
 
+# ---------------------------------------------------------------------------
+# GH #18 — update.sh must refuse a dirty working tree instead of silently
+# stashing (and never restoring) the operator's local modifications.
+# ---------------------------------------------------------------------------
+test_regression_update_dirty_tree() {
+    echo ""
+    echo "Testing update.sh dirty-tree guard (GH #18)..."
+
+    local root="${SCRIPT_DIR}" fn_file repo out rc
+    fn_file=$(mktemp)
+    repo=$(mktemp -d)
+
+    awk '/^check_working_tree_clean\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$root/update.sh" > "$fn_file"
+    [[ -s "$fn_file" ]]
+    assert_true "update.sh: dirty-tree guard is defined"
+
+    git -C "$repo" init -q
+    git -C "$repo" config user.email "test@example.com"
+    git -C "$repo" config user.name "telemon-test"
+    echo "original" > "$repo/telemon.sh"
+    git -C "$repo" add telemon.sh
+    git -C "$repo" commit -qm init
+
+    # The function reads SCRIPT_DIR (dynamic scope from update.sh). Shadow it
+    # with `local` so the global stays intact for the other tests — several of
+    # them extract functions from ${SCRIPT_DIR}/telemon.sh.
+    local SCRIPT_DIR="$repo"
+    # shellcheck disable=SC1090
+    source "$fn_file"
+
+    out=$(check_working_tree_clean 2>&1)
+    rc=$?
+    [[ $rc -eq 0 ]]
+    assert_true "update.sh: clean tree passes the guard"
+
+    # A local modification to a tracked file must abort the update
+    echo "local tweak" >> "$repo/telemon.sh"
+    out=$(check_working_tree_clean 2>&1)
+    rc=$?
+    [[ $rc -ne 0 ]]
+    assert_true "update.sh: dirty tree is refused"
+    [[ "$out" == *"telemon.sh"* ]]
+    assert_true "update.sh: refusal names the modified file"
+    [[ "$out" == *"git stash"* && "$out" == *"bash update.sh"* ]]
+    assert_true "update.sh: refusal explains how to resolve and re-run"
+    [[ -z "$(git -C "$repo" stash list)" ]]
+    assert_true "update.sh: guard creates no stash entry"
+
+    # Untracked files are not touched by git pull and must not block an update
+    git -C "$repo" checkout -q -- telemon.sh
+    echo "scratch" > "$repo/new-file.txt"
+    check_working_tree_clean >/dev/null 2>&1
+    assert_true "update.sh: untracked files do not block an update"
+
+    # apply_update must call the guard, and the silent stash must be gone
+    grep -q 'check_working_tree_clean || return 1' "$root/update.sh"
+    assert_true "update.sh: apply_update calls the guard before pulling"
+    ! grep -qE '^[[:space:]]*git stash' "$root/update.sh"
+    assert_true "update.sh: no git stash command remains"
+    grep -q 'check_working_tree_clean || exit 1' "$root/update.sh"
+    assert_true "update.sh: main refuses before prompting"
+
+    unset -f check_working_tree_clean
+    rm -f "$fn_file"
+    rm -rf "$repo"
+}
+
 test_regression_detail_newline_roundtrip() {
     echo ""
     echo "Testing .detail newline encoding round-trip (GH #5)..."
@@ -5572,6 +5639,7 @@ main() {
     test_regression_smtp_password_raw
     test_regression_plugin_multiline_output
     test_regression_plugin_failure_health
+    test_regression_update_dirty_tree
     test_regression_detail_newline_roundtrip
     test_regression_sites_ssl_port
     test_regression_predict_hysteresis
