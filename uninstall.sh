@@ -54,32 +54,38 @@ fi
 echo "[2/4] Removing systemd service..."
 
 if command -v systemctl &>/dev/null; then
-    if systemctl list-timers --all 2>/dev/null | grep -q telemon; then
+    # System-wide units
+    if [[ -f /etc/systemd/system/telemon.service || -f /etc/systemd/system/telemon.timer ]]; then
         systemctl stop telemon.timer 2>/dev/null || true
         systemctl disable telemon.timer 2>/dev/null || true
-        echo "  Systemd timer stopped and disabled."
-    fi
-    
-    if systemctl list-units --all 2>/dev/null | grep -q telemon.service; then
         systemctl stop telemon.service 2>/dev/null || true
-        echo "  Systemd service stopped."
-    fi
-    
-    # Remove systemd files if they exist and we have permission
-    if [[ -f /etc/systemd/system/telemon.service ]]; then
-        if [[ -w /etc/systemd/system/telemon.service ]]; then
-            rm -f /etc/systemd/system/telemon.service
-            rm -f /etc/systemd/system/telemon.timer
+        if [[ -w /etc/systemd/system/telemon.service || -w /etc/systemd/system/telemon.timer ]]; then
+            rm -f /etc/systemd/system/telemon.service /etc/systemd/system/telemon.timer
             systemctl daemon-reload 2>/dev/null || true
-            echo "  Systemd files removed."
+            echo "  System-wide units stopped, disabled and removed."
         else
-            echo "  Systemd files exist but require sudo to remove:"
-            echo "    sudo rm /etc/systemd/system/telemon.service"
-            echo "    sudo rm /etc/systemd/system/telemon.timer"
+            echo "  System-wide units exist but require sudo to remove:"
+            echo "    sudo rm /etc/systemd/system/telemon.service /etc/systemd/system/telemon.timer"
             echo "    sudo systemctl daemon-reload"
         fi
     else
-        echo "  No systemd files found."
+        echo "  No system-wide systemd files found."
+    fi
+
+    # GH #24: install.sh --systemd installs *user* units when it does not run as
+    # root (${HOME}/.config/systemd/user/telemon.{service,timer}, enabled with
+    # `systemctl --user`). Those were never removed here, so a user-mode install
+    # kept monitoring (and alerting) after a nominally complete uninstall.
+    user_unit_dir="${HOME}/.config/systemd/user"
+    if [[ -f "${user_unit_dir}/telemon.service" || -f "${user_unit_dir}/telemon.timer" ]]; then
+        systemctl --user stop telemon.timer 2>/dev/null || true
+        systemctl --user disable telemon.timer 2>/dev/null || true
+        systemctl --user stop telemon.service 2>/dev/null || true
+        rm -f "${user_unit_dir}/telemon.service" "${user_unit_dir}/telemon.timer"
+        systemctl --user daemon-reload 2>/dev/null || true
+        echo "  User-level units stopped, disabled and removed (${user_unit_dir})."
+    else
+        echo "  No user-level systemd units found."
     fi
 else
     echo "  systemctl not available."
@@ -108,19 +114,27 @@ fi
 echo "[4/4] Cleaning up state and logs..."
 
 if [[ "$FULL_UNINSTALL" == true ]]; then
-    echo "  Removing state file and logs (full uninstall)..."
+    echo "  Removing state files and logs (full uninstall)..."
     
     # Load env to get STATE_FILE if it exists
     load_telemon_env
     
-    if [[ -f "$STATE_FILE" ]]; then
-        rm -f "$STATE_FILE"
-        echo "  State file removed: $STATE_FILE"
-    fi
+    # GH #24: remove every state file the runtime writes, not just the main one.
+    # The list is shared (get_state_file_variants) and is the same enumeration
+    # `telemon-admin.sh reset-state` uses — previously only $STATE_FILE and its
+    # lock were removed, leaving nine sidecars plus the drift baseline behind.
+    # shellcheck disable=SC2046
+    for file in $(get_state_file_variants true true false); do
+        if [[ -f "$file" ]]; then
+            rm -f "$file"
+            echo "  State file removed: $(basename "$file")"
+        fi
+    done
     
-    if [[ -f "${STATE_FILE}.lock" ]]; then
-        rm -f "${STATE_FILE}.lock"
-        echo "  Lock file removed."
+    drift_baseline_dir="${STATE_FILE}.drift.baseline"
+    if [[ -d "$drift_baseline_dir" ]]; then
+        rm -rf "$drift_baseline_dir"
+        echo "  Drift baseline removed: $(basename "$drift_baseline_dir")"
     fi
     
     for log in "${SCRIPT_DIR}/telemon.log" "${SCRIPT_DIR}/telemon_cron.log"; do

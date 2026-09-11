@@ -5175,6 +5175,51 @@ test_regression_install_env_preserved() {
     rm -rf "$dir"
 }
 
+# ---------------------------------------------------------------------------
+# GH #24 — uninstall.sh must remove the user-level systemd units that
+# `install.sh --systemd` creates, and `--full` must clear every state file the
+# runtime writes (not just the main one).
+# ---------------------------------------------------------------------------
+test_regression_uninstall_completeness() {
+    echo ""
+    echo "Testing uninstall.sh completeness (GH #24)..."
+
+    local u="${SCRIPT_DIR}/uninstall.sh"
+
+    grep -q 'systemctl --user stop telemon.timer' "$u"
+    assert_true "uninstall.sh: stops the user-level timer (GH #24)"
+    grep -q 'systemctl --user disable telemon.timer' "$u"
+    assert_true "uninstall.sh: disables the user-level timer"
+    grep -q 'config/systemd/user' "$u"
+    assert_true "uninstall.sh: removes user-level unit files"
+    grep -q 'get_state_file_variants true true false' "$u"
+    assert_true "uninstall.sh: --full uses the shared state-file enumeration"
+    grep -q 'drift.baseline' "$u"
+    assert_true "uninstall.sh: --full removes the drift baseline"
+
+    # A top-level `local` aborts the script (SC2168) under set -e
+    ! grep -qE '^[[:space:]]*local ' "$u"
+    assert_true "uninstall.sh: no top-level 'local' (SC2168)"
+
+    # Functional contract of the enumeration --full relies on
+    local tmp
+    tmp=$(mktemp -d)
+    local STATE_FILE="$tmp/state"
+    local s
+    for s in "" .cooldown .detail .queue .escalation .integrity .net .trend .drift .iowait .lock; do
+        touch "${STATE_FILE}${s}"
+    done
+    mkdir -p "${STATE_FILE}.drift.baseline"
+    local f
+    for f in $(get_state_file_variants true true false); do
+        rm -f "$f"
+    done
+    rm -rf "${STATE_FILE}.drift.baseline"
+    [[ -z "$(ls -A "$tmp")" ]]
+    assert_true "uninstall.sh: the --full enumeration clears every state file"
+    rm -rf "$tmp"
+}
+
 test_regression_detail_newline_roundtrip() {
     echo ""
     echo "Testing .detail newline encoding round-trip (GH #5)..."
@@ -5725,6 +5770,7 @@ main() {
     test_regression_plugin_failure_health
     test_regression_update_dirty_tree
     test_regression_install_env_preserved
+    test_regression_uninstall_completeness
     test_regression_detail_newline_roundtrip
     test_regression_sites_ssl_port
     test_regression_predict_hysteresis
