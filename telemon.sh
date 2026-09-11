@@ -2280,10 +2280,11 @@ check_sites() {
         [[ -z "$url" ]] && continue
         
         # SECURITY: SSRF protection — block internal/reserved IP addresses
-        # Extract host from URL for validation
-        local host_for_validation="${url#*://}"
-        host_for_validation="${host_for_validation%%/*}"
-        host_for_validation="${host_for_validation%%:*}"
+        # Extract host from URL for validation. normalize_host handles userinfo,
+        # IPv6 brackets and ports (GH #14 — a naive '%%:*' split turned '[::1]'
+        # into '[' and let encoded/bracketed hosts bypass the guard).
+        local host_for_validation
+        host_for_validation=$(normalize_host "$url")
         
         # Skip SSRF check if explicitly allowed (for monitoring local services like Plex)
         if [[ "${SITE_ALLOW_INTERNAL:-false}" != "true" ]]; then
@@ -2350,16 +2351,14 @@ check_sites() {
         # Retrieve SSL certificate expiry if HTTPS and SSL check enabled
         local ssl_expiry_epoch=""
         if [[ "$url" == https://* ]] && [[ "$check_ssl" == "true" ]]; then
-            local host_for_ssl="${url#https://}"
-            host_for_ssl="${host_for_ssl%%/*}"
             # GH #6: honor a non-default port in the URL (https://host:8443).
             # Previously the port was stripped and openssl always connected to
             # :443, so non-443 HTTPS sites got the wrong (or no) certificate.
-            local ssl_port="${host_for_ssl##*:}"
-            if [[ "$ssl_port" == "$host_for_ssl" || ! "$ssl_port" =~ ^[0-9]+$ ]]; then
-                ssl_port="443"
-            fi
-            host_for_ssl="${host_for_ssl%%:*}"
+            # GH #14: use the shared normalizers, which also handle bracketed
+            # IPv6 authorities ([::1]:8443) that '%%:*' splitting corrupted.
+            local host_for_ssl ssl_port
+            host_for_ssl=$(normalize_host "$url")
+            ssl_port=$(normalize_port "$url" 443)
             if command -v openssl &>/dev/null; then
                 local cert_enddate
                 # Use timeout wrapper to prevent hanging on slow/unresponsive SSL servers
@@ -5554,9 +5553,8 @@ run_validate() {
         local has_internal_url=false
         for site in ${CRITICAL_SITES:-}; do
             local url="${site%%|*}"
-            local host_check="${url#*://}"
-            host_check="${host_check%%/*}"
-            host_check="${host_check%%:*}"
+            local host_check
+            host_check=$(normalize_host "$url")
             if is_internal_ip "$host_check" 2>/dev/null; then
                 has_internal_url=true
             fi

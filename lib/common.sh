@@ -265,24 +265,229 @@ is_valid_email() {
     [[ "$email" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]
 }
 
-# Check if an IP address is internal/reserved (for SSRF protection)
-# Returns 0 (true) if IP is internal, 1 (false) if external
+# ===========================================================================
+# Host / URL normalization (shared by the SSRF guard and the SSL check)
+# ===========================================================================
+
+# Normalize a host or URL into a bare lowercase hostname: strips the scheme,
+# userinfo, path/query/fragment, IPv6 brackets and port.
+#   normalize_host "https://[::1]:8443/path"      -> "::1"
+#   normalize_host "http://user@Example.COM:80/x" -> "example.com"
+# GH #14: callers previously split on ':' which turned a bracketed IPv6
+# literal into "[" — so encoded/bracketed hosts bypassed is_internal_ip.
+normalize_host() {
+    local host="$1"
+    host="${host#*://}"      # scheme
+    host="${host%%/*}"       # path
+    host="${host%%\?*}"      # query
+    host="${host%%#*}"       # fragment
+    host="${host##*@}"       # userinfo
+    if [[ "$host" == \[*\]* ]]; then
+        host="${host#[}"
+        host="${host%%]*}"
+    elif [[ "$host" =~ ^([^:]+):([0-9]+)$ ]]; then
+        host="${BASH_REMATCH[1]}"
+    fi
+    # tr (not ${var,,}) — bash 3.2 is a supported target (macOS)
+    printf '%s' "$host" | tr '[:upper:]' '[:lower:]'
+}
+
+# Extract the port from a host/URL authority, emitting $2 when absent/invalid.
+# Handles bracketed IPv6 authorities ([::1]:8443) that '%%:*' splitting breaks.
+normalize_port() {
+    local authority="${1#*://}"
+    local default="${2:-}"
+    authority="${authority%%/*}"
+    authority="${authority%%\?*}"
+    authority="${authority##*@}"
+    local port=""
+    if [[ "$authority" =~ ^\[.+\]:([0-9]+)$ ]]; then
+        port="${BASH_REMATCH[1]}"
+    elif [[ "$authority" =~ ^[^:]+:([0-9]+)$ ]]; then
+        port="${BASH_REMATCH[1]}"
+    fi
+    printf '%s' "${port:-$default}"
+}
+
+# ===========================================================================
+# Numeric address canonicalization (GH #14)
+# inet_aton — and therefore curl/getaddrinfo — accepts alternate spellings of
+# the same IPv4 address: decimal/hex/octal components and 1-4 dot-separated
+# parts. 2130706433, 0x7f000001, 0177.0.0.1 and 127.1 all mean 127.0.0.1.
+# Matching the raw string cannot see those, so the guard canonicalizes first.
+# ===========================================================================
+
+# Convert one dotted component (decimal, 0x-hex, or 0N-octal) to decimal.
+_ipv4_component_dec() {
+    local part="$1"
+    case "$part" in
+        '') return 1 ;;
+        0) printf '0' ;;
+        0[xX]*)
+            [[ "$part" =~ ^0[xX][0-9a-fA-F]{1,8}$ ]] || return 1
+            printf '%d' "$((16#${part#0[xX]}))"
+            ;;
+        0[0-7]*)
+            [[ "$part" =~ ^0[0-7]+$ ]] || return 1
+            printf '%d' "$((8#${part#0}))"
+            ;;
+        *[!0-9]*) return 1 ;;
+        *) printf '%d' "$((10#$part))" ;;
+    esac
+}
+
+# Canonicalize any inet_aton-accepted IPv4 literal to dotted-quad decimal.
+# Prints the canonical address, or returns 1 when the input is not a numeric
+# IPv4 literal (e.g. a hostname).
+canonical_ipv4() {
+    local host="$1"
+    # Cheap bounds: longest form is 4 parts x 10 chars (0x + 8 hex digits)
+    [[ ${#host} -le 48 ]] || return 1
+    [[ "$host" =~ ^[0-9a-fA-FxX.]+$ ]] || return 1
+    local -a parts=() dec=()
+    local IFS='.'
+    read -r -a parts <<< "$host"
+    local n=${#parts[@]} d part
+    (( n >= 1 && n <= 4 )) || return 1
+    for part in "${parts[@]}"; do
+        [[ ${#part} -le 12 ]] || return 1
+        d=$(_ipv4_component_dec "$part") || return 1
+        dec+=("$d")
+    done
+    # inet_aton: with fewer than 4 parts the last part holds the remaining bytes
+    local a b c e
+    case $n in
+        4)  a=${dec[0]}; b=${dec[1]}; c=${dec[2]}; e=${dec[3]}
+            (( a <= 255 && b <= 255 && c <= 255 && e <= 255 )) || return 1 ;;
+        3)  a=${dec[0]}; b=${dec[1]}
+            (( a <= 255 && b <= 255 && dec[2] <= 0xFFFFFF )) || return 1
+            c=$(( dec[2] >> 8 )); e=$(( dec[2] & 255 )) ;;
+        2)  a=${dec[0]}
+            (( a <= 255 && dec[1] <= 0xFFFFFF )) || return 1
+            b=$(( dec[1] >> 16 )); c=$(( (dec[1] >> 8) & 255 )); e=$(( dec[1] & 255 )) ;;
+        1)  (( dec[0] <= 0xFFFFFFFF )) || return 1
+            a=$(( dec[0] >> 24 )); b=$(( (dec[0] >> 16) & 255 ))
+            c=$(( (dec[0] >> 8) & 255 )); e=$(( dec[0] & 255 )) ;;
+    esac
+    printf '%s.%s.%s.%s' "$a" "$b" "$c" "$e"
+}
+
+# True when a canonical dotted-quad address is internal/reserved.
+internal_ipv4() {
+    local ip="$1"
+    case "$ip" in
+        # loopback, RFC1918 class A/C, link-local, and "this network" (0/8)
+        127.*|10.*|192.168.*|169.254.*|0.*) return 0 ;;
+    esac
+    [[ "$ip" =~ ^172\.(1[6-9]|2[0-9]|3[01])\. ]] && return 0   # RFC1918 class B
+    return 1
+}
+
+# Expand an IPv6 literal into its 8 lowercase zero-padded hex groups, one per
+# line. Returns 1 (no output) for anything that is not a valid IPv6 literal or
+# that uses '::' more than once. Brackets must already be stripped.
+expand_ipv6() {
+    local host="$1" left="" right=""
+    local -a lg=() rg=()
+    if [[ "$host" == *"::"* ]]; then
+        left="${host%%::*}"
+        right="${host##*::}"
+        [[ "$right" == *"::"* ]] && return 1
+    else
+        left="$host"
+    fi
+    [[ -n "$left" ]] && IFS=':' read -r -a lg <<< "$left"
+    [[ -n "$right" ]] && IFS=':' read -r -a rg <<< "$right"
+    local g
+    for g in "${lg[@]}" "${rg[@]}"; do
+        [[ "$g" =~ ^[0-9a-f]{1,4}$ ]] || return 1
+    done
+    local -a groups=()
+    local g
+    for g in "${lg[@]}"; do
+        groups+=("$(printf '%04x' "$((16#$g))")")
+    done
+    if [[ "$host" == *"::"* ]]; then
+        # The omitted groups belong between the left and right halves
+        local fill=$(( 8 - ${#lg[@]} - ${#rg[@]} ))
+        (( fill >= 1 )) || return 1
+        local i
+        for (( i=0; i<fill; i++ )); do groups+=(0000); done
+    else
+        (( ${#lg[@]} == 8 )) || return 1
+    fi
+    for g in "${rg[@]}"; do
+        groups+=("$(printf '%04x' "$((16#$g))")")
+    done
+    (( ${#groups[@]} == 8 )) || return 1
+    printf '%s\n' "${groups[@]}"
+}
+
+# Check if an IP address or host is internal/reserved (for SSRF protection)
+# Normalizes the input first, then canonicalizes numeric forms, so encoded
+# spellings of the same address cannot bypass the guard (GH #14):
+#   IPv4: 2130706433, 0x7f000001, 0177.0.0.1, 127.1
+#   IPv6: ::ffff:127.0.0.1, ::ffff:7f00:1, 0:0:0:0:0:ffff:7f00:1, [::1], FE80::1
+# Returns 0 (true) if internal, 1 (false) if external
 # Usage: is_internal_ip "$host" && { log "WARN" "Internal IP blocked"; continue; }
 is_internal_ip() {
-    local host="$1"
-    # Check for private/reserved IPv4 ranges
-    [[ "$host" =~ ^127\. ]] && return 0                    # Loopback
-    [[ "$host" =~ ^10\. ]] && return 0                    # Private Class A
-    [[ "$host" =~ ^172\.(1[6-9]|2[0-9]|3[01])\. ]] && return 0   # Private Class B
-    [[ "$host" =~ ^192\.168\. ]] && return 0             # Private Class C
-    [[ "$host" =~ ^169\.254\. ]] && return 0             # Link-local
-    [[ "$host" =~ ^0\.0\.0\.0 ]] && return 0              # Default route
-    [[ "$host" == "localhost" ]] && return 0               # Localhost name
-    # Check for IPv6 loopback/link-local
-    [[ "$host" =~ ^::1$ ]] && return 0                     # IPv6 loopback
-    [[ "$host" =~ ^[fF][cCdD][0-9a-fA-F]{2}: ]] && return 0   # IPv6 ULA fc00::/7 (fc00–fdff, both cases)
-    [[ "$host" =~ ^fe80: ]] && return 0                  # IPv6 link-local
-    # Not an internal IP
+    local host
+    host=$(normalize_host "$1")
+    host="${host%.}"          # a trailing dot is the FQDN form of the same name
+    [[ -z "$host" ]] && return 1
+
+    # Loopback / special-use names
+    case "$host" in
+        localhost|localhost.localdomain|ip6-localhost|ip6-loopback) return 0 ;;
+    esac
+
+    # ---- IPv6 literals (any ':' makes it one) -----------------------------
+    if [[ "$host" == *:* ]]; then
+        # IPv4-mapped / IPv4-compatible forms carry a dotted-quad suffix
+        if [[ "$host" =~ ([0-9]{1,3}(\.[0-9]{1,3}){3})$ ]]; then
+            local embedded
+            embedded=$(canonical_ipv4 "${BASH_REMATCH[1]}") || embedded=""
+            if [[ -n "$embedded" ]] && internal_ipv4 "$embedded"; then
+                return 0
+            fi
+        fi
+        # Pure-hex forms (::ffff:7f00:1, ::1, fc00::1, fe80::1, ...)
+        local -a groups=() g
+        while IFS= read -r g; do groups+=("$g"); done < <(expand_ipv6 "$host" 2>/dev/null)
+        if (( ${#groups[@]} == 8 )); then
+            # Zero-prefixed addresses map onto IPv4 (::0.0.0.0, ::1, ::ffff:a.b.c.d)
+            local zero_prefix=true i
+            for (( i=0; i<5; i++ )); do
+                [[ "${groups[i]}" == 0000 ]] || zero_prefix=false
+            done
+            if [[ "$zero_prefix" == "true" ]] && { [[ "${groups[5]}" == 0000 ]] || [[ "${groups[5]}" == ffff ]]; }; then
+                local mapped="$((16#${groups[6]} >> 8)).$((16#${groups[6]} & 255)).$((16#${groups[7]} >> 8)).$((16#${groups[7]} & 255))"
+                if internal_ipv4 "$mapped"; then
+                    return 0
+                fi
+            fi
+            local first_dec=$((16#${groups[0]}))
+            (( (first_dec & 0xfe00) == 0xfc00 )) && return 0   # ULA fc00::/7
+            (( (first_dec & 0xffc0) == 0xfe80 )) && return 0   # link-local fe80::/10
+        fi
+        return 1
+    fi
+
+    # ---- IPv4 and hostnames ----------------------------------------------
+    # A numeric literal in any accepted spelling -> canonicalize, range-check
+    local canonical
+    if canonical=$(canonical_ipv4 "$host"); then
+        if internal_ipv4 "$canonical"; then
+            return 0
+        fi
+        return 1
+    fi
+    # Not numeric: keep the legacy prefix guards so names that embed a private
+    # range (e.g. 10.0.0.1.nip.io) stay blocked
+    case "$host" in
+        10.*|127.*|192.168.*|169.254.*|0.*) return 0 ;;
+    esac
+    [[ "$host" =~ ^172\.(1[6-9]|2[0-9]|3[01])\. ]] && return 0
     return 1
 }
 

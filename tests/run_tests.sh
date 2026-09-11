@@ -367,6 +367,64 @@ test_is_internal_ip() {
 }
 
 # ---------------------------------------------------------------------------
+# GH #14 — is_internal_ip must not be bypassable with alternate spellings of
+# the same address, and the host/port normalizers must handle IPv6 URLs
+# (bracketed authorities) that the old '%%:*' splitting corrupted.
+# ---------------------------------------------------------------------------
+test_regression_internal_ip_encodings() {
+    echo ""
+    echo "Testing is_internal_ip encoding bypasses + host normalizers (GH #14)..."
+
+    # Every entry names an internal/reserved address — decimal, hex and octal
+    # IPv4, IPv4-mapped IPv6, uppercase hex, brackets, and DNS aliases that
+    # embed a private range. curl/getaddrinfo resolve them all identically.
+    local internal=(
+        "127.0.0.1" "127.1" "127.0.0.53"
+        "2130706433" "0x7f000001" "0177.0.0.1" "0"
+        "0xc0.0x0a8.0x1.0x2"          # 192.168.1.2
+        "0xa000001"                    # 10.0.0.1
+        "::1" "[::1]"
+        "::ffff:127.0.0.1" "[::ffff:127.0.0.1]"
+        "::ffff:7f00:1" "0:0:0:0:0:ffff:7f00:1"
+        "FE80::1" "fe80::1" "febf::1"
+        "fc00::1" "fd00::1" "fdff:ffff::1" "FD12::1"
+        "10.0.0.1" "172.16.0.1" "172.31.255.255" "192.168.1.1" "169.254.1.1"
+        "localhost" "LOCALHOST" "localhost."
+        "10.0.0.1.nip.io"             # DNS alias embedding a private range
+    )
+    local h
+    for h in "${internal[@]}"; do
+        is_internal_ip "$h"
+        assert_true "is_internal_ip blocks encoded internal host: $h"
+    done
+
+    # Public addresses and names must still be allowed
+    local external=("8.8.8.8" "1.1.1.1" "203.0.113.10" "172.32.0.1" "0xffffffff" "example.com" "2001:db8::1")
+    for h in "${external[@]}"; do
+        is_internal_ip "$h"
+        assert_false "is_internal_ip allows external host: $h"
+    done
+
+    # Normalizers (shared by the SSRF guard and the SSL check)
+    assert_eq "$(normalize_host 'https://[::1]:8443/path')" "::1" \
+        "normalize_host strips brackets/port from a bracketed IPv6 URL"
+    assert_eq "$(normalize_host 'http://user@Example.COM:80/x')" "example.com" \
+        "normalize_host strips userinfo and lowercases"
+    assert_eq "$(normalize_port 'https://host:8443/x' 443)" "8443" \
+        "normalize_port extracts an explicit port"
+    assert_eq "$(normalize_port 'https://host/x' 443)" "443" \
+        "normalize_port falls back to the default"
+    assert_eq "$(normalize_port 'https://[::1]:993/x' 443)" "993" \
+        "normalize_port handles a bracketed IPv6 port"
+
+    # check_sites must route both extractions through the shared normalizers
+    grep -q 'host_for_validation=$(normalize_host "$url")' "${SCRIPT_DIR}/telemon.sh"
+    assert_true "check_sites SSRF host extraction uses normalize_host (GH #14)"
+    grep -q 'host_for_ssl=$(normalize_host "$url")' "${SCRIPT_DIR}/telemon.sh"
+    assert_true "check_sites SSL host extraction uses normalize_host (GH #14)"
+}
+
+# ---------------------------------------------------------------------------
 # Test get_state_file_variants helper
 # ---------------------------------------------------------------------------
 
@@ -5339,6 +5397,7 @@ main() {
     test_is_safe_path
     test_is_valid_email
     test_is_internal_ip
+    test_regression_internal_ip_encodings
     test_log
     test_rotate_logs
     test_check_state_change
