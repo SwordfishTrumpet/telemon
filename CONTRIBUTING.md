@@ -122,6 +122,28 @@ Run shellcheck on all scripts:
 shellcheck telemon.sh install.sh uninstall.sh update.sh telemon-admin.sh
 ```
 
+### GitHub Actions pinning
+
+CI must be reproducible: the same commit has to produce the same result without
+any repository change.
+
+- GitHub-maintained actions (`actions/*`) may use a major version tag, e.g.
+  `actions/checkout@v5`.
+- Every other action must be pinned to a full commit SHA with the version in a
+trailing comment — never a branch ref such as `@master`:
+  ```yaml
+  uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38  # v2.0.0
+  ```
+- Tools an action downloads at runtime must be pinned too: the ShellCheck gate
+  sets the action's `version: v0.11.0` input instead of relying on its `stable`
+  default.
+- Bump pins deliberately in a dedicated commit/PR (Dependabot updates for the
+  `github-actions` ecosystem are welcome).
+
+The ShellCheck gate historically tracked `@master` and installed whatever
+ShellCheck release was newest, so a new linter release could fail CI (or hide
+new findings) without a change to this repository.
+
 ### Manual Testing
 
 1. Create a test `.env`:
