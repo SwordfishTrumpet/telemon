@@ -354,6 +354,35 @@ step_4_copy_local_files() {
     log_success "Local files copied to ${INSTALL_DIR}"
 }
 
+# ---------------------------------------------------------------------------
+# Preserve an existing .env, applying only the values the caller supplied (GH #23)
+# ---------------------------------------------------------------------------
+configure_existing_env() {
+    local env_file="$1"
+    local updated=0
+
+    if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+        set_env_value "$env_file" "TELEGRAM_BOT_TOKEN" "$TELEGRAM_BOT_TOKEN"
+        updated=1
+    fi
+    if [[ -n "${TELEGRAM_CHAT_ID:-}" ]]; then
+        set_env_value "$env_file" "TELEGRAM_CHAT_ID" "$TELEGRAM_CHAT_ID"
+        updated=1
+    fi
+    if [[ -n "${SERVER_LABEL:-}" ]]; then
+        set_env_value "$env_file" "SERVER_LABEL" "$SERVER_LABEL"
+        updated=1
+    fi
+
+    chmod 600 "$env_file" 2>/dev/null || true
+
+    if [[ "$updated" -eq 1 ]]; then
+        log_success "Existing configuration updated (only the values supplied were changed)"
+    else
+        log_info "Existing configuration kept unchanged"
+    fi
+}
+
 step_5_configure_env() {
     echo ""
     log_info "Step 4/8: Configuration setup..."
@@ -371,26 +400,52 @@ step_5_configure_env() {
         echo "OK"
     fi
     
-    # Check if .env already exists
+    # GH #23: an existing .env is NEVER replaced. Previously the --yes/--silent
+    # branch logged "merging with new values" and then called the interactive
+    # function, which ran `cp .env.example .env` over the user's configuration.
+    # update.sh re-runs `install.sh --yes` after every pull, so a routine update
+    # silently destroyed the configuration it documents as preserved.
     if [[ -f "$env_file" ]]; then
         if [[ "$SILENT_MODE" == "true" ]] || [[ "$YES_MODE" == "true" ]]; then
-            log_info ".env already exists, merging with new values..."
-        else
-            log_warn ".env already exists at ${env_file}"
-            read -rp "  Keep existing configuration? [Y/n] " answer
-            answer="${answer:-Y}"
-            if [[ "$answer" =~ ^[Yy]$ ]]; then
-                log_success "Using existing configuration"
-                return 0
-            fi
+            configure_existing_env "$env_file"
+            return 0
         fi
+        if [[ ! -t 0 ]]; then
+            log_warn "Existing .env kept — no terminal available to reconfigure it"
+            return 0
+        fi
+        log_warn ".env already exists at ${env_file}"
+        read -rp "  Keep existing configuration? [Y/n] " answer
+        answer="${answer:-Y}"
+        if [[ "$answer" =~ ^[Yy]$ ]]; then
+            log_success "Using existing configuration"
+            return 0
+        fi
+        # The user explicitly asked to reconfigure an existing file — edit it
+        # in place (the function only copies the example when none exists)
+        step_5_configure_env_interactive "$env_file" "$env_example"
+        return 0
     fi
     
-    # Silent mode configuration
+    # No .env yet: --silent needs credentials from the environment, a terminal
+    # gets prompted, and a non-interactive caller (curl | bash, CI) gets the
+    # documented template instead of a prompt loop that cannot be answered.
     if [[ "$SILENT_MODE" == "true" ]]; then
         step_5_configure_env_silent "$env_file" "$env_example"
-    else
+    elif [[ -t 0 ]]; then
         step_5_configure_env_interactive "$env_file" "$env_example"
+    else
+        cp "$env_example" "$env_file"
+        chmod 600 "$env_file" 2>/dev/null || true
+        log_warn "No terminal available — created ${env_file} from .env.example"
+        if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
+            set_env_value "$env_file" "TELEGRAM_BOT_TOKEN" "$TELEGRAM_BOT_TOKEN"
+            set_env_value "$env_file" "TELEGRAM_CHAT_ID" "$TELEGRAM_CHAT_ID"
+            log_success "Applied TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID from the environment"
+        else
+            log_warn "Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in ${env_file} to enable alerts"
+            log_warn "(or re-run with --silent and those variables set)"
+        fi
     fi
 }
 
@@ -465,6 +520,16 @@ step_5_configure_env_interactive() {
     local env_file="$1"
     local env_example="$2"
     
+    # GH #23: prompt loops must never run without a terminal. With stdin at EOF
+    # `read` returns immediately, the `while [[ -z ... ]]` conditions stay true
+    # and the installer spins forever (observed: 382,546 log lines in 5 s and a
+    # timeout kill). Fail fast with something actionable instead.
+    if [[ ! -t 0 ]]; then
+        log_error "Interactive configuration needs a terminal (stdin is not a TTY)."
+        log_error "Use --silent with TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID set, or edit ${env_file} manually."
+        exit 1
+    fi
+
     echo ""
     echo "=============================================="
     echo "  Telegram Bot Configuration (REQUIRED)"
@@ -530,8 +595,11 @@ step_5_configure_env_interactive() {
         read -rp "  URLs to monitor (space-separated): " site_urls
     fi
     
-    # Create .env file
-    cp "$env_example" "$env_file"
+    # Create .env from the example only when it does not exist; an existing
+    # file is updated in place so keys we did not ask about survive (GH #23)
+    if [[ ! -f "$env_file" ]]; then
+        cp "$env_example" "$env_file"
+    fi
     
     # Update configuration values using safe writer
     set_env_value "$env_file" "TELEGRAM_BOT_TOKEN" "$bot_token"
