@@ -12,12 +12,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v5
-    
+
+    # Third-party actions are pinned to a commit SHA (see CONTRIBUTING.md
+    # "GitHub Actions pinning"). Tracking @master made this gate change without
+    # any repository change: it started failing when ShellCheck 0.11 was
+    # auto-installed by the action's default 'stable' version.
     - name: Run ShellCheck
-      uses: ludeeus/action-shellcheck@master
+      uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38  # v2.0.0
       with:
         severity: warning
         check_together: 'yes'
+        # Pin the ShellCheck release as well — 'stable' silently upgrades the
+        # linter (and its findings) between runs.
+        version: v0.11.0
       env:
         SHELLCHECK_OPTS: -e SC1090 -e SC1091
 
