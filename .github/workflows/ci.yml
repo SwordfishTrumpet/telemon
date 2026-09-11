@@ -90,7 +90,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v5
-    
+
     # This gate is enforced: .markdownlint-cli2.jsonc disables only the rules
     # that conflict with the intentional dense-docs style, and the docs are
     # lint-clean. It previously ran with `continue-on-error: true`, so a failing
@@ -100,3 +100,48 @@ jobs:
       with:
         globs: '**/*.md'
         config: '.markdownlint-cli2.jsonc'
+
+  artifact-check:
+    name: Release Artifact Check
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+
+    # The release workflow publishes the archive built by this script. Packaging
+    # used to be an inline `cp` list that omitted lib/common.sh, so every
+    # published archive was non-runnable (GH #21). Build it on every push/PR and
+    # prove the result is complete and can actually start.
+    - name: Build release archive
+      run: bash scripts/build-release-archive.sh v0.0.0-ci /tmp/artifact
+
+    - name: Verify archive contents
+      run: |
+        set -euo pipefail
+        ls -l /tmp/artifact
+        test -f /tmp/artifact/telemon-v0.0.0-ci.tar.gz
+        test -f /tmp/artifact/telemon-v0.0.0-ci.zip
+        # List once, then grep the list: `tar tzf … | grep -q` returns 141
+        # under `set -o pipefail` (grep exits early, tar gets SIGPIPE)
+        tar tzf /tmp/artifact/telemon-v0.0.0-ci.tar.gz > /tmp/archive.list
+        for f in telemon.sh telemon-admin.sh lib/common.sh VERSION \
+                 checks.d/example-plugin.sh systemd/telemon.timer; do
+          grep -qx "telemon-v0.0.0-ci/${f}" /tmp/archive.list \
+            || { echo "MISSING from archive: ${f}"; exit 1; }
+        done
+        echo "All required files present in the archive"
+
+    - name: Smoke-test the extracted archive
+      run: |
+        set -euo pipefail
+        mkdir -p /tmp/extract
+        tar xzf /tmp/artifact/telemon-v0.0.0-ci.tar.gz -C /tmp/extract
+        cd /tmp/extract/telemon-v0.0.0-ci
+        cp .env.example .env
+        # Exercises the lib/common.sh load path (the file whose absence broke
+        # every published archive) plus the CLI entry point
+        bash telemon.sh --help > /dev/null
+        # A full validation pass must actually run, not die at startup
+        bash telemon.sh --validate > /tmp/validate.out 2>&1 || true
+        grep -q "Checks enabled" /tmp/validate.out
+        ! grep -q "FATAL: lib/common.sh" /tmp/validate.out
+        echo "Extracted archive starts and validates"

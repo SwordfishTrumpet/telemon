@@ -13,23 +13,14 @@ jobs:
       contents: write
     steps:
     - uses: actions/checkout@v5
-    
-    - name: Get version from tag
-      id: get_version
-      run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-    
-    - name: Create Release Archive
-      run: |
-        mkdir -p telemon-${{ steps.get_version.outputs.VERSION }}
-        cp -r telemon.sh install.sh uninstall.sh update.sh telemon-admin.sh \
-              .env.example telemon-logrotate.conf README.md LICENSE \
-              CHANGELOG.md CONTRIBUTING.md docs/ \
-              telemon-${{ steps.get_version.outputs.VERSION }}/ 2>/dev/null || true
-        tar -czf telemon-${{ steps.get_version.outputs.VERSION }}.tar.gz \
-            telemon-${{ steps.get_version.outputs.VERSION }}
-        zip -r telemon-${{ steps.get_version.outputs.VERSION }}.zip \
-            telemon-${{ steps.get_version.outputs.VERSION }}
-    
+
+    # Packaging lives in scripts/build-release-archive.sh — single source of
+    # truth, also built and smoke-tested by the CI "Release Artifact Check"
+    # job. (An inline `cp` list used to omit lib/common.sh, so every published
+    # archive was non-runnable; GH #21.)
+    - name: Build release archive
+      run: bash scripts/build-release-archive.sh "${GITHUB_REF#refs/tags/}"
+
     - name: Create Release
       uses: softprops/action-gh-release@v3
       with:
