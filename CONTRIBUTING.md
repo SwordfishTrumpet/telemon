@@ -194,6 +194,8 @@ When adding new features, test:
 - [ ] Syntax check passes (`bash -n`)
 - [ ] Documentation updated
 - [ ] CHANGELOG.md updated
+- [ ] New configuration variables documented in `.env.example`
+      (enforced by `test_regression_env_example_completeness`)
 - [ ] Commit messages are clear
 
 ## Releases
