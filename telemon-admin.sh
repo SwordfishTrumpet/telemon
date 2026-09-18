@@ -1218,9 +1218,10 @@ detect_infrastructure() {
                 ct_ids=$(pct list 2>/dev/null | awk 'NR>1 {print "ct:"$1}' | tr '\n' ' ')
                 infra_suggestions+=" $ct_ids\""
                 infra_suggestions+=$'\n'
-                infra_suggestions+="# Leave empty to auto-discover all guests, or customize:"
-                infra_suggestions+=$'\n'
-                infra_suggestions+="# CRITICAL_PROXMOX_GUESTS=\"vm:100 ct:101 vm:201\""
+                # No example CRITICAL_PROXMOX_GUESTS line here: the guest list
+                # above is the one to edit, and repeating the key printed it
+                # twice with two different values (GH #38)
+                infra_suggestions+="# Leave empty to auto-discover all guests, or edit the list above"
                 infra_suggestions+=$'\n\n'
             fi
         fi
@@ -1368,16 +1369,11 @@ detect_applications() {
         app_info+=$'\n\n'
         app_suggestions+="# Security monitoring"
         app_suggestions+=$'\n'
-        app_suggestions+="# Consider monitoring fail2ban log: /var/log/fail2ban.log"
+        app_suggestions+="# Fail2ban logging is collected below: the generic"
         app_suggestions+=$'\n'
-        # No '# ENABLE_LOG_CHECK=true' here: the generic "Log pattern monitoring"
-        # block already recommends it, and suggesting it twice was the only
-        # duplicated recommendation in the Suggested Configuration block
-        # (GH #28). The variables must be the real ones (LOG_WATCH_*), not
-        # LOG_PATTERNS which nothing reads.
-        app_suggestions+="# LOG_WATCH_FILES=\"/var/log/fail2ban.log\""
+        app_suggestions+="# LOG_WATCH_* recommendation adds /var/log/fail2ban.log and BAN to"
         app_suggestions+=$'\n'
-        app_suggestions+="# LOG_WATCH_PATTERNS=\"BAN|ERROR|WARNING\""
+        app_suggestions+="# its patterns, so the same key is never emitted twice (GH #38)."
         app_suggestions+=$'\n\n'
     fi
     
@@ -1755,6 +1751,7 @@ except Exception:
     # LOG FILE DISCOVERY (Generic)
     # ============================================
     local log_files=""
+    local log_patterns="ERROR|CRITICAL|FATAL|EXCEPTION|WARNING|FAIL"
     local common_logs="/var/log/syslog /var/log/messages /var/log/auth.log /var/log/secure /var/log/kern.log /var/log/daemon.log"
     
     for log in $common_logs; do
@@ -1763,13 +1760,25 @@ except Exception:
         fi
     done
     
+    # Fail2ban bans are worth watching, so its log and the BAN pattern are
+    # folded into this recommendation rather than emitting LOG_WATCH_* a second
+    # time from the fail2ban block (GH #38): one key, one value, one place.
+    local has_fail2ban=false
+    if _systemd_is_active fail2ban; then
+        has_fail2ban=true
+        log_patterns+="|BAN"
+        if [[ -f /var/log/fail2ban.log && -r /var/log/fail2ban.log ]]; then
+            log_files+="/var/log/fail2ban.log "
+        fi
+    fi
+
     # Check for journald (systemd systems)
     local has_journald=false
     if [[ -d /var/log/journal ]] || _cmd_exists journalctl; then
         has_journald=true
     fi
     
-    if [[ -n "$log_files" ]] || [[ "$has_journald" == "true" ]]; then
+    if [[ -n "$log_files" ]] || [[ "$has_journald" == "true" ]] || [[ "$has_fail2ban" == "true" ]]; then
         echo -e "${BLUE}=== Log Files ===${NC}"
         echo ""
         
@@ -1796,7 +1805,7 @@ except Exception:
             suggestions+="# LOG_WATCH_FILES=\"${log_files% }\""
             suggestions+=$'\n'
         fi
-        suggestions+="# LOG_WATCH_PATTERNS=\"ERROR|CRITICAL|FATAL|EXCEPTION|WARNING|FAIL\""
+        suggestions+="# LOG_WATCH_PATTERNS=\"${log_patterns}\""
         suggestions+=$'\n'
         suggestions+="# LOG_WATCH_LINES=500"
         suggestions+=$'\n'
