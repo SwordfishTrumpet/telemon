@@ -4935,6 +4935,72 @@ test_regression_maintenance_window_portable() {
     rm -f "$fn_file"
 }
 
+test_regression_maintenance_window_overnight() {
+    echo ""
+    echo "Testing is_in_maintenance_window across midnight (GH #37)..."
+
+    local fn_file
+    fn_file=$(mktemp)
+    awk '/^is_in_maintenance_window\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+
+    # Mocked clock, moved with set_clock <weekday> <HH> <MM>
+    local MOCK_DAY='' MOCK_H='' MOCK_M=''
+    set_clock() { MOCK_DAY="$1"; MOCK_H="$2"; MOCK_M="$3"; }
+    date() {
+        case "$1" in
+            '+%a') echo "$MOCK_DAY" ;;
+            '+%H') echo "$MOCK_H" ;;
+            '+%M') echo "$MOCK_M" ;;
+            *) command date "$@" ;;
+        esac
+    }
+    log() { :; }
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+
+    set_clock Sat 23 30
+
+    MAINT_SCHEDULE="Sat 23:00-01:00"
+    is_in_maintenance_window
+    assert_true "maintenance: 23:30 is inside the overnight window Sat 23:00-01:00"
+
+    set_clock Sat 22 00
+    ! is_in_maintenance_window
+    assert_true "maintenance: 22:00 is outside Sat 23:00-01:00 (same-window negative)"
+
+    # The morning half belongs to the following day: the window is open on
+    # Sunday until its end time, and never earlier on its own Saturday
+    set_clock Sun 00 30
+    is_in_maintenance_window
+    assert_true "maintenance: 00:30 on the next day is inside Sat 23:00-01:00"
+
+    set_clock Sun 01 30
+    ! is_in_maintenance_window
+    assert_true "maintenance: 01:30 on the next day is past the end of Sat 23:00-01:00"
+
+    set_clock Sat 00 30
+    ! is_in_maintenance_window
+    assert_true "maintenance: 00:30 earlier on the start day is not inside the window"
+
+    set_clock Sat 23 30
+    MAINT_SCHEDULE="Sat 22:00-23:45"
+    is_in_maintenance_window
+    assert_true "maintenance: same-day window Sat 22:00-23:45 still matches at 23:30"
+
+    MAINT_SCHEDULE="Sat 23:45-01:00"
+    ! is_in_maintenance_window
+    assert_true "maintenance: 23:30 is before an overnight window starting at 23:45"
+
+    # An entry whose start and end are identical is never applied (validate warns)
+    MAINT_SCHEDULE="Sat 02:00-02:00"
+    ! is_in_maintenance_window
+    assert_true "maintenance: identical start and end is not applied"
+
+    unset -f date set_clock
+    rm -f "$fn_file"
+}
+
 test_regression_sites_max_time_cap() {
     echo ""
     echo "Testing check_sites --max-time cap (TODO #13)..."
@@ -6458,6 +6524,7 @@ main() {
     test_regression_drift_deletion
     test_regression_save_state_sidecars
     test_regression_maintenance_window_portable
+    test_regression_maintenance_window_overnight
     test_regression_sites_max_time_cap
     test_regression_dead_code_removed
     test_regression_alert_queue_retry
