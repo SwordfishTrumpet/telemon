@@ -3236,6 +3236,60 @@ test_discovery_system() {
     assert_true "Discovery: systemd timers note in suggestions"
 }
 
+test_regression_actions_pinned() {
+    echo ""
+    echo "Testing third-party action pinning policy (GH #30)..."
+
+    local script="${SCRIPT_DIR}/scripts/check-actions-pinned.sh"
+    local fixture out rc
+
+    [[ -x "$script" ]]
+    assert_true "actions-pinned: checker exists and is executable"
+
+    # The repository's own workflows must satisfy the policy
+    out=$(bash "$script" 2>&1)
+    assert_true "actions-pinned: repository workflows are pinned (${out##*: })"
+
+    fixture=$(mktemp -d)
+
+    # A mutable tag must fail
+    cat > "${fixture}/unpinned.yml" <<'YAML'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+    - uses: some/action@v1.2.3
+YAML
+    rc=0
+    bash "$script" "$fixture" > /dev/null 2>&1 || rc=$?
+    assert_eq "1" "$rc" "actions-pinned: mutable tag rejected"
+
+    # A full commit SHA must pass, and the allowed forms must not trip it
+    cat > "${fixture}/pinned.yml" <<'YAML'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+    - uses: some/action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff  # v1.2.3
+      with:
+        ref: v1.2.3
+    - uses: ./local-action
+    - uses: docker://alpine:3.21
+YAML
+    rm -f "${fixture}/unpinned.yml"
+    out=$(bash "$script" "$fixture" 2>&1)
+    assert_true "actions-pinned: full SHA, major GitHub tag, local and docker refs accepted"
+
+    # A missing directory is an error, not a pass
+    rc=0
+    bash "$script" "${fixture}/does-not-exist" > /dev/null 2>&1 || rc=$?
+    assert_eq "2" "$rc" "actions-pinned: missing workflows directory reports an error"
+
+    rm -rf "$fixture"
+}
+
 test_regression_thermal_zone_plausibility() {
     echo ""
     echo "Testing thermal zone plausibility filter (GH #29)..."
@@ -6123,6 +6177,7 @@ main() {
     test_discovery_system
     test_regression_discover_suggestions
     test_regression_thermal_zone_plausibility
+    test_regression_actions_pinned
     test_lock_mechanism
     test_first_run_fingerprint
     test_bug_fixes_2026_04_25

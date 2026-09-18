@@ -141,6 +141,10 @@ trailing comment — never a branch ref such as `@master`:
 - Bump pins deliberately in a dedicated commit/PR (Dependabot updates for the
   `github-actions` ecosystem are welcome).
 
+CI enforces this: `scripts/check-actions-pinned.sh` (run by the **Actions
+Pinning** job) fails on any `uses:` that is not `actions/*`, a local `./`
+reference or a `docker://` image unless it carries a 40-character commit SHA.
+
 The ShellCheck gate historically tracked `@master` and installed whatever
 ShellCheck release was newest, so a new linter release could fail CI (or hide
 new findings) without a change to this repository.
