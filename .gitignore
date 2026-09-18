@@ -27,5 +27,9 @@ checks.d/timemachine-ct101.sh
 AGENTS.md
 TODO.md
 
+# --- pipeline run state (local memory, never tracked) ---
+LEDGER.tsv
+.pipeline-discover.lock
+
 # --- weave agent ---
 .weave/
