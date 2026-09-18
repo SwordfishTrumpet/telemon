@@ -65,10 +65,13 @@ jobs:
         sed -i 's/your-bot-token-here/test-token/' .env
         sed -i 's/your-chat-id-here/123456789/' .env
     
+    # This gate is enforced: the step previously carried `continue-on-error:
+    # true`, so a failing validation still reported a green job (GH #39). The
+    # .env created above already satisfies the mandatory keys, so a failure here
+    # means validation itself broke.
     - name: Validate configuration
       run: |
         bash telemon-admin.sh validate
-      continue-on-error: true
     
     - name: Run test suite
       run: |
