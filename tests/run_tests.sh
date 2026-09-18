@@ -5424,6 +5424,79 @@ PLUGIN
 }
 
 # ---------------------------------------------------------------------------
+# GH #36 — a failed Telegram delivery must not abort the rest of the run: the
+# RETURN trap used to clean up the temp file stayed armed on the failure path
+# and re-fired when the caller returned, where the local was gone.
+# ---------------------------------------------------------------------------
+test_regression_telegram_failure_no_abort() {
+    echo ""
+    echo "Testing failed Telegram delivery does not abort the run (GH #36)..."
+
+    local fn_file fn_file_fallback repro out log_out queue_out rc
+    fn_file=$(mktemp)
+    fn_file_fallback=$(mktemp)
+    repro=$(mktemp)
+    log_out=$(mktemp)
+    queue_out=$(mktemp)
+
+    awk '/^send_telegram\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+    awk '/^dispatch_with_retry\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" >> "$fn_file"
+
+    # The temp-file branch of send_telegram (used when /dev/fd is unavailable)
+    # had the same defect; run that branch too by pointing the existence probe
+    # at a path that cannot exist.
+    sed 's#/dev/fd/0#/nonexistent-dev-fd-GH36#' "$fn_file" > "$fn_file_fallback"
+
+    # Runs under `set -euo pipefail` exactly like the production script, from an
+    # enclosing function that keeps going after dispatch_with_retry (in
+    # production: the Prometheus/JSON exports and the escalation check).
+    cat > "$repro" <<'REPRO'
+set -euo pipefail
+source "$FN_FILE"
+
+# The alert channel itself is down (DNS/API outage)
+curl() { echo "curl: (6) Could not resolve host: api.telegram.org" >&2; return 6; }
+log() { echo "$*" >> "$LOG_OUT"; }
+audit_log() { :; }
+send_webhook() { return 1; }
+send_email() { return 1; }
+retry_alert_queue() { :; }
+safe_write_state_file() { echo "$2" >> "$QUEUE_OUT"; }
+
+TELEGRAM_BOT_TOKEN=test-token
+TELEGRAM_CHAT_ID=12345
+MAX_ALERT_QUEUE_SIZE=1048576
+MAX_ALERT_QUEUE_AGE=86400
+ALERT_QUEUE_FILE=$(mktemp)
+
+enclosing() { dispatch_with_retry "test alert"; }
+enclosing
+echo "RUN-COMPLETED"
+REPRO
+
+    out=$(FN_FILE="$fn_file" LOG_OUT="$log_out" QUEUE_OUT="$queue_out" bash "$repro" 2>&1)
+    rc=$?
+    assert_eq "0" "$rc" "telegram failure: the run still exits 0"
+    assert_contains "$out" "RUN-COMPLETED" "telegram failure: the rest of the run is not aborted"
+    assert_contains "$(cat "$log_out")" "Telegram send failed" "telegram failure: the delivery failure is still logged"
+    assert_contains "$(cat "$queue_out")" "test alert" "telegram failure: the alert is still queued for retry"
+    [[ "$out" != *"unbound variable"* ]]
+    assert_true "telegram failure: no unbound-variable error from the stale RETURN trap"
+
+    # Temp-file branch (no /dev/fd): same guarantees
+    : > "$log_out"
+    : > "$queue_out"
+    out=$(FN_FILE="$fn_file_fallback" LOG_OUT="$log_out" QUEUE_OUT="$queue_out" bash "$repro" 2>&1)
+    rc=$?
+    assert_eq "0" "$rc" "telegram failure (temp-file branch): the run still exits 0"
+    assert_contains "$out" "RUN-COMPLETED" "telegram failure (temp-file branch): the run is not aborted"
+    [[ "$out" != *"unbound variable"* ]]
+    assert_true "telegram failure (temp-file branch): no unbound-variable error"
+
+    rm -f "$fn_file" "$fn_file_fallback" "$repro" "$log_out" "$queue_out"
+}
+
+# ---------------------------------------------------------------------------
 # GH #18 — update.sh must refuse a dirty working tree instead of silently
 # stashing (and never restoring) the operator's local modifications.
 # ---------------------------------------------------------------------------
@@ -6300,6 +6373,7 @@ main() {
     test_regression_plugin_multiline_output
     test_regression_plugin_failure_health
     test_regression_plugin_stderr_captured
+    test_regression_telegram_failure_no_abort
     test_regression_update_dirty_tree
     test_regression_install_env_preserved
     test_regression_uninstall_completeness
