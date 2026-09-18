@@ -4461,8 +4461,10 @@ check_proxmox_cluster() {
 # Proxmox Task Monitor
 # Checks for failed tasks in the recent task log via pvesh.
 # PROXMOX_TASK_MINUTES: how far back to check (default: 60 minutes)
-# PROXMOX_TASK_WARN: warning threshold for failed tasks (default: 0)
+# PROXMOX_TASK_WARN: warning threshold for failed tasks (default: 0 = warnings off)
 # PROXMOX_TASK_CRIT: critical threshold for failed tasks (default: 1)
+# A warn threshold of 0 (or less) disables the WARNING level: the healthy count
+# is 0 failed tasks, so `0 -ge 0` used to warn on every clean host (GH #27).
 # ===========================================================================
 check_proxmox_tasks() {
     if ! command -v pvesh &>/dev/null; then
@@ -4499,7 +4501,7 @@ print(count)
 
     if [[ "$failed_tasks" -ge "$task_crit" ]]; then
         check_state_change "proxmox_tasks" "CRITICAL" "<b>${failed_tasks}</b> failed task(s) in task log"
-    elif [[ "$failed_tasks" -ge "$task_warn" ]]; then
+    elif [[ "$task_warn" -gt 0 && "$failed_tasks" -ge "$task_warn" ]]; then
         check_state_change "proxmox_tasks" "WARNING" "<b>${failed_tasks}</b> failed task(s) in task log"
     else
         check_state_change "proxmox_tasks" "OK" "No failed tasks detected"
