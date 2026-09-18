@@ -5337,6 +5337,93 @@ PLUGIN
 }
 
 # ---------------------------------------------------------------------------
+# GH #32 — a crashing plugin's own error text must reach the log, bounded and
+# sanitized so untrusted stderr cannot forge log lines, while plugin_health
+# keeps listing plugin names only.
+# ---------------------------------------------------------------------------
+test_regression_plugin_stderr_captured() {
+    echo ""
+    echo "Testing plugin stderr capture (GH #32)..."
+
+    local fn_file plugdir logfile i
+    fn_file=$(mktemp)
+    logfile=$(mktemp)
+    plugdir=$(mktemp -d)
+
+    awk '/^sanitize_plugin_stderr\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" >> "$fn_file"
+    awk '/^check_plugins\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" >> "$fn_file"
+    awk '/^check_state_change\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" >> "$fn_file"
+
+    # run_with_timeout keeps its stderr-swallowing contract; the capture must
+    # work through it (that is exactly how production runs the plugin).
+    run_with_timeout() { shift; "$@" 2>/dev/null; }
+    log() { printf '%s\n' "$*" >> "$logfile"; }
+    audit_log() { :; }
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+
+    declare -A PREV_STATE=()
+    declare -A PREV_COUNT=()
+    declare -A ALERT_LAST_SENT=()
+    declare -A CURR_STATE=()
+    declare -A STATE_DETAIL=()
+    local ALERTS=""
+    local CONFIRMATION_COUNT=1
+    local ALERT_COOLDOWN_SEC=900
+
+    # Crash with: a real diagnostic, a control byte, and a long forged line
+    # whose text would look like a second log entry if it were not collapsed.
+    cat > "$plugdir/crashy" <<'PLUGIN'
+#!/usr/bin/env bash
+printf 'basename: command not found\n' >&2
+printf 'bad \001control byte\n' >&2
+{ printf 'FORGED '; printf '%600s' '' | tr ' ' 'y'; printf '\n'
+} >&2
+exit 1
+PLUGIN
+    chmod +x "$plugdir/crashy"
+
+    local warning
+    CHECKS_DIR="$plugdir" CHECK_TIMEOUT=30 check_plugins
+    warning=$(grep -F "Plugin crashy exited 1" "$logfile")
+
+    assert_eq "1" "$(grep -cF 'Plugin crashy exited 1' "$logfile")" \
+        "plugin stderr: exactly one warning line (untrusted stderr cannot forge log lines)"
+    assert_contains "$warning" "basename: command not found" "plugin stderr: the plugin's own error text is logged"
+    assert_eq "0" "$(LC_ALL=C grep -c '[[:cntrl:]]' "$logfile")" "plugin stderr: control characters are stripped"
+
+    local frag_len=${#warning}
+    [[ $frag_len -lt 420 ]]
+    assert_true "plugin stderr: log line is bounded (${frag_len} chars)"
+    [[ "$warning" == *"..."* ]]
+    assert_true "plugin stderr: an over-long fragment is marked as truncated"
+
+    # The health state keeps names only, never the captured stderr text.
+    # CONFIRMATION_COUNT=1 so the first transition alerts immediately.
+    assert_contains "$ALERTS" "plugin_health" "plugin stderr: failure still reported through plugin_health"
+    assert_contains "$ALERTS" "crashy" "plugin stderr: plugin_health names the plugin"
+    [[ "$ALERTS" != *"basename"* && "$ALERTS" != *"FORGED"* ]]
+    assert_true "plugin stderr: plugin_health detail carries no stderr text"
+
+    # A silent (exit 0, no output) plugin has nothing to capture: no spurious
+    # stderr fragment, and it is still reported as a distinct failure.
+    : > "$logfile"
+    cat > "$plugdir/crashy" <<'PLUGIN'
+#!/usr/bin/env bash
+exit 0
+PLUGIN
+    chmod +x "$plugdir/crashy"
+    CHECKS_DIR="$plugdir" CHECK_TIMEOUT=30 check_plugins
+    assert_eq "1" "$(grep -cF 'returned no output (exit 0)' "$logfile")" \
+        "plugin stderr: silent plugin is reported once, with no captured stderr"
+
+    unset -f run_with_timeout log audit_log check_plugins check_state_change
+    rm -f "$fn_file" "$logfile"
+    rm -rf "$plugdir"
+}
+
+# ---------------------------------------------------------------------------
 # GH #18 — update.sh must refuse a dirty working tree instead of silently
 # stashing (and never restoring) the operator's local modifications.
 # ---------------------------------------------------------------------------
@@ -6212,6 +6299,7 @@ main() {
     test_regression_smtp_password_raw
     test_regression_plugin_multiline_output
     test_regression_plugin_failure_health
+    test_regression_plugin_stderr_captured
     test_regression_update_dirty_tree
     test_regression_install_env_preserved
     test_regression_uninstall_completeness
