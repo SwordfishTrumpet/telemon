@@ -3236,6 +3236,90 @@ test_discovery_system() {
     assert_true "Discovery: systemd timers note in suggestions"
 }
 
+test_regression_thermal_zone_plausibility() {
+    echo ""
+    echo "Testing thermal zone plausibility filter (GH #29)..."
+
+    local fn_file fixture zone_dir
+    fn_file=$(mktemp)
+    fixture=$(mktemp -d)
+
+    awk '/^_detect_thermal_zone\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon-admin.sh" > "$fn_file"
+    # shellcheck disable=SC1090
+    source "$fn_file"
+
+    make_zone() {
+        local dir="$1" name="$2" type="$3" temp="$4"
+        mkdir -p "${dir}/${name}"
+        [[ -n "$type" ]] && printf '%s' "$type" > "${dir}/${name}/type"
+        [[ -n "$temp" ]] && printf '%s' "$temp" > "${dir}/${name}/temp"
+    }
+
+    # The real bug: zone 0 is an uninitialised ACPI zone (-263200) and the real
+    # package sensor lives in a later zone.
+    zone_dir="${fixture}/case-bogus-first"
+    make_zone "$zone_dir" thermal_zone0 acpitz -263200
+    make_zone "$zone_dir" thermal_zone1 x86_pkg_temp 69000
+    make_zone "$zone_dir" thermal_zone2 acpitz 70000
+    local reading
+    reading=$(_detect_thermal_zone "$zone_dir")
+    assert_eq "69 x86_pkg_temp" "$reading" "thermal: bogus first zone skipped, package sensor reported"
+
+    # A valid but colder ACPI zone must not win over the package sensor
+    zone_dir="${fixture}/case-acpi-first"
+    make_zone "$zone_dir" thermal_zone0 acpitz 40000
+    make_zone "$zone_dir" thermal_zone1 x86_pkg_temp 71000
+    reading=$(_detect_thermal_zone "$zone_dir")
+    assert_eq "71 x86_pkg_temp" "$reading" "thermal: CPU zone preferred over an earlier ACPI zone"
+
+    # Only an ACPI zone: still reported (labelled), it is the best available
+    zone_dir="${fixture}/case-only-acpi"
+    make_zone "$zone_dir" thermal_zone0 acpitz 45000
+    reading=$(_detect_thermal_zone "$zone_dir")
+    assert_eq "45 acpitz" "$reading" "thermal: plausible ACPI-only host still reports a labelled reading"
+
+    # Nothing plausible: no reading at all rather than a nonsense number
+    zone_dir="${fixture}/case-all-bogus"
+    make_zone "$zone_dir" thermal_zone0 acpitz -263200
+    make_zone "$zone_dir" thermal_zone1 x86_pkg_temp 250000
+    _detect_thermal_zone "$zone_dir" > /dev/null
+    assert_false "thermal: all-implausible zones produce no reading"
+
+    # Empty / missing / non-numeric files are skipped
+    zone_dir="${fixture}/case-messy"
+    make_zone "$zone_dir" thermal_zone0 acpitz ""
+    make_zone "$zone_dir" thermal_zone1 x86_pkg_temp "notanumber"
+    make_zone "$zone_dir" thermal_zone2 "" 69000
+    reading=$(_detect_thermal_zone "$zone_dir")
+    assert_eq "69 " "$reading" "thermal: empty/non-numeric readings skipped, untyped zone used as fallback"
+
+    # Boundary values of the plausible window
+    zone_dir="${fixture}/case-bounds"
+    make_zone "$zone_dir" thermal_zone0 x86_pkg_temp -20000
+    reading=$(_detect_thermal_zone "$zone_dir")
+    assert_eq "-20 x86_pkg_temp" "$reading" "thermal: -20C accepted (lower bound)"
+    zone_dir="${fixture}/case-bounds-hi"
+    make_zone "$zone_dir" thermal_zone0 x86_pkg_temp 151000
+    _detect_thermal_zone "$zone_dir" > /dev/null
+    assert_false "thermal: 151C rejected (upper bound)"
+
+    # End-to-end on this host: whatever the real command reports must be
+    # plausible (or absent), never below absolute zero
+    local discover_out temp_line temp_val
+    discover_out=$(cd "$SCRIPT_DIR" && bash telemon-admin.sh discover 2>/dev/null) || true
+    temp_line=$(grep -m1 "Current temp:" <<< "$discover_out" || true)
+    if [[ -n "$temp_line" ]]; then
+        temp_val=$(sed -E 's/.*Current temp: (-?[0-9]+).*/\1/' <<< "$temp_line")
+        [[ "$temp_val" -ge -20 && "$temp_val" -le 150 ]]
+        assert_true "thermal: discover reports a plausible temperature (${temp_line#  Current temp: })"
+    else
+        assert_true "thermal: discover prints no temperature when no zone is usable"
+    fi
+
+    unset -f _detect_thermal_zone make_zone
+    rm -rf "$fixture" "$fn_file"
+}
+
 test_regression_discover_suggestions() {
     echo ""
     echo "Testing discover separates info from suggestions (GH #28)..."
@@ -6038,6 +6122,7 @@ main() {
     test_auto_remediation
     test_discovery_system
     test_regression_discover_suggestions
+    test_regression_thermal_zone_plausibility
     test_lock_mechanism
     test_first_run_fingerprint
     test_bug_fixes_2026_04_25
