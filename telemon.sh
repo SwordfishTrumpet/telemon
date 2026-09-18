@@ -7044,7 +7044,13 @@ send_telegram() {
     if [[ -e /dev/fd/0 ]]; then
         # Process substitution: preferred (no temp file, auto-cleaned)
         curl_stderr=$(mktemp) || { log "ERROR" "send_telegram: failed to create temp file"; return 1; }
-        trap 'rm -f "$curl_stderr" 2>/dev/null' RETURN
+        # ${curl_stderr:-} guards a stray later firing of this RETURN trap: bash
+        # keeps a function-level RETURN trap active past the defining function,
+        # so an unguarded body would hit an unset local under set -u and turn
+        # one failed Telegram send into a non-zero return for the enclosing
+        # function, which set -e then turns into a truncated monitoring run
+        # (GH #36). send_email_native_smtp uses the same guard.
+        trap 'rm -f "${curl_stderr:-}" 2>/dev/null' RETURN
         response=$(curl -s --max-time 30 -X POST \
             --config <(printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TELEGRAM_BOT_TOKEN") \
             -d "chat_id=${TELEGRAM_CHAT_ID}" \
@@ -7056,6 +7062,7 @@ send_telegram() {
             err_msg=$(cat "$curl_stderr" 2>/dev/null || echo "unknown error")
             log "ERROR" "Telegram send failed: curl exit $curl_exit ($err_msg)"
             rm -f "$curl_stderr" 2>/dev/null
+            trap - RETURN
             return 1
         fi
         rm -f "$curl_stderr" 2>/dev/null
@@ -7066,8 +7073,11 @@ send_telegram() {
         tmp_config=$(mktemp) || { log "ERROR" "send_telegram: failed to create temp config"; return 1; }
         local curl_stderr
         curl_stderr=$(mktemp) || { log "ERROR" "send_telegram: failed to create temp file"; return 1; }
-        # Ensure cleanup on all exit paths
-        trap 'rm -f "$tmp_config" "$curl_stderr" 2>/dev/null' RETURN
+        # Ensure cleanup on all exit paths. The guards and the explicit
+        # `trap - RETURN` on the failure path below are GH #36: without them a
+        # failed send leaves the trap armed, it re-fires when the caller
+        # returns, and the unbound local aborts the run under set -u.
+        trap 'rm -f "${tmp_config:-}" "${curl_stderr:-}" 2>/dev/null' RETURN
         printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TELEGRAM_BOT_TOKEN" > "$tmp_config"
         chmod 600 "$tmp_config" 2>/dev/null || true
         response=$(curl -s --max-time 30 -X POST \
@@ -7081,6 +7091,7 @@ send_telegram() {
             err_msg=$(cat "$curl_stderr" 2>/dev/null || echo "unknown error")
             log "ERROR" "Telegram send failed: curl exit $curl_exit ($err_msg)"
             rm -f "$tmp_config" "$curl_stderr" 2>/dev/null
+            trap - RETURN
             return 1
         fi
         rm -f "$tmp_config" "$curl_stderr" 2>/dev/null
