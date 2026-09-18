@@ -740,6 +740,27 @@ _get_cpu_cores() {
     nproc 2>/dev/null || echo 1
 }
 
+# Separator emitted by every detect_* helper between its informational lines and
+# the .env suggestion lines. cmd_discover splits its output on this marker, so
+# suggestions are never printed inline and every helper's suggestions (hardware,
+# infrastructure, databases, applications) reach the Suggested Configuration
+# block exactly once (GH #28).
+TELEMON_SUGGESTIONS_MARKER="### TELEMON SUGGESTIONS ###"
+
+# Print one part of a detect_* helper's output.
+# $1 = raw helper output, $2 = info (before the marker) | suggestions (after it)
+split_detection_output() {
+    local raw="$1"
+    local part="$2"
+    local marker="$TELEMON_SUGGESTIONS_MARKER"
+
+    if [[ "$part" == "suggestions" ]]; then
+        awk -v m="$marker" 'found { print } $0 == m { found = 1 }' <<< "$raw"
+    else
+        awk -v m="$marker" '$0 == m { exit } { print }' <<< "$raw"
+    fi
+}
+
 # Helper: Generate smart thresholds based on system specs
 generate_smart_thresholds() {
     local total_mem_gb
@@ -1045,6 +1066,7 @@ detect_hardware() {
     fi
     
     echo -e "$hw_info"
+    echo "$TELEMON_SUGGESTIONS_MARKER"
     echo "$hw_suggestions"
 }
 
@@ -1260,6 +1282,7 @@ detect_infrastructure() {
     fi
     
     echo -e "$infra_info"
+    echo "$TELEMON_SUGGESTIONS_MARKER"
     echo "$infra_suggestions"
 }
 
@@ -1290,11 +1313,14 @@ detect_applications() {
         app_suggestions+=$'\n'
         app_suggestions+="# Consider monitoring fail2ban log: /var/log/fail2ban.log"
         app_suggestions+=$'\n'
-        app_suggestions+="# ENABLE_LOG_CHECK=true"
-        app_suggestions+=$'\n'
+        # No '# ENABLE_LOG_CHECK=true' here: the generic "Log pattern monitoring"
+        # block already recommends it, and suggesting it twice was the only
+        # duplicated recommendation in the Suggested Configuration block
+        # (GH #28). The variables must be the real ones (LOG_WATCH_*), not
+        # LOG_PATTERNS which nothing reads.
         app_suggestions+="# LOG_WATCH_FILES=\"/var/log/fail2ban.log\""
         app_suggestions+=$'\n'
-        app_suggestions+="# LOG_PATTERNS=\"BAN|ERROR|WARNING\""
+        app_suggestions+="# LOG_WATCH_PATTERNS=\"BAN|ERROR|WARNING\""
         app_suggestions+=$'\n\n'
     fi
     
@@ -1325,6 +1351,7 @@ detect_applications() {
     fi
     
     echo -e "$app_info"
+    echo "$TELEMON_SUGGESTIONS_MARKER"
     echo "$app_suggestions"
 }
 
@@ -1434,6 +1461,7 @@ detect_database_servers() {
     fi
     
     echo -e "$db_info"
+    echo "$TELEMON_SUGGESTIONS_MARKER"
     echo "$db_suggestions"
 }
 
@@ -1457,22 +1485,26 @@ cmd_discover() {
     # ============================================
     echo -e "${BLUE}=== Hardware ===${NC}"
     echo ""
-    local hw_output
+    local hw_output hw_info hw_suggestions
     hw_output=$(detect_hardware)
-    local hw_suggestions
-    hw_suggestions=$(echo "$hw_output" | grep -A 1000 "^ENABLE_\|^#" || true)
-    # Print only the info part (lines before suggestions)
-    echo -e "$(echo "$hw_output" | grep -B 1000 "^ENABLE_" | head -n -1 || echo "$hw_output")"
+    hw_info=$(split_detection_output "$hw_output" info)
+    hw_suggestions=$(split_detection_output "$hw_output" suggestions)
+    echo -e "$hw_info"
     suggestions+="$hw_suggestions"
+    suggestions+=$'\n\n'
     
     # ============================================
     # INFRASTRUCTURE SECTION
     # ============================================
     echo -e "${BLUE}=== Infrastructure ===${NC}"
     echo ""
-    local infra_output
+    local infra_output infra_info infra_suggestions
     infra_output=$(detect_infrastructure)
-    echo -e "$infra_output"
+    infra_info=$(split_detection_output "$infra_output" info)
+    infra_suggestions=$(split_detection_output "$infra_output" suggestions)
+    echo -e "$infra_info"
+    suggestions+="$infra_suggestions"
+    suggestions+=$'\n\n'
     
     # ============================================
     # CORE SERVICES SECTION
@@ -1545,13 +1577,13 @@ except Exception:
     # ============================================
     echo -e "${BLUE}=== Databases ===${NC}"
     echo ""
-    local db_output
+    local db_output db_info db_suggestions
     db_output=$(detect_database_servers)
-    local db_suggestions
-    db_suggestions=$(detect_database_servers | grep -A 1000 "^ENABLE_\|^#" | head -100 || true)
-    # Print info part only
-    echo -e "$(echo "$db_output" | grep -B 1000 "^DB_\|^ENABLE_" | grep -v "^DB_\|^ENABLE_" | head -n -1 || echo "$db_output")"
+    db_info=$(split_detection_output "$db_output" info)
+    db_suggestions=$(split_detection_output "$db_output" suggestions)
+    echo -e "$db_info"
     suggestions+="$db_suggestions"
+    suggestions+=$'\n\n'
     
     # ============================================
     # NETWORK & PORTS SECTION
@@ -1588,15 +1620,16 @@ except Exception:
     # ============================================
     # APPLICATION SERVICES SECTION
     # ============================================
-    local app_output
+    local app_output app_info app_suggestions
     app_output=$(detect_applications)
-    if [[ -n "$app_output" ]]; then
+    app_info=$(split_detection_output "$app_output" info)
+    if [[ -n "$app_info" ]]; then
         echo -e "${BLUE}=== Application Services ===${NC}"
         echo ""
-        echo -e "$app_output"
-        local app_suggestions
-        app_suggestions=$(detect_applications | grep -A 1000 "^ENABLE_\|^#" || true)
+        echo -e "$app_info"
+        app_suggestions=$(split_detection_output "$app_output" suggestions)
         suggestions+="$app_suggestions"
+        suggestions+=$'\n\n'
     fi
     
     # ============================================

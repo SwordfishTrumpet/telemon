@@ -3236,6 +3236,124 @@ test_discovery_system() {
     assert_true "Discovery: systemd timers note in suggestions"
 }
 
+test_regression_discover_suggestions() {
+    echo ""
+    echo "Testing discover separates info from suggestions (GH #28)..."
+
+    local fn_file capture
+    fn_file=$(mktemp)
+    capture=$(mktemp)
+
+    # REAL helpers: the marker splitter and the infrastructure probe that used
+    # to print its suggestions inline and never reach the config block.
+    {
+        awk '/^split_detection_output\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon-admin.sh"
+        awk '/^detect_infrastructure\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon-admin.sh"
+        awk '/^cmd_discover\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon-admin.sh"
+    } > "$fn_file"
+
+    TELEMON_SUGGESTIONS_MARKER=$(awk -F'"' '/^TELEMON_SUGGESTIONS_MARKER=/{print $2}' "${SCRIPT_DIR}/telemon-admin.sh")
+    # cmd_discover needs the admin script's colour globals; keep any the suite
+    # already defines (: "${VAR:=}" only fills in what is missing)
+    : "${GREEN:=}"; : "${RED:=}"; : "${YELLOW:=}"; : "${BLUE:=}"; : "${NC:=}"
+
+    # Mock a Proxmox host so the test is not host-dependent (CI has no pvesh)
+    _cmd_exists() {
+        case "$1" in pveversion|pvesm|pvesh|qm|pct) return 0 ;; *) return 1 ;; esac
+    }
+    _systemd_is_active() { return 1; }
+    docker() { return 1; }
+    kubectl() { return 1; }
+    virsh() { return 1; }
+    wg() { return 1; }
+    tailscale() { return 1; }
+    pveversion() { printf 'pve-manager/9.0.0/abcdef\n'; }
+    pvesm() { printf 'Name   Type   Status\nlocal  dir    active\nbigdisk dir  active\n'; }
+    pvesh() { printf '[]'; }
+    qm() { printf '      VMID NAME      STATUS\n       201 plex      running\n       204 ascii     running\n'; }
+    pct() { printf 'VMID       Status     Lock         Name\n100        running\n101        running\n'; }
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+
+    local raw info suggests
+    raw=$(detect_infrastructure)
+
+    # The marker is what makes the split possible; without it the caller has to
+    # guess from line prefixes (which is how the bug happened)
+    grep -qF "$TELEMON_SUGGESTIONS_MARKER" <<< "$raw"
+    assert_true "discover: detect_infrastructure emits the suggestions marker"
+
+    info=$(split_detection_output "$raw" info)
+    suggests=$(split_detection_output "$raw" suggestions)
+
+    grep -q "Proxmox VE detected" <<< "$info"
+    assert_true "discover: infrastructure info keeps the informational lines"
+
+    grep -q "ENABLE_PROXMOX" <<< "$info"
+    assert_false "discover: infrastructure info no longer leaks suggestions inline"
+
+    grep -q "ENABLE_PROXMOX_GUESTS=true" <<< "$suggests"
+    assert_true "discover: Proxmox guest suggestion reaches the block"
+    grep -q "ENABLE_PROXMOX_STORAGE=true" <<< "$suggests"
+    assert_true "discover: Proxmox storage suggestion reaches the block"
+    grep -q "ENABLE_PROXMOX_TASKS=true" <<< "$suggests"
+    assert_true "discover: Proxmox task suggestion reaches the block"
+
+    # End-to-end: cmd_discover must place the infrastructure suggestions in the
+    # Suggested Configuration block (the bug: they were echoed inline and
+    # cmd_discover never collected them). Other detectors are stubbed so this is
+    # host-independent, and the real command output is checked afterwards.
+    detect_hardware() { printf 'INFO-HW\n%s\nENABLE_HW=true\n' "$TELEMON_SUGGESTIONS_MARKER"; }
+    detect_database_servers() { printf 'INFO-DB\n%s\nENABLE_DB=true\n' "$TELEMON_SUGGESTIONS_MARKER"; }
+    detect_applications() { printf 'INFO-APP\n%s\nENABLE_APP=true\n' "$TELEMON_SUGGESTIONS_MARKER"; }
+    generate_smart_thresholds() { printf '# smart thresholds\nMEM_THRESHOLD_WARN=10\n'; }
+
+    local mocked block
+    mocked=$(cmd_discover)
+    block=$(awk '/^Suggested Configuration/,0' <<< "$mocked")
+
+    grep -q "ENABLE_PROXMOX_GUESTS=true" <<< "$block"
+    assert_true "discover: Proxmox guest suggestion is inside the config block"
+    grep -q "ENABLE_PROXMOX_STORAGE=true" <<< "$block"
+    assert_true "discover: Proxmox storage suggestion is inside the config block"
+    grep -q "ENABLE_PROXMOX_TASKS=true" <<< "$block"
+    assert_true "discover: Proxmox task suggestion is inside the config block"
+    grep -q "ENABLE_HW=true" <<< "$block"
+    assert_true "discover: hardware suggestion collected (not only printed inline)"
+
+    awk '/^Suggested Configuration/{exit} {print}' <<< "$mocked" | grep -q "ENABLE_"
+    assert_false "discover: no suggestion line printed outside the block (mocked run)"
+
+    # End-to-end: the real command's rendered output
+    local out
+    out=$(cd "$SCRIPT_DIR" && bash telemon-admin.sh discover 2>/dev/null) || true
+    printf '%s' "$out" > "$capture"
+
+    [[ -n "$out" ]]
+    assert_true "discover: command produces output"
+
+    # Nothing suggestion-shaped may appear before the block — the hardware block
+    # used to be printed inline as well as collected
+    awk '/^Suggested Configuration/{exit} {print}' "$capture" | grep -q "ENABLE_"
+    assert_false "discover: no suggestion lines printed outside the block"
+
+    # Two settings glued onto one line (the command-substitution newline loss)
+    grep -qE '=[^ #]*#[^ ]' "$capture"
+    assert_false "discover: no two settings glued onto one line"
+
+    # Every recommendation exactly once inside the block (rulers excepted)
+    awk '/^Suggested Configuration/,0' "$capture" | grep -vE '^[#= ]+$' | sed '/^$/d' | sort | uniq -d > "$capture.dupes"
+    [[ ! -s "$capture.dupes" ]]
+    assert_true "discover: no duplicated recommendation lines in the block"
+
+    unset TELEMON_SUGGESTIONS_MARKER
+    unset -f _cmd_exists _systemd_is_active docker kubectl virsh wg tailscale
+    unset -f pveversion pvesm pvesh qm pct split_detection_output detect_infrastructure
+    unset -f detect_hardware detect_database_servers detect_applications generate_smart_thresholds cmd_discover
+    rm -f "$fn_file" "$capture" "$capture.dupes"
+}
+
 # ---------------------------------------------------------------------------
 # Test lock mechanism functions (pattern verification in telemon.sh)
 # ---------------------------------------------------------------------------
@@ -5919,6 +6037,7 @@ main() {
     test_maintenance_windows
     test_auto_remediation
     test_discovery_system
+    test_regression_discover_suggestions
     test_lock_mechanism
     test_first_run_fingerprint
     test_bug_fixes_2026_04_25
