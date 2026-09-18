@@ -3491,11 +3491,78 @@ test_regression_discover_suggestions() {
     [[ ! -s "$capture.dupes" ]]
     assert_true "discover: no duplicated recommendation lines in the block"
 
+    # ...and no key recommended with two different values either: the whole-line
+    # check above cannot see "KEY=a" next to "KEY=b" (GH #38)
+    awk '/^Suggested Configuration/,0' "$capture" \
+        | sed -n 's/^#\{0,1\} *\([A-Z_][A-Z0-9_]*\)=\(.*\)$/\1|\2/p' \
+        | sort -u | cut -d'|' -f1 | uniq -d > "$capture.keydupes"
+    [[ ! -s "$capture.keydupes" ]]
+    assert_true "discover: no configuration key recommended with two different values"
+
     unset TELEMON_SUGGESTIONS_MARKER
     unset -f _cmd_exists _systemd_is_active docker kubectl virsh wg tailscale
     unset -f pveversion pvesm pvesh qm pct split_detection_output detect_infrastructure
     unset -f detect_hardware detect_database_servers detect_applications generate_smart_thresholds cmd_discover
-    rm -f "$fn_file" "$capture" "$capture.dupes"
+    rm -f "$fn_file" "$capture" "$capture.dupes" "$capture.keydupes"
+}
+
+test_regression_discover_single_log_watch_keys() {
+    echo ""
+    echo "Testing discover recommends LOG_WATCH_* once with fail2ban (GH #38)..."
+
+    local fn_file block
+    fn_file=$(mktemp)
+
+    # REAL helpers: the marker splitter, the application detector that used to
+    # emit its own LOG_WATCH_PATTERNS, and the command that assembles the block
+    {
+        awk '/^split_detection_output\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon-admin.sh"
+        awk '/^detect_applications\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon-admin.sh"
+        awk '/^cmd_discover\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon-admin.sh"
+    } > "$fn_file"
+
+    TELEMON_SUGGESTIONS_MARKER=$(awk -F'"' '/^TELEMON_SUGGESTIONS_MARKER=/{print $2}' "${SCRIPT_DIR}/telemon-admin.sh")
+    : "${GREEN:=}"; : "${RED:=}"; : "${YELLOW:=}"; : "${BLUE:=}"; : "${NC:=}"
+
+    # fail2ban runs, nothing else is installed, and journalctl exists so the
+    # generic log block is reached even on a host without /var/log/syslog (CI)
+    _systemd_is_active() { [[ "$1" == "fail2ban" ]] && return 0; return 1; }
+    _cmd_exists() { [[ "$1" == "journalctl" ]] && return 0; return 1; }
+    ss() { return 1; }
+    fail2ban-client() { printf 'Currently banned: 0\n'; }
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+
+    detect_hardware() { printf 'INFO-HW\n%s\n' "$TELEMON_SUGGESTIONS_MARKER"; }
+    detect_infrastructure() { printf 'INFO-INFRA\n%s\n' "$TELEMON_SUGGESTIONS_MARKER"; }
+    detect_database_servers() { printf 'INFO-DB\n%s\n' "$TELEMON_SUGGESTIONS_MARKER"; }
+    generate_smart_thresholds() { printf '# smart thresholds\n'; }
+
+    block=$(cmd_discover | awk '/^Suggested Configuration/,0')
+
+    assert_eq "1" "$(grep -c '^# LOG_WATCH_PATTERNS=' <<< "$block")" \
+        "discover: LOG_WATCH_PATTERNS recommended exactly once with fail2ban active"
+    assert_eq "1" "$(grep -c '^# LOG_WATCH_FILES=' <<< "$block")" \
+        "discover: LOG_WATCH_FILES recommended exactly once with fail2ban active"
+    assert_eq "1" "$(grep -c '^# ENABLE_LOG_CHECK=' <<< "$block")" \
+        "discover: ENABLE_LOG_CHECK recommended exactly once"
+
+    grep -q 'BAN' <<< "$block"
+    assert_true "discover: the fail2ban ban pattern survives the merge into the generic block"
+    ! grep -q '^# LOG_WATCH_PATTERNS="BAN|ERROR|WARNING"' <<< "$block"
+    assert_true "discover: the fail2ban block no longer emits its own LOG_WATCH_PATTERNS"
+
+    local keydupes
+    keydupes=$(sed -n 's/^#\{0,1\} *\([A-Z_][A-Z0-9_]*\)=\(.*\)$/\1|\2/p' <<< "$block" | sort -u | cut -d'|' -f1 | uniq -d)
+    [[ -z "$keydupes" ]]
+    assert_true "discover: no configuration key appears with two different values"
+
+    unset -f _systemd_is_active _cmd_exists ss fail2ban-client
+    unset -f detect_hardware detect_infrastructure detect_database_servers generate_smart_thresholds
+    unset -f split_detection_output detect_applications cmd_discover
+    unset TELEMON_SUGGESTIONS_MARKER
+    rm -f "$fn_file"
 }
 
 # ---------------------------------------------------------------------------
@@ -6497,6 +6564,7 @@ main() {
     test_auto_remediation
     test_discovery_system
     test_regression_discover_suggestions
+    test_regression_discover_single_log_watch_keys
     test_regression_thermal_zone_plausibility
     test_regression_actions_pinned
     test_lock_mechanism
