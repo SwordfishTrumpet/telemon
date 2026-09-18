@@ -5,6 +5,39 @@ All notable changes to Telemon will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.4] - 2026-09-18
+
+### Fixed
+- **TCP port checks never ran (GH #26)**: the bash `/dev/tcp` capability probe opened a connection to `localhost:1` and could not tell a refused connection from a missing feature, so it returned before checking any configured port. Every user had zero port monitoring while `--validate` reported the check as enabled. The probe now classifies the error text (a refused connection means the feature works) and logs a skip at WARN instead of hiding it at DEBUG.
+- **The Proxmox task check warned on a healthy host (GH #27)**: the failed-task count was compared with `-ge` against `PROXMOX_TASK_WARN`, which the shipped template sets to `0`, so `0 >= 0` produced a permanent WARNING. A warn threshold of 0 now disables the WARNING level; CRITICAL still fires at one failed task by default.
+- **`telemon-admin.sh discover` dropped every Proxmox recommendation from the block it tells you to copy (GH #28)**: the infrastructure detector printed its suggestions inline, where `cmd_discover` never collected them. Detectors now separate informational output from suggestions with a marker, and a test asserts the suggestions reach the block.
+- **`discover` printed an impossible CPU temperature (GH #29)**: the lm-sensors fallback read the first `/sys/class/thermal` zone blindly, which on some hosts is an uninitialised ACPI zone reporting about -263C while the real package sensor sits in a later zone. It now reads every zone, skips implausible readings, prefers a package or core sensor, names the zone it used, and prints no temperature at all when there is no plausible reading.
+- **`discover` recommended `LOG_WATCH_PATTERNS` twice with different values (GH #38)**: the fail2ban block and the generic log block both emitted the key, so a configuration pasted from the output silently kept the second value, and the Proxmox guest block repeated `CRITICAL_PROXMOX_GUESTS` the same way. The fail2ban log and its `BAN` pattern are now folded into the generic recommendation, and the output is checked for any key recommended with two different values.
+- **A maintenance window that crosses midnight was never applied (GH #37)**: `Sat 23:00-01:00` was accepted, validated and then silently ignored, so planned overnight work paged the operator. Such a window now covers its start day from the start time and the following day until the end time; a window whose start and end are identical is reported by `--validate` instead of doing nothing.
+- **A failed Telegram delivery aborted the rest of the run (GH #36)**: the `RETURN` traps in the send path were left armed, so a failed send re-fired when its caller returned, hit an unset variable, and terminated the cycle before the state exports and the escalation check.
+- **A crashing plugin lost its own error output (GH #32)**: the plugin's last three stderr lines (collapsed to one line, control characters stripped, 300-character cap) are now appended to the failure warning, so a broken plugin can be diagnosed from the log.
+
+### Security
+- **The ODBC password was visible in a process command line (GH #35)**: credentials now travel in a 0600 file-based DSN passed as `FILEDSN=<path>`, in both the DSN and the driver form, so no password appears on `isql`'s command line.
+- **MySQL, PostgreSQL and Redis passwords were visible in a shell command line (GH #41)**: all six invocations (each connection test and its replication or info query) run through one helper that writes the password to a 0600 file and passes only the file path; the shell loads it into the client's environment variable (`MYSQL_PWD`, `PGPASSWORD`, `REDISCLI_AUTH`), removes the file and then starts the client. Both credential paths in the database checks are now file-based.
+
+### Changed
+- `PROXMOX_TASK_WARN=0`, the shipped default, now means "no warning level" instead of "warn on zero failed tasks" (GH #27). `.env.example` documents it.
+- The `discover` temperature line is omitted when no plausible sensor reading exists, and names the sensor it used when one is found (GH #29).
+- The generated `LOG_WATCH_PATTERNS` recommendation now includes `BAN` when fail2ban is active, and `LOG_WATCH_FILES` includes the fail2ban log (GH #38).
+
+### Build & CI
+- **Actions pinned (GH #30)**: the release and lint workflows used mutable tags (`@master` and the action's `stable` ShellCheck release), so a gate could change without any repository change. Every `uses:` now carries a commit SHA, and a new `Actions Pinning` job fails on any floating reference.
+- **The configuration validation gate could not fail (GH #39)**: the CI step ran `telemon-admin.sh validate` with `continue-on-error: true`, so a validation regression reached the default branch behind a green run. The gate is enforced, verified by breaking validation deliberately in the pull request and reverting it.
+- **Local pipeline state is gitignored (GH #33)**: `LEDGER.tsv` and the pipeline lock file can no longer be published by the documented `git add -A` workflow.
+
+### Documentation
+- The front-door docs were rewritten to the writing contract (GH #31): plain prose without em-dash chains, 0 findings across the 9 tracked Markdown files.
+- The README no longer claims BSD portability while the support table says Linux only (GH #40). The platform table is the authoritative list, and it now includes BSD as not supported.
+
+### Tests
+- 787 → 881 assertions, 0 failures. New regression coverage for the TCP capability probe, the Proxmox task thresholds, thermal-zone selection, the discover suggestion and unique-key contracts, the plugin stderr path, both credential paths, the Telegram failure path, maintenance windows that cross midnight, and the action-pinning policy.
+
 ## [1.2.3] - 2026-09-12
 
 ### Fixed
