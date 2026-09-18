@@ -4470,6 +4470,60 @@ print(count)
     assert_eq "1" "$count" "proxmox_tasks: task without starttime counted (fail-safe)"
 }
 
+test_regression_proxmox_tasks_zero_failures() {
+    echo ""
+    echo "Testing check_proxmox_tasks with the shipped default thresholds (GH #27)..."
+
+    local fn_file capture
+    fn_file=$(mktemp)
+    capture=$(mktemp)
+
+    # REAL function executed with a stubbed pvesh (empty task log) and the
+    # defaults from .env.example. WARN=0 must mean "warnings off": the healthy
+    # count is 0, so `0 -ge 0` warned on every clean host.
+    awk '/^check_proxmox_tasks\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+
+    log() { :; }
+    check_state_change() { printf '%s|%s|%s\n' "$1" "$2" "$3" >> "$capture"; }
+    run_with_timeout() { shift; "$@"; }
+    command() { case "$1" in -v) return 0 ;; *) return 1 ;; esac; }
+    pvesh() { printf '[]'; }
+    CHECK_TIMEOUT=5
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+
+    PROXMOX_TASK_WARN=0
+    PROXMOX_TASK_CRIT=1
+    : > "$capture"
+    check_proxmox_tasks
+    grep -q "proxmox_tasks|OK|" "$capture"
+    assert_true "proxmox_tasks: zero failed tasks with defaults WARN=0/CRIT=1 -> OK (was WARNING)"
+    grep -q "proxmox_tasks|WARNING|" "$capture"
+    assert_false "proxmox_tasks: no false WARNING on a clean host"
+
+    # A configured warn threshold above zero must still warn (this host runs 3/5)
+    PROXMOX_TASK_WARN=2
+    PROXMOX_TASK_CRIT=5
+    : > "$capture"
+    check_proxmox_tasks
+    grep -q "proxmox_tasks|OK|" "$capture"
+    assert_true "proxmox_tasks: zero failures below a positive WARN -> OK"
+
+    # ... and a count at/above CRIT still goes CRITICAL with defaults
+    pvesh() { printf '[{"status":"FAILED","starttime":%s}]' "$(date +%s)"; }
+    PROXMOX_TASK_WARN=0
+    PROXMOX_TASK_CRIT=1
+    : > "$capture"
+    check_proxmox_tasks
+    grep -q "proxmox_tasks|CRITICAL|" "$capture"
+    assert_true "proxmox_tasks: one failed task with defaults -> CRITICAL"
+
+    unset PROXMOX_TASK_WARN PROXMOX_TASK_CRIT CHECK_TIMEOUT
+    unset -f log check_state_change run_with_timeout command pvesh check_proxmox_tasks
+    rm -f "$fn_file" "$capture"
+}
+
 test_regression_file_integrity_deletion() {
     echo ""
     echo "Testing file integrity deletion alert (TODO #8)..."
@@ -5885,6 +5939,7 @@ main() {
     test_regression_strip_html_entities
     test_regression_parse_heartbeat_line
     test_regression_proxmox_tasks_filter
+    test_regression_proxmox_tasks_zero_failures
     test_regression_file_integrity_deletion
     test_regression_drift_deletion
     test_regression_save_state_sidecars
