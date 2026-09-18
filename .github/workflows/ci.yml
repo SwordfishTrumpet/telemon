@@ -96,10 +96,23 @@ jobs:
     # lint-clean. It previously ran with `continue-on-error: true`, so a failing
     # job still reported success and lint regressions could not be caught.
     - name: Run markdownlint
-      uses: DavidAnson/markdownlint-cli2-action@v24.2.0
+      uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff  # v24.2.0
       with:
         globs: '**/*.md'
         config: '.markdownlint-cli2.jsonc'
+
+  actions-pinned:
+    name: Actions Pinning
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+
+    # CONTRIBUTING.md requires every third-party action to be pinned to a full
+    # commit SHA (only actions/* may use a major tag). Nothing enforced the rule,
+    # so the release publisher — which runs with contents: write — and the
+    # markdown linter kept using mutable tags (GH #30).
+    - name: Check workflow action pins
+      run: bash scripts/check-actions-pinned.sh
 
   artifact-check:
     name: Release Artifact Check
