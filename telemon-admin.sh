@@ -820,6 +820,56 @@ generate_smart_thresholds() {
     echo "$thresholds"
 }
 
+# Pick the most plausible CPU temperature from /sys/class/thermal.
+#
+# Reads every zone, skips empty files and implausible readings, and prefers a
+# package/core sensor over an ACPI zone. The old fallback printed the first zone
+# blindly, so a host whose zone 0 is an uninitialised ACPI zone reported
+# "Current temp: -263C" while the real package sensor sat at 70C in another
+# zone (GH #29).
+#
+# Plausible range: -20C to 150C (nothing colder or hotter is a CPU reading).
+# Prints "<temp_c> <zone type>" when a usable zone exists, prints nothing
+# otherwise.
+# $1 = thermal base directory (default /sys/class/thermal) — tests point this at
+# a fixture tree.
+# shellcheck disable=SC2120  # production call passes no argument; tests pass a fixture base dir
+_detect_thermal_zone() {
+    local base="${1:-/sys/class/thermal}"
+    local zone type raw temp
+    local cpu_temp="" cpu_type=""
+    local any_temp="" any_type=""
+
+    for zone in "$base"/thermal_zone*; do
+        [[ -r "$zone/temp" ]] || continue
+        raw=$(cat "$zone/temp" 2>/dev/null) || continue
+        # Only a plain integer in millidegreesC is usable
+        [[ "$raw" =~ ^-?[0-9]+$ ]] || continue
+        temp=$((raw / 1000))
+        ((temp >= -20 && temp <= 150)) || continue
+        type=$(cat "$zone/type" 2>/dev/null || echo "")
+
+        case "$type" in
+            *x86_pkg_temp*|*coretemp*|*k10temp*|*zenpower*|*cpu_thermal*|*cpu-thermal*)
+                [[ -z "$cpu_temp" ]] && { cpu_temp="$temp"; cpu_type="$type"; }
+                ;;
+            *)
+                [[ -z "$any_temp" ]] && { any_temp="$temp"; any_type="$type"; }
+                ;;
+        esac
+    done
+
+    if [[ -n "$cpu_temp" ]]; then
+        printf '%s %s\n' "$cpu_temp" "$cpu_type"
+        return 0
+    fi
+    if [[ -n "$any_temp" ]]; then
+        printf '%s %s\n' "$any_temp" "$any_type"
+        return 0
+    fi
+    return 1
+}
+
 # Helper: Detect hardware components
 detect_hardware() {
     local hw_info=""
@@ -964,12 +1014,19 @@ detect_hardware() {
         local thermal_zones
         thermal_zones=$(ls /sys/class/thermal/thermal_zone* 2>/dev/null | head -5)
         if [[ -n "$thermal_zones" ]]; then
-            local sample_temp
-            sample_temp=$(cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null | head -1 | awk '{print int($1/1000)}')
+            local thermal_reading sample_temp sample_zone
+            thermal_reading=$(_detect_thermal_zone) || true
+            sample_temp="${thermal_reading%% *}"
+            sample_zone="${thermal_reading#* }"
+            [[ "$sample_zone" == "$thermal_reading" ]] && sample_zone=""
             hw_info+="${GREEN}✓${NC} CPU thermal zones detected"
             hw_info+=$'\n'
             if [[ -n "$sample_temp" ]]; then
-                hw_info+="  Current temp: ${sample_temp}°C"
+                if [[ -n "$sample_zone" ]]; then
+                    hw_info+="  Current temp: ${sample_temp}°C (${sample_zone})"
+                else
+                    hw_info+="  Current temp: ${sample_temp}°C"
+                fi
                 hw_info+=$'\n'
             fi
             hw_info+=$'\n'
