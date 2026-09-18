@@ -71,6 +71,9 @@ jobs:
     # means validation itself broke.
     - name: Validate configuration
       run: |
+        # TEMPORARY VERIFICATION (GH #39) — reverted by the next commit: remove
+        # the configuration so validation must fail. Do not merge this commit.
+        rm -f .env
         bash telemon-admin.sh validate
     
     - name: Run test suite
