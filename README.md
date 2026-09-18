@@ -36,7 +36,7 @@ TELEGRAM_BOT_TOKEN="xxx" TELEGRAM_CHAT_ID="yyy" \
 | **Stateful Alert Tracking** | Only alerts on *state changes* (OK→WARNING→CRITICAL). Confirmation count + per-key cooldowns prevent false alarms and spam. |
 | **Self-Managing** | Self-rotating logs, automatic stale lock cleanup, retry queues for failed alerts. Runs indefinitely without maintenance. |
 | **Security-First** | Secrets never passed on command lines, input validation, SSRF protection, atomic file writes with symlink protection, HTML escaping. |
-| **Battle-Tested** | Portable across GNU Linux and BSD, handles edge cases (hung commands, overlapping runs, flapping checks). |
+| **Battle-Tested** | Portable across the supported GNU Linux distributions, handles edge cases (hung commands, overlapping runs, flapping checks). |
 | **Auto-Discovery** | Scans your system and suggests configuration for detected hardware, services, databases, and applications. |
 | **Enterprise Features** | Fleet monitoring (multi-server), predictive resource exhaustion, config drift detection, audit logging, auto-remediation, maintenance windows. |
 
@@ -1144,9 +1144,12 @@ curl -X POST "https://api.telegram.org/bot<TOKEN>/sendMessage" \
 | CentOS/RHEL 8+ | ✅ Supported | May need EPEL |
 | Alpine Linux | ⚠️ Partial | BusyBox tools may differ |
 | macOS | ❌ Not supported | Requires Linux `/proc` |
+| BSD (FreeBSD, OpenBSD) | ❌ Not supported | Requires Linux `/proc` and `/sys` |
 | Windows WSL | ⚠️ Partial | Some `/proc` metrics may differ |
 
 **Why Linux only?** Telemon reads from Linux-specific interfaces: `/proc/loadavg`, `/proc/meminfo`, `/proc/stat`, `/proc/net/dev`.
+
+The table above is the authoritative list. Nothing outside it is tested, and the BSD and macOS entries are there because the checks read those Linux interfaces directly.
 
 ---
 
