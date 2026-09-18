@@ -4633,11 +4633,13 @@ MYSQLSTUB
     ' _ --host=db --port=3306 --user=root --connect-timeout=5 2>/dev/null | awk '/Seconds_Behind_Master:/ {print $2}')
     assert_eq "" "$out" "MySQL replication: no lag data without MYSQL_PWD (bug precondition)"
 
-    # 3) Source guard: the env export must be present near SHOW SLAVE STATUS
+    # 3) Source guard: the replication query goes through the credential helper
+    #    with MYSQL_PWD. A bare `mysql "$@"` call (the shape before GH #41)
+    #    put the password back on the shell's argv.
     local block
-    block=$(grep -B6 'SHOW SLAVE STATUS' "${SCRIPT_DIR}/telemon.sh")
-    [[ "$block" == *"export MYSQL_PWD"* ]]
-    assert_true "MySQL replication: MYSQL_PWD export present near SHOW SLAVE STATUS"
+    block=$(grep -B2 'SHOW SLAVE STATUS' "${SCRIPT_DIR}/telemon.sh" | grep -m1 'run_with_db_credential')
+    [[ "$block" == *"MYSQL_PWD"* ]]
+    assert_true "MySQL replication: the query goes through run_with_db_credential with MYSQL_PWD"
 
     rm -rf "$stubdir"
 }
@@ -5722,6 +5724,120 @@ RUN
     rm -rf "$mockdir"
 }
 
+test_regression_db_password_not_on_cmdline() {
+    echo ""
+    echo "Testing database credential exposure (GH #41)..."
+
+    local fn_file runner mockdir launch_out client_out env_out state_out mode_out
+    fn_file=$(mktemp)
+    runner=$(mktemp)
+    mockdir=$(mktemp -d)
+    launch_out=$(mktemp)
+    client_out=$(mktemp)
+    env_out=$(mktemp)
+    state_out=$(mktemp)
+    mode_out=$(mktemp)
+
+    awk '/^run_with_timeout\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+    awk '/^run_with_db_credential\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" >> "$fn_file"
+    awk '/^check_databases\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" >> "$fn_file"
+
+    # The command run_with_timeout is about to start is exactly the process a
+    # local user would read out of /proc/<pid>/cmdline, and the stub runs at the
+    # one moment where it can be recorded reliably: before it execs the client.
+    cat > "$mockdir/timeout" <<'MOCK'
+#!/usr/bin/env bash
+{ tr '\0' ' ' < /proc/$$/cmdline; echo; } >> "$MOCK_LAUNCH"
+for a in "$@"; do
+    case "$a" in
+        *telemon-dbcred.*) stat -c '%a' "$a" >> "$MOCK_MODE" 2>/dev/null || echo "missing" >> "$MOCK_MODE" ;;
+    esac
+done
+exec "$REAL_TIMEOUT" "$@"
+MOCK
+    chmod +x "$mockdir/timeout"
+
+    # The clients accept only their environment variable (the documented
+    # mechanism), report a plausible answer, and record their own argv.
+    for client in mysql psql redis-cli; do
+        case "$client" in
+            mysql) env_name="MYSQL_PWD" ;;
+            psql) env_name="PGPASSWORD" ;;
+            *) env_name="REDISCLI_AUTH" ;;
+        esac
+        {
+            printf '#!/usr/bin/env bash\n'
+            printf '{ tr %s < /proc/$$/cmdline; echo; } >> "$MOCK_CLIENT_ARGV"\n' "'\\0' ' '"
+            printf 'printf %%s\\\\n "%s=${%s:+set}" >> "$MOCK_ENV"\n' "$env_name" "$env_name"
+            case "$client" in
+                mysql)
+                    printf 'case "$*" in *"SHOW SLAVE STATUS"*) printf "Seconds_Behind_Master: 12\\n" ;; *) printf "1\\n" ;; esac\n'
+                    ;;
+                psql)
+                    printf 'case "$*" in *"SELECT 1"*) printf "1\\n" ;; *) printf "8\\n" ;; esac\n'
+                    ;;
+                *)
+                    printf 'case "$*" in *PING*) printf "PONG\\n" ;; *INFO*) printf "role:master\\nconnected_slaves:2\\n" ;; esac\n'
+                    ;;
+            esac
+        } > "$mockdir/$client"
+        chmod +x "$mockdir/$client"
+    done
+
+    cat > "$runner" <<'RUN'
+set -uo pipefail
+source "$LIB_FILE"
+source "$FN_FILE"
+log() { :; }
+check_state_change() { echo "STATE|$1|$2|$3" >> "$STATE_OUT"; }
+ENABLE_DATABASE_CHECKS=true CHECK_TIMEOUT=20 DB_CHECK_TIMEOUT=5
+export PATH="$MOCKDIR:$PATH"
+check_databases >/dev/null
+RUN
+
+    FN_FILE="$fn_file" LIB_FILE="${SCRIPT_DIR}/lib/common.sh" \
+    MOCKDIR="$mockdir" REAL_TIMEOUT="$(command -v timeout)" \
+    STATE_OUT="$state_out" MOCK_LAUNCH="$launch_out" \
+    MOCK_CLIENT_ARGV="$client_out" MOCK_ENV="$env_out" MOCK_MODE="$mode_out" \
+    DB_MYSQL_HOST="db.example" DB_MYSQL_USER="monitor" DB_MYSQL_PASS="sup3rs3cret" \
+    DB_POSTGRES_HOST="pg.example" DB_POSTGRES_USER="monitor" DB_POSTGRES_PASS="sup3rs3cret" \
+    DB_REDIS_HOST="redis.example" DB_REDIS_PASS="sup3rs3cret" \
+        bash "$runner"
+
+    local launches
+    launches=$(cat "$launch_out")
+
+    # The secret must not appear in the command any client is launched through
+    assert_eq "0" "$(grep -c 'sup3rs3cret' <<< "$launches")" \
+        "db: the password is absent from the launched command line"
+    assert_eq "0" "$(grep -c 'sup3rs3cret' "$client_out")" \
+        "db: the password is absent from every client's own command line"
+    assert_eq "6" "$(grep -c 'telemon-dbcred' <<< "$launches")" \
+        "db: all six client invocations pass a credential file path"
+    assert_eq "1" "$(grep -c 'telemon-dbcred.*SHOW SLAVE STATUS' <<< "$launches")" \
+        "db: the MySQL replication query also goes through the credential helper"
+    assert_eq "6" "$(grep -c '^600$' "$mode_out")" \
+        "db: all six credential files are 0600 while the client starts"
+
+    # The clients still authenticate the documented way
+    assert_contains "$(cat "$env_out")" "MYSQL_PWD=set" "db: mysql receives MYSQL_PWD"
+    assert_contains "$(cat "$env_out")" "PGPASSWORD=set" "db: psql receives PGPASSWORD"
+    assert_contains "$(cat "$env_out")" "REDISCLI_AUTH=set" "db: redis-cli receives REDISCLI_AUTH"
+
+    # ...and the checks still report OK
+    assert_eq "3" "$(grep -c '|OK|' "$state_out")" "db: all three database checks report OK"
+
+    # Every credential file the checks created is gone once they return
+    local leaked=0 cred_path
+    while read -r cred_path; do
+        [[ -e "$cred_path" ]] && leaked=$((leaked + 1))
+    done < <(grep -o '/[^ ]*telemon-dbcred\.[A-Za-z0-9]*' <<< "$launches" | sort -u)
+    assert_eq "0" "$leaked" "db: no credential file is left behind"
+
+    rm -f "$fn_file" "$runner" "$launch_out" "$client_out" "$env_out" "$state_out" "$mode_out"
+    rm -rf "$mockdir"
+}
+
 # ---------------------------------------------------------------------------
 # GH #18 — update.sh must refuse a dirty working tree instead of silently
 # stashing (and never restoring) the operator's local modifications.
@@ -5934,8 +6050,9 @@ test_regression_env_example_completeness() {
         "$root/telemon.sh" "$root/telemon-admin.sh" "$root/lib/common.sh" \
         | sed 's/^\${//; s/:-$//' | sort -u)
 
-    # Not user configuration: shell built-ins/context and an internal result variable
-    local allow="HOME SCRIPT_DIR THRESHOLD_STATE"
+    # Not user configuration: shell/environment context and an internal result
+    # variable
+    local allow="HOME SCRIPT_DIR THRESHOLD_STATE TMPDIR"
     for var in $read_vars; do
         case " $allow " in *" $var "*) continue ;; esac
         if ! grep -qE "^#?[[:space:]]*${var}=" "$root/.env.example"; then
@@ -6603,6 +6720,7 @@ main() {
     test_regression_plugin_stderr_captured
     test_regression_telegram_failure_no_abort
     test_regression_odbc_password_not_on_cmdline
+    test_regression_db_password_not_on_cmdline
     test_regression_update_dirty_tree
     test_regression_install_env_preserved
     test_regression_uninstall_completeness

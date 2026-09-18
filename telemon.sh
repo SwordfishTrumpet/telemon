@@ -2988,6 +2988,44 @@ check_ups() {
     # No battery/UPS tool found — silently skip
 }
 
+# ---------------------------------------------------------------------------
+# SECURITY: run a database client with a password that never reaches a command
+# line. The password is written to a 0600 file and only that file's path is
+# passed to the shell; the shell reads it into the client's environment
+# variable, removes the file and execs the client (GH #41). The ODBC check uses
+# the same idea with a file-based DSN (GH #35). Reading the secret into a shell
+# variable is not enough on its own: while the shell holds it as an argument,
+# any local user can read the secret from /proc/<pid>/cmdline.
+# Usage: run_with_db_credential <seconds> <env-var> <password> <command> [args...]
+# Returns: the client's exit status (or the timeout status)
+# ---------------------------------------------------------------------------
+run_with_db_credential() {
+    local timeout_sec="$1"
+    local env_name="$2"
+    local password="$3"
+    shift 3
+
+    local cred_file
+    cred_file=$(mktemp "${TMPDIR:-/tmp}/telemon-dbcred.XXXXXXXXXX" 2>/dev/null) || return 1
+    chmod 600 "$cred_file" 2>/dev/null || true
+    printf '%s' "$password" > "$cred_file" || { rm -f "$cred_file"; return 1; }
+
+    local rc=0
+    run_with_timeout "$timeout_sec" bash -c '
+        cred_env="$1"
+        cred_file="$2"
+        export "${cred_env}=$(cat "${cred_file}")"
+        rm -f "${cred_file}"
+        shift 2
+        exec "$@"
+    ' _ "$env_name" "$cred_file" "$@" || rc=$?
+
+    # The shell above removes the file before it execs the client; this covers a
+    # failure that left it behind, and is a no-op on the normal path.
+    rm -f "$cred_file"
+    return "$rc"
+}
+
 # ===========================================================================
 # CHECK: Database Health (MySQL, PostgreSQL, Redis)
 # Monitors database connectivity and basic health metrics
@@ -3011,18 +3049,15 @@ check_databases() {
             local mysql_name="${DB_MYSQL_NAME:-mysql}"
             local mysql_host="${DB_MYSQL_HOST}"
             
-            # SECURITY: Pass password via environment variable, not command line
-            # Command-line args are visible in 'ps aux' on some systems
+            # SECURITY: credentials travel through a 0600 file, never as an
+            # argument of this shell (GH #41)
             local mysql_opts="--host=${mysql_host} --port=${mysql_port} --user=${mysql_user}"
             mysql_opts="${mysql_opts} --connect-timeout=${check_timeout}"
             
             # Test connection with a simple query - password via env var
             local mysql_result
-            mysql_result=$(run_with_timeout "$check_timeout" bash -c '
-                export MYSQL_PWD="$1"
-                shift
-                mysql "$@" -e "SELECT 1"
-            ' _ "$mysql_pass" ${mysql_opts} "$mysql_name" 2>&1)
+            mysql_result=$(run_with_db_credential "$check_timeout" MYSQL_PWD "$mysql_pass" \
+                mysql ${mysql_opts} "$mysql_name" -e "SELECT 1" 2>&1)
             local mysql_exit=$?
             
             if [[ $mysql_exit -ne 0 ]]; then
@@ -3034,14 +3069,13 @@ check_databases() {
             else
                 # Check replication lag if applicable
                 local repl_lag
-                # SECURITY: pass the password via env var exactly like the connection
-                # test above — without MYSQL_PWD this query fails auth on any
-                # password-protected server and replication lag is never detected.
-                repl_lag=$(run_with_timeout "$check_timeout" bash -c '
-                    export MYSQL_PWD="$1"
-                    shift
-                    mysql "$@" -e "SHOW SLAVE STATUS\G"
-                ' _ "$mysql_pass" ${mysql_opts} "$mysql_name" 2>/dev/null | awk '/Seconds_Behind_Master:/ {print $2}')
+                # SECURITY: the password comes from a 0600 file, exactly like
+                # the connection test above — without MYSQL_PWD this query
+                # fails auth on any password-protected server and replication
+                # lag is never detected.
+                repl_lag=$(run_with_db_credential "$check_timeout" MYSQL_PWD "$mysql_pass" \
+                    mysql ${mysql_opts} "$mysql_name" -e "SHOW SLAVE STATUS\G" 2>/dev/null \
+                    | awk '/Seconds_Behind_Master:/ {print $2}')
                 if [[ -n "$repl_lag" && "$repl_lag" != "NULL" ]]; then
                     if is_valid_number "$repl_lag"; then
                         if [[ "$repl_lag" -gt 300 ]]; then
@@ -3079,17 +3113,14 @@ check_databases() {
             local pg_name="${DB_POSTGRES_NAME:-postgres}"
             local pg_host="${DB_POSTGRES_HOST}"
             
-            # SECURITY: Pass password via environment variable, not connection string
-            # Connection strings may be visible in process listings
+            # SECURITY: credentials travel through a 0600 file, never as an
+            # argument of this shell (GH #41)
             local pg_opts="host=${pg_host} port=${pg_port} user=${pg_user} dbname=${pg_name} connect_timeout=${check_timeout}"
             
             # Test connection - password via env var
             local pg_result
-            pg_result=$(run_with_timeout "$check_timeout" bash -c '
-                export PGPASSWORD="$1"
-                shift
-                psql "$@" -c "SELECT 1"
-            ' _ "$pg_pass" "${pg_opts}" 2>&1)
+            pg_result=$(run_with_db_credential "$check_timeout" PGPASSWORD "$pg_pass" \
+                psql "${pg_opts}" -c "SELECT 1" 2>&1)
             local pg_exit=$?
             
             if [[ $pg_exit -ne 0 ]]; then
@@ -3101,11 +3132,9 @@ check_databases() {
             else
                 # Check replication lag if applicable
                 local repl_lag
-                repl_lag=$(run_with_timeout "$check_timeout" bash -c '
-                    export PGPASSWORD="$1"
-                    shift
-                    psql "$@" -c "SELECT CASE WHEN pg_is_in_recovery() THEN EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp())) ELSE 0 END AS lag;"
-                ' _ "$pg_pass" "${pg_opts}" 2>/dev/null | tail -1 | tr -d ' ')
+                repl_lag=$(run_with_db_credential "$check_timeout" PGPASSWORD "$pg_pass" \
+                    psql "${pg_opts}" -c "SELECT CASE WHEN pg_is_in_recovery() THEN EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp())) ELSE 0 END AS lag;" 2>/dev/null \
+                    | tail -1 | tr -d ' ')
                 if [[ -n "$repl_lag" && "$repl_lag" != "0" && "$repl_lag" =~ ^[0-9.]+$ ]]; then
                     local repl_lag_int="${repl_lag%.*}"
                     if [[ "$repl_lag_int" -gt 300 ]]; then
@@ -3139,17 +3168,16 @@ check_databases() {
             local redis_host="${DB_REDIS_HOST}"
             local redis_timeout="${DB_REDIS_TIMEOUT_SEC:-5}"
             
-            # Build redis-cli command - SECURITY: pass password via env var
+            # Build redis-cli command - SECURITY: credentials travel through a
+            # 0600 file, never as an argument of this shell (GH #41)
             local redis_opts="-h ${redis_host} -p ${redis_port} --raw"
-            # Use REDISCLI_AUTH env var instead of -a flag (visible in ps)
+            # The client reads REDISCLI_AUTH from its environment (not -a, which
+            # would be visible in ps)
             
             # Test connection with PING - password via env var
             local redis_result
-            redis_result=$(run_with_timeout "$redis_timeout" bash -c '
-                export REDISCLI_AUTH="$1"
-                shift
-                redis-cli "$@" PING
-            ' _ "$redis_pass" ${redis_opts} 2>&1)
+            redis_result=$(run_with_db_credential "$redis_timeout" REDISCLI_AUTH "$redis_pass" \
+                redis-cli ${redis_opts} PING 2>&1)
             local redis_exit=$?
             
             # Check for password authentication error
@@ -3163,11 +3191,9 @@ check_databases() {
             else
                 # Get additional info
                 local redis_info
-                redis_info=$(run_with_timeout "$redis_timeout" bash -c '
-                    export REDISCLI_AUTH="$1"
-                    shift
-                    redis-cli "$@" INFO replication
-                ' _ "$redis_pass" ${redis_opts} 2>/dev/null | grep -E "^(role|master_link_status|connected_slaves):" || true)
+                redis_info=$(run_with_db_credential "$redis_timeout" REDISCLI_AUTH "$redis_pass" \
+                    redis-cli ${redis_opts} INFO replication 2>/dev/null \
+                    | grep -E "^(role|master_link_status|connected_slaves):" || true)
                 if [[ -n "$redis_info" ]]; then
                     local role="${redis_info%%$'\n'*}"
                     role="${role#role:}"
