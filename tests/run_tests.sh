@@ -1847,13 +1847,15 @@ test_check_odbc() {
     [[ "$telemon_content" == *"PWD=***"* || "$telemon_content" == *"PASS=***"* ]]
     assert_true "ODBC: Sanitizes PWD and PASS from error messages"
     
-    # Test 12: Connection string via temp file (not command line)
-    [[ "$telemon_content" == *"conn_str_file"* && "$telemon_content" == *"mktemp"* ]]
-    assert_true "ODBC: Passes connection string via temp file"
+    # Test 12: Credentials travel in a 0600 file-based DSN, never on argv
+    # (GH #35: the DSN form used to pass the password as an isql positional)
+    [[ "$telemon_content" == *"conn_dsn_file"* && "$telemon_content" == *"mktemp"* && \
+       "$telemon_content" == *"FILEDSN="* ]]
+    assert_true "ODBC: Passes credentials via a .dsn file (FILEDSN=), not the command line"
     
     # Test 13: Temp file permissions (600)
     [[ "$telemon_content" == *"chmod 600"* ]]
-    assert_true "ODBC: Sets 600 permissions on temp connection string file"
+    assert_true "ODBC: Sets 600 permissions on the credential file"
     
     # Test 14: Timeout protection
     [[ "$telemon_content" == *"run_with_timeout"* && "$telemon_content" == *"check_odbc"* ]]
@@ -1880,9 +1882,10 @@ test_check_odbc() {
     [[ "$telemon_content" == *"_QUERY"* ]]
     assert_true "ODBC: Supports custom queries via ODBC_\${name}_QUERY"
     
-    # Test 20: DSN connection with credentials
-    [[ "$telemon_content" == *"ODBCUSER"* || "$telemon_content" == *"ODBCPASS"* ]]
-    assert_true "ODBC: Passes DSN credentials via environment variables"
+    # Test 20: Credentials written into the file-based DSN, never on a
+    # command line (GH #35)
+    [[ "$telemon_content" == *"printf 'PWD=%s"* && "$telemon_content" != *"ODBCPASS"* ]]
+    assert_true "ODBC: Writes the password into the .dsn file instead of passing it on argv"
     
     # Test 21: State transition to CRITICAL on connection failure
     [[ "$telemon_content" == *"odbc_state=\"CRITICAL\""* ]]
@@ -1896,9 +1899,9 @@ test_check_odbc() {
     [[ "$telemon_content" == *"need ODBC_"* || "$telemon_content" == *"DRIVER + SERVER"* ]]
     assert_true "ODBC: Validates connection has DSN or DRIVER+SERVER"
     
-    # Test 24: Connection string concatenation (+= for building string)
-    [[ "$telemon_content" == *"conn_str+="* ]]
-    assert_true "ODBC: Uses += for connection string concatenation"
+    # Test 24: Connect attributes are written one per line into the .dsn file
+    [[ "$telemon_content" == *"printf 'DSN=%s"* || "$telemon_content" == *"printf 'DRIVER={%s}"* ]]
+    assert_true "ODBC: Writes connect attributes into the file-based DSN"
     
     # Test 25: HTML escaping in error messages
     [[ "$telemon_content" == *"html_escape"* ]]
@@ -2539,11 +2542,12 @@ test_odbc_checks() {
     [[ "$telemon_content" == *"need ODBC_\${conn_name}_DSN or"* || "$telemon_content" == *"ODBC_\${conn_name}_DRIVER"* ]]
     assert_true "ODBC: validates connection has DSN or DRIVER+SERVER"
     
-    # Check string concatenation is correct (bug fix verification)
-    [[ "$telemon_content" == *"conn_str+=\"UID=\${conn_user};\""* ]]
-    assert_true "ODBC: correct string concatenation for UID (conn_str+=)"
-    [[ "$telemon_content" == *"conn_str+=\"PWD=\${conn_pass};\""* ]]
-    assert_true "ODBC: correct string concatenation for PWD (conn_str+=)"
+    # Check the credential attributes are written into the .dsn file
+    # (GH #35 replaced the old conn_str+= concatenation that put PWD on argv)
+    [[ "$telemon_content" == *"printf 'UID=%s"* && "$telemon_content" == *'"$conn_user"'* ]]
+    assert_true "ODBC: writes UID into the credential file"
+    [[ "$telemon_content" == *"printf 'PWD=%s"* && "$telemon_content" == *'"$conn_pass"'* ]]
+    assert_true "ODBC: writes PWD into the credential file"
 }
 
 # ---------------------------------------------------------------------------
@@ -5497,6 +5501,95 @@ REPRO
 }
 
 # ---------------------------------------------------------------------------
+# GH #35 — the ODBC password must never reach a command line. The mock isql
+# records the exact /proc/<pid>/cmdline a local user would read while the check
+# runs, plus how the credential file looks at that moment.
+# ---------------------------------------------------------------------------
+test_regression_odbc_password_not_on_cmdline() {
+    echo ""
+    echo "Testing ODBC credential exposure (GH #35)..."
+
+    local fn_file runner mockdir argv_out meta_out pwd_out state_out
+    fn_file=$(mktemp)
+    runner=$(mktemp)
+    mockdir=$(mktemp -d)
+    argv_out=$(mktemp)
+    meta_out=$(mktemp)
+    pwd_out=$(mktemp)
+    state_out=$(mktemp)
+
+    awk '/^run_with_timeout\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+    awk '/^check_odbc\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" >> "$fn_file"
+
+    cat > "$mockdir/isql" <<'MOCK'
+#!/usr/bin/env bash
+# What any local user can read from /proc/<pid>/cmdline while isql runs
+{ tr '\0' ' ' < /proc/$$/cmdline; echo; } > "$MOCK_ARGV"
+for a in "$@"; do
+    case "$a" in
+        FILEDSN=*)
+            f="${a#FILEDSN=}"
+            stat -c '%a' "$f" > "$MOCK_META" 2>/dev/null || echo "missing" > "$MOCK_META"
+            grep -c '^PWD=' "$f" > "$MOCK_PWD" 2>/dev/null || echo 0 > "$MOCK_PWD"
+            ;;
+    esac
+done
+sleep 1
+echo "Connected"
+MOCK
+    chmod +x "$mockdir/isql"
+
+    cat > "$runner" <<'RUN'
+set -uo pipefail
+source "$LIB_FILE"
+source "$FN_FILE"
+log() { :; }
+check_state_change() { echo "STATE|$1|$2|$3" >> "$STATE_OUT"; }
+ENABLE_ODBC_CHECKS=true CHECK_TIMEOUT=20 ODBC_CHECK_TIMEOUT=20
+export PATH="$MOCKDIR:$PATH"
+check_odbc >/dev/null
+RUN
+
+    local form_cmdline form_state form_mode form_pwd
+    for form in dsn driver; do
+        : > "$argv_out"; : > "$state_out"
+        if [[ "$form" == "dsn" ]]; then
+            FN_FILE="$fn_file" LIB_FILE="${SCRIPT_DIR}/lib/common.sh" \
+            MOCKDIR="$mockdir" STATE_OUT="$state_out" \
+            MOCK_ARGV="$argv_out" MOCK_META="$meta_out" MOCK_PWD="$pwd_out" \
+            ODBC_CONNECTIONS="probe" ODBC_probe_DSN="somedb" \
+            ODBC_probe_USER="tester" ODBC_probe_PASS="sup3rs3cret" \
+                bash "$runner"
+        else
+            FN_FILE="$fn_file" LIB_FILE="${SCRIPT_DIR}/lib/common.sh" \
+            MOCKDIR="$mockdir" STATE_OUT="$state_out" \
+            MOCK_ARGV="$argv_out" MOCK_META="$meta_out" MOCK_PWD="$pwd_out" \
+            ODBC_CONNECTIONS="probe" ODBC_probe_DRIVER="SomeDriver" \
+            ODBC_probe_SERVER="db.example" ODBC_probe_DATABASE="app" \
+            ODBC_probe_USER="tester" ODBC_probe_PASS="sup3rs3cret" \
+                bash "$runner"
+        fi
+
+        form_cmdline=$(cat "$argv_out")
+        form_state=$(cut -d'|' -f3 < "$state_out")
+        form_mode=$(cat "$meta_out")
+        form_pwd=$(cat "$pwd_out")
+
+        assert_contains "$form_cmdline" "FILEDSN=" "odbc ($form): isql is given a file-based DSN"
+        assert_contains "$form_cmdline" ".dsn" "odbc ($form): the credential file has the .dsn suffix unixODBC requires"
+        [[ "$form_cmdline" != *"sup3rs3cret"* ]]
+        assert_true "odbc ($form): the password is absent from isql's command line"
+        assert_eq "0" "$(grep -c sup3rs3cret <<< "$form_cmdline")" "odbc ($form): no password occurrence in the captured cmdline"
+        assert_eq "600" "$form_mode" "odbc ($form): the credential file is 0600 while isql runs"
+        assert_eq "1" "$form_pwd" "odbc ($form): the credential file carries the password"
+        assert_contains "$form_state" "OK" "odbc ($form): the check still reports OK"
+    done
+
+    rm -f "$fn_file" "$runner" "$argv_out" "$meta_out" "$pwd_out" "$state_out"
+    rm -rf "$mockdir"
+}
+
+# ---------------------------------------------------------------------------
 # GH #18 — update.sh must refuse a dirty working tree instead of silently
 # stashing (and never restoring) the operator's local modifications.
 # ---------------------------------------------------------------------------
@@ -6374,6 +6467,7 @@ main() {
     test_regression_plugin_failure_health
     test_regression_plugin_stderr_captured
     test_regression_telegram_failure_no_abort
+    test_regression_odbc_password_not_on_cmdline
     test_regression_update_dirty_tree
     test_regression_install_env_preserved
     test_regression_uninstall_completeness

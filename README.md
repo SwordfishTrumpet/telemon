@@ -748,6 +748,12 @@ ODBC_ORACLE_DW_PASS="secure_password"
 ODBC_ORACLE_DW_QUERY="SELECT 1 FROM DUAL"
 ```
 
+The password never reaches a command line: the check writes the connection
+attributes into a 0600 file-based DSN (a `.dsn` file) and hands `isql` only the
+file path (`FILEDSN=`), so no local user can read the credential out of
+`/proc/<pid>/cmdline` while the query runs. unixODBC only resolves a `FILEDSN`
+whose name ends in `.dsn`, which is why the temporary file carries that suffix.
+
 ### DNS Record Monitoring
 
 ```bash
