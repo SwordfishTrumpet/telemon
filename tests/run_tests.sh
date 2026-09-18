@@ -5694,6 +5694,101 @@ test_regression_send_telegram_truncation() {
     rm -f "$fn_file" "$text_capture"
 }
 
+test_regression_tcp_port_probe() {
+    echo ""
+    echo "Testing TCP port check runs on a /dev/tcp-capable bash (GH #26)..."
+
+    local fn_file capture port_file listener_pid i open_port
+    fn_file=$(mktemp)
+    capture=$(mktemp)
+    port_file=$(mktemp)
+
+    # Extract the REAL capability probe and the REAL check (not a rewrite): the
+    # defect was that the probe required localhost:1 to accept a connection, so
+    # a refused connection (the normal case) was read as "feature unsupported".
+    {
+        awk '/^bash_supports_dev_tcp\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh"
+        awk '/^check_tcp_ports\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh"
+    } > "$fn_file"
+
+    log() { :; }
+    check_state_change() { printf '%s|%s|%s\n' "$1" "$2" "$3" >> "$capture"; }
+    html_escape() { printf '%s' "$1"; }
+    is_valid_hostname() { return 0; }
+    is_valid_number() { [[ "$1" =~ ^[0-9]+$ ]]; }
+    make_state_key() { printf '%s_%s' "$1" "$2"; }
+    # Run the command directly: the /dev/tcp connect under test must be real
+    run_with_timeout() { shift; "$@"; }
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+
+    # The probe must accept this bash (it supports /dev/tcp) ...
+    bash_supports_dev_tcp
+    assert_true "tcp: probe accepts a bash with working /dev/tcp"
+
+    # ... classify a refused connection as "supported" (the old code called it
+    # unsupported and returned before checking any port) ...
+    bash_supports_dev_tcp "bash: connect: Connection refused"
+    assert_true "tcp: probe treats connection-refused as supported"
+
+    # ... and still refuse to run on a bash that really lacks the feature.
+    bash_supports_dev_tcp "bash: /dev/tcp/127.0.0.1/1: No such file or directory"
+    assert_false "tcp: probe detects a bash without net redirections"
+
+    bash_supports_dev_tcp "bash: /dev/tcp/127.0.0.1/1: restricted: cannot redirect"
+    assert_false "tcp: probe detects a restricted shell"
+
+    # Functional: a closed port must produce a CRITICAL state change. On the
+    # buggy code the probe returned early and this recorded nothing at all.
+    CHECK_TIMEOUT=5
+    CRITICAL_PORTS="127.0.0.1:1"
+    : > "$capture"
+    check_tcp_ports
+    grep -q "port_127.0.0.1:1|CRITICAL|" "$capture"
+    assert_true "tcp: unreachable port records CRITICAL (probe no longer short-circuits)"
+
+    # Functional: a port that is actually listening must record OK. Needs a real
+    # listener — python3 is used, the same dependency the runtime checks use.
+    if command -v python3 &>/dev/null; then
+        python3 - "$port_file" <<'PY' &
+import socket, sys, time
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+s.listen(5)
+with open(sys.argv[1], "w") as fh:
+    fh.write(str(s.getsockname()[1]))
+    fh.flush()
+time.sleep(15)
+PY
+        listener_pid=$!
+        i=0
+        while [[ ! -s "$port_file" && $i -lt 50 ]]; do
+            sleep 0.1
+            i=$((i + 1))
+        done
+        open_port=$(cat "$port_file")
+        if [[ -n "$open_port" ]]; then
+            CRITICAL_PORTS="127.0.0.1:${open_port}"
+            : > "$capture"
+            check_tcp_ports
+            grep -q "|OK|" "$capture"
+            assert_true "tcp: reachable configured port records OK"
+        else
+            echo "  note: could not start a local listener; reachable-port case not exercised"
+        fi
+        kill "$listener_pid" 2>/dev/null || true
+        wait "$listener_pid" 2>/dev/null || true
+    else
+        echo "  note: python3 unavailable; reachable-port case not exercised"
+    fi
+
+    unset CRITICAL_PORTS CHECK_TIMEOUT
+    unset -f log check_state_change html_escape is_valid_hostname is_valid_number
+    unset -f make_state_key run_with_timeout bash_supports_dev_tcp check_tcp_ports
+    rm -f "$fn_file" "$capture" "$port_file"
+}
+
 # ---------------------------------------------------------------------------
 # Coverage note (2026-08-16, TODO #18)
 # ---------------------------------------------------------------------------
@@ -5812,6 +5907,7 @@ main() {
     test_regression_cron_jobs_functional
     test_regression_network_bandwidth_functional
     test_regression_send_telegram_truncation
+    test_regression_tcp_port_probe
 
     # Summary
     echo ""

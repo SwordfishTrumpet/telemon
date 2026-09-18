@@ -2451,20 +2451,48 @@ check_sites() {
     done
 }
 
+# Does this bash support /dev/tcp (net redirections)?
+#
+# The probe must distinguish "this bash was built without net redirections" from
+# "nothing is listening" — the second one is the normal state of a host. The old
+# probe required a connection to localhost:1 to *succeed*, which never happens on
+# a healthy system (connection refused), so the whole check silently skipped on
+# every host (GH #26). Probing 127.0.0.1:1 and reading the error text does not
+# depend on any port being open:
+#   - net redirections missing -> "No such file or directory" / "not supported"
+#   - restricted shell         -> "restricted: cannot redirect"
+#   - connection refused (the healthy case) -> "connect: Connection refused"
+# The redirection runs in a subshell (command substitution), so no file
+# descriptor leaks into the caller.
+#
+# shellcheck disable=SC2120  # production call passes no argument; tests inject the probe error
+bash_supports_dev_tcp() {
+    # Optional argument: the probe's error output. The check passes nothing and
+    # runs the probe itself; tests inject the error text to cover a bash built
+    # without net redirections.
+    local probe_err="${1:-}"
+    if [[ -z "$probe_err" ]]; then
+        probe_err=$( { exec 3<>/dev/tcp/127.0.0.1/1; } 2>&1 ) || true
+    fi
+
+    case "$probe_err" in
+        *"No such file or directory"*|*"not supported"*|*"cannot redirect"*|*"restricted"*)
+            return 1
+            ;;
+    esac
+    return 0
+}
+
 # ===========================================================================
 # CHECK: TCP Port Reachability
 # Tests connectivity to host:port pairs defined in CRITICAL_PORTS
 # ===========================================================================
 check_tcp_ports() {
     [[ -z "${CRITICAL_PORTS:-}" ]] && return
-    
-    # Check if bash supports /dev/tcp (some minimal builds don't)
-    if [[ ! -e /dev/tcp ]]; then
-        # Try to create a test connection to see if feature works
-        if ! bash -c 'echo test >/dev/tcp/localhost/1' 2>/dev/null; then
-            log "DEBUG" "check_tcp_ports: /dev/tcp not supported in this bash build — skipping"
-            return
-        fi
+
+    if ! bash_supports_dev_tcp; then
+        log "WARN" "check_tcp_ports: this bash build has no /dev/tcp support — skipping configured port checks"
+        return
     fi
     
     for entry in $CRITICAL_PORTS; do
