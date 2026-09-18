@@ -5,7 +5,7 @@
 
 > **Lightweight, self-managing system health monitor with intelligent alerts. Zero maintenance. Zero spam.**
 
-Telemon is a single-file Bash script that monitors your Linux server — CPU, memory, disk, containers, services, ports, SSL certs, hardware health, databases, and more — and **only alerts when something actually changes**. No spam, just signal. It runs via cron every 5 minutes and requires zero ongoing maintenance.
+Telemon is a single-file Bash script that monitors your Linux server: CPU, memory, disk, containers, services, ports, SSL certs, hardware health, databases, and more. It **only alerts when something actually changes**. No spam, just signal. It runs via cron every 5 minutes and requires zero ongoing maintenance.
 
 ## 🚀 One-Line Install
 
@@ -42,7 +42,7 @@ TELEGRAM_BOT_TOKEN="xxx" TELEGRAM_CHAT_ID="yyy" \
 
 ### How Alerting Works
 
-Telemon uses **stateful tracking** — it remembers the previous state of each check and only notifies on *transitions*. This eliminates false alarms and alert spam:
+Telemon uses **stateful tracking**: it remembers the previous state of each check and only notifies on *transitions*. This eliminates false alarms and alert spam:
 
 ```text
 Check 1: CPU=85% → count=1/3, silent (collecting evidence)
@@ -125,69 +125,69 @@ fi
 ## Features
 
 ### Core System Monitoring
-- **CPU Load** — 1-minute load average as percentage of available cores
-- **Memory** — Available memory percentage (inverted thresholds: lower = worse)
-- **Disk Space** — Per-partition monitoring, auto-filters tmpfs/overlay/snap
-- **Swap Usage** — Swap partition monitoring, gracefully skips if no swap
-- **I/O Wait** — CPU time spent waiting for disk I/O (stateful differential sampling)
-- **Zombie Processes** — Detects processes stuck in Z state
-- **Internet Connectivity** — Ping-based reachability with configurable target
+- **CPU Load**: 1-minute load average as percentage of available cores
+- **Memory**: Available memory percentage (inverted thresholds: lower = worse)
+- **Disk Space**: Per-partition monitoring, auto-filters tmpfs/overlay/snap
+- **Swap Usage**: Swap partition monitoring, gracefully skips if no swap
+- **I/O Wait**: CPU time spent waiting for disk I/O (stateful differential sampling)
+- **Zombie Processes**: Detects processes stuck in Z state
+- **Internet Connectivity**: Ping-based reachability with configurable target
 
 ### Process & Service Monitoring
-- **System Processes** — Monitors via `pgrep` with `systemctl` fallback
-- **Failed Systemd Services** — System-wide scan for failed units
-- **Docker Containers** — Status and health checks (gracefully skips if unavailable)
-- **PM2 Processes** — Node.js process monitoring via `pm2 jlist`
+- **System Processes**: Monitors via `pgrep` with `systemctl` fallback
+- **Failed Systemd Services**: System-wide scan for failed units
+- **Docker Containers**: Status and health checks (gracefully skips if unavailable)
+- **PM2 Processes**: Node.js process monitoring via `pm2 jlist`
 
 ### Website & Endpoint Monitoring
-- **HTTP/HTTPS Health** — Availability, HTTP status codes, response times
-- **SSL Certificate Expiry** — Cross-platform via `openssl` with date parsing fallback
-- **TCP Port Checks** — Reachability testing via `/dev/tcp`
-- **DNS Resolution** — Health checking via `dig`, `nslookup`, or `host`
-- **DNS Record Validation** — Verify A, AAAA, MX, TXT, CNAME, NS, SOA, PTR, SRV, CAA records
+- **HTTP/HTTPS Health**: Availability, HTTP status codes, response times
+- **SSL Certificate Expiry**: Cross-platform via `openssl` with date parsing fallback
+- **TCP Port Checks**: Reachability testing via `/dev/tcp`
+- **DNS Resolution**: Health checking via `dig`, `nslookup`, or `host`
+- **DNS Record Validation**: Verify A, AAAA, MX, TXT, CNAME, NS, SOA, PTR, SRV, CAA records
 
 ### Extended Monitoring
-- **CPU Temperature** — Thermal monitoring via `lm-sensors`
-- **GPU Monitoring** — NVIDIA via `nvidia-smi` or Intel via `intel_gpu_top`
-- **UPS / Battery** — Charge level monitoring via `upower` or `apcaccess`
-- **Network Bandwidth** — Interface throughput monitoring
-- **NVMe / SMART Health** — Critical warning byte, endurance wear, temperature, media errors
-- **Log Pattern Matching** — Watch log files for regex patterns
-- **File Integrity** — SHA256 checksum monitoring for critical files (incl. **deletion alerts**)
-- **Config Drift Detection** — Rich change tracking with unified diffs (incl. **deletion alerts**)
-- **Cron Job Heartbeats** — Detect stale cron jobs via heartbeat file age
+- **CPU Temperature**: Thermal monitoring via `lm-sensors`
+- **GPU Monitoring**: NVIDIA via `nvidia-smi` or Intel via `intel_gpu_top`
+- **UPS / Battery**: Charge level monitoring via `upower` or `apcaccess`
+- **Network Bandwidth**: Interface throughput monitoring
+- **NVMe / SMART Health**: Critical warning byte, endurance wear, temperature, media errors
+- **Log Pattern Matching**: Watch log files for regex patterns
+- **File Integrity**: SHA256 checksum monitoring for critical files (incl. **deletion alerts**)
+- **Config Drift Detection**: Rich change tracking with unified diffs (incl. **deletion alerts**)
+- **Cron Job Heartbeats**: Detect stale cron jobs via heartbeat file age
 
 ### Predictive & Fleet Features
-- **Predictive Resource Exhaustion** — Linear regression to alert *before* disk/memory runs out
-- **Fleet Monitoring** — Multi-server heartbeat aggregation via shared directory
-- **Auto-Remediation** — Automatically restart failed systemd services
-- **Maintenance Windows** — Flag file or scheduled recurring windows
+- **Predictive Resource Exhaustion**: Linear regression to alert *before* disk/memory runs out
+- **Fleet Monitoring**: Multi-server heartbeat aggregation via shared directory
+- **Auto-Remediation**: Automatically restart failed systemd services
+- **Maintenance Windows**: Flag file or scheduled recurring windows
 
 ### Plugin System
-- **Directory-Based Plugins** — Place executable scripts in `checks.d/`
-- **Simple Output Format** — Plugins output `STATE|KEY|DETAIL`
-- **Security-First** — Timeout protection, symlinks skipped, output validated
+- **Directory-Based Plugins**: Place executable scripts in `checks.d/`
+- **Simple Output Format**: Plugins output `STATE|KEY|DETAIL`
+- **Security-First**: Timeout protection, symlinks skipped, output validated
 
 ### Database Health Checks
-- **MySQL/MariaDB** — Connection check and replication lag monitoring (password delivered via env, works on password-protected servers)
-- **PostgreSQL** — Connection check and streaming replication lag
-- **Redis** — Connection check, authentication, master/replica status
-- **SQLite3** — File integrity, size thresholds, corruption detection
-- **ODBC** — Universal support for SQL Server, Oracle, DB2, etc.
+- **MySQL/MariaDB**: Connection check and replication lag monitoring (password delivered via env, works on password-protected servers)
+- **PostgreSQL**: Connection check and streaming replication lag
+- **Redis**: Connection check, authentication, master/replica status
+- **SQLite3**: File integrity, size thresholds, corruption detection
+- **ODBC**: Universal support for SQL Server, Oracle, DB2, etc.
 
 ### Alert Channels & Intelligence
-- **Multi-Channel** — Telegram (primary), webhooks (Slack/Discord/ntfy), email
-- **Retry/Queue** — Failed Telegram alerts queue to disk and retry every cycle (even quiet ones); plain-text channels (webhook/email/escalation) get fully decoded messages incl. emoji
-- **Rate Limiting** — Per-key cooldown prevents alert floods
-- **Escalation** — Separate webhook for unresolved alerts after N minutes
-- **Top Processes** — Auto-capture CPU/memory hogs in alerts
+- **Multi-Channel**: Telegram (primary), webhooks (Slack/Discord/ntfy), email
+- **Retry/Queue**: Failed Telegram alerts queue to disk and retry every cycle (even quiet ones); plain-text channels (webhook/email/escalation) get fully decoded messages incl. emoji
+- **Rate Limiting**: Per-key cooldown prevents alert floods
+- **Escalation**: Separate webhook for unresolved alerts after N minutes
+- **Top Processes**: Auto-capture CPU/memory hogs in alerts
 
 ### Exports & Integrations
-- **Prometheus** — Textfile export for `node_exporter`
-- **JSON Status** — Machine-readable status API
-- **Static HTML Status Page** — Self-contained dashboard
-- **Health Digest** — Scheduled full health summaries
-- **Audit Logging** — Structured JSON logs for compliance
+- **Prometheus**: Textfile export for `node_exporter`
+- **JSON Status**: Machine-readable status API
+- **Static HTML Status Page**: Self-contained dashboard
+- **Health Digest**: Scheduled full health summaries
+- **Audit Logging**: Structured JSON logs for compliance
 
 ---
 
@@ -199,7 +199,7 @@ fi
 curl -fsSL https://raw.githubusercontent.com/SwordfishTrumpet/telemon/main/install.sh | bash
 ```
 
-The one-liner cannot prompt for credentials — stdin is the piped installer. It
+The one-liner cannot prompt for credentials, because stdin is the piped installer. It
 installs with a template `.env` and prints what to fill in:
 
 ```bash
@@ -240,7 +240,7 @@ SITE_URLS="https://example.com https://api.example.com" \
 ```
 
 **Silent Mode Features:**
-- ✅ No interactive prompts — perfect for automation
+- ✅ No interactive prompts, perfect for automation
 - ✅ Auto-detects Docker and PM2 (enables if found)
 - ✅ Uses sensible defaults for all settings
 - ✅ Merges with existing `.env` if present (safe for updates)
@@ -281,7 +281,7 @@ TELEGRAM_BOT_TOKEN="xxx" TELEGRAM_CHAT_ID="yyy" \
 
 1. **Downloads** the latest Telemon files from GitHub
 2. **Configures** your Telegram credentials
-3. **Sets up** optional monitoring (Docker, PM2, websites — auto-detected)
+3. **Sets up** optional monitoring (Docker, PM2, websites, all auto-detected)
 4. **Installs** a cron job or systemd timer (runs every 5 minutes)
 5. **Validates** the configuration and sends a test alert
 
@@ -877,7 +877,7 @@ Controlled by `ALERT_COOLDOWN_SEC` (default: 900s). Set to 0 to disable.
 
 **Recovery (resolution) alerts are exempt from the cooldown:** a check that
 recovers to OK within the cooldown window still sends its "resolved"
-notification immediately (e.g. `12:05 — CPU resolves to OK → recovery alert
+notification immediately (e.g. `12:05, CPU resolves to OK, recovery alert
 sent` fires even if the original alert was at 12:01). Non-OK re-alerts remain
 rate-limited.
 
@@ -988,7 +988,7 @@ systemctl --user start telemon.timer
 
 See [systemd/README.md](systemd/README.md) for detailed reference.
 
-> **Note:** The Docker deployment (previously in `docker-compose.yml` / `Dockerfile`) was **deprecated and removed** — Telemon runs as a host cron job or systemd timer, never inside a container. Running it in Docker would require mounting the Docker socket (a privilege-escalation vector) and duplicates the scheduler. See `CHANGELOG.md` for the deprecation history.
+> **Note:** The Docker deployment (previously in `docker-compose.yml` / `Dockerfile`) was **deprecated and removed**. Telemon runs as a host cron job or systemd timer, never inside a container. Running it in Docker would require mounting the Docker socket (a privilege-escalation vector) and duplicates the scheduler. See `CHANGELOG.md` for the deprecation history.
 
 ---
 
@@ -1037,7 +1037,7 @@ fi
 4. Output exactly: `STATE|KEY|DETAIL`
 5. Always report something: a plugin that exits non-zero or prints nothing is
    treated as a failed check (`plugin_health` WARNING after the confirmation
-   count). Exit non-zero only when the plugin itself is broken — use a
+   count). Exit non-zero only when the plugin itself is broken; use a
    `WARNING`/`CRITICAL` line to report an unhealthy service.
 
 ---
@@ -1110,7 +1110,7 @@ bash telemon-admin.sh reset-state
 
 1. Open Telegram and message [@BotFather](https://t.me/botfather)
 2. Send `/newbot`
-3. Follow prompts — pick a name and username (must end in `bot`)
+3. Follow prompts: pick a name and username (must end in `bot`)
 4. Copy the token (e.g., `123456789:ABCdefGHIjklMNOpqrSTUvwxyz`)
 
 ### Step 2: Get Your Chat ID
@@ -1150,15 +1150,15 @@ curl -X POST "https://api.telegram.org/bot<TOKEN>/sendMessage" \
 
 ## Documentation
 
-- [Quick Reference](docs/QUICKREF.md) — Command cheat sheet
-- [Troubleshooting Guide](docs/TROUBLESHOOTING.md) — Common issues and solutions
-- [Systemd Setup](systemd/README.md) — Running with systemd instead of cron
+- [Quick Reference](docs/QUICKREF.md): command cheat sheet
+- [Troubleshooting Guide](docs/TROUBLESHOOTING.md): common issues and solutions
+- [Systemd Setup](systemd/README.md): running with systemd instead of cron
 
 ---
 
 ## License
 
-MIT License — see [LICENSE](LICENSE).
+MIT License. See [LICENSE](LICENSE).
 
 ---
 

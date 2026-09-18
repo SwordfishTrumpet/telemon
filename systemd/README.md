@@ -1,6 +1,6 @@
 # Telemon Systemd Timer Guide
 
-Run Telemon via systemd timer instead of cron — ideal for containerized systems, better logging, and modern Linux integration.
+Run Telemon via a systemd timer instead of cron. Ideal for containerized systems, with better logging and modern Linux integration.
 
 ## Quick Setup (Recommended)
 
@@ -188,10 +188,10 @@ OnUnitActiveSec=5min
 ```
 
 Common schedules:
-- `OnUnitActiveSec=5min` — Every 5 minutes (default)
-- `OnUnitActiveSec=1min` — Every minute
-- `OnCalendar=*:0/15` — Every 15 minutes
-- `OnCalendar=hourly` — Once per hour
+- `OnUnitActiveSec=5min`: every 5 minutes (default)
+- `OnUnitActiveSec=1min`: every minute
+- `OnCalendar=*:0/15`: every 15 minutes
+- `OnCalendar=hourly`: once per hour
 
 ## Troubleshooting
 
@@ -297,6 +297,6 @@ journalctl --user -u telemon -n 50
 
 ## See Also
 
-- [Main README](../README.md) — General Telemon documentation
-- [Admin CLI](../README.md#cli-reference) — `telemon-admin.sh` commands
-- [Testing & Debugging](../README.md#testing--debugging) — Troubleshooting guide
+- [Main README](../README.md): general Telemon documentation
+- [Admin CLI](../README.md#cli-reference): `telemon-admin.sh` commands
+- [Testing & Debugging](../README.md#testing--debugging): troubleshooting guide
