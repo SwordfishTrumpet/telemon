@@ -5372,8 +5372,17 @@ is_in_maintenance_window() {
         local start_time="${time_range%%-*}"
         local end_time="${time_range##*-}"
 
-        # Check if day matches
-        if [[ "$current_day" != "$sched_day" ]]; then
+        # A window that crosses midnight ("Sat 23:00-01:00") is also open on
+        # the following day, so an entry is only skipped when its day matches
+        # neither. Keeping this check before the time parsing also keeps a
+        # malformed entry from warning on every non-matching day (GH #4).
+        local next_day=""
+        case "$sched_day" in
+            Mon) next_day="Tue" ;; Tue) next_day="Wed" ;; Wed) next_day="Thu" ;;
+            Thu) next_day="Fri" ;; Fri) next_day="Sat" ;; Sat) next_day="Sun" ;;
+            Sun) next_day="Mon" ;;
+        esac
+        if [[ "$current_day" != "$sched_day" && "$current_day" != "$next_day" ]]; then
             continue
         fi
 
@@ -5398,9 +5407,27 @@ is_in_maintenance_window() {
         local start_min=$(( 10#$start_h * 60 + 10#$start_m ))
         local end_min=$(( 10#$end_h * 60 + 10#$end_m ))
 
-        if (( current_minutes >= start_min && current_minutes < end_min )); then
-            return 0  # in maintenance window
+        if (( end_min < start_min )); then
+            # The window crosses midnight: "Sat 23:00-01:00" is open on
+            # Saturday from 23:00 and on Sunday until 01:00. The morning half
+            # belongs to the following day, so the window is never applied at
+            # the same clock time earlier on its own configured day. Before
+            # GH #37 the comparison below was always false for these windows,
+            # so an overnight maintenance window silently did nothing.
+            if [[ "$current_day" == "$sched_day" ]] && (( current_minutes >= start_min )); then
+                return 0  # in maintenance window (evening half)
+            fi
+            if [[ "$current_day" == "$next_day" ]] && (( current_minutes < end_min )); then
+                return 0  # in maintenance window (morning half of yesterday's window)
+            fi
+        elif (( end_min > start_min )); then
+            if [[ "$current_day" == "$sched_day" ]] && \
+               (( current_minutes >= start_min && current_minutes < end_min )); then
+                return 0  # in maintenance window
+            fi
         fi
+        # end_min == start_min is ambiguous (a range needs two different ends):
+        # the entry is not applied, and run_validate reports it.
     done
 
     return 1  # not in any window
@@ -6290,6 +6317,11 @@ run_validate() {
                 local ms_eh="${ms_end%%:*}" ms_em="${ms_end##*:}"
                 if (( 10#$ms_sh > 23 || 10#$ms_sm > 59 || 10#$ms_eh > 23 || 10#$ms_em > 59 )); then
                     echo "  WARN: MAINT_SCHEDULE entry '${ms_entry}': hours must be 0-23, minutes 0-59"
+                    warnings=$((warnings + 1))
+                elif (( (10#$ms_eh * 60 + 10#$ms_em) == (10#$ms_sh * 60 + 10#$ms_sm) )); then
+                    # A range needs two different ends; an entry like
+                    # "Sat 02:00-02:00" is ambiguous and is not applied (GH #37)
+                    echo "  WARN: MAINT_SCHEDULE entry '${ms_entry}': start and end are identical — the window will never be applied"
                     warnings=$((warnings + 1))
                 fi
             fi

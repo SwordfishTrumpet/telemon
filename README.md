@@ -617,6 +617,8 @@ AUTO_RESTART_SERVICES="nginx sshd"
 MAINT_FLAG_FILE="/tmp/telemon_maint"
 
 # Scheduled recurring windows (semicolon-separated)
+# A window that ends earlier than it starts crosses midnight, so
+# "Sat 23:00-01:00" covers Saturday 23:00 through Sunday 01:00.
 MAINT_SCHEDULE="Sun 02:00-04:00;Sat 03:00-05:00"
 ```
 
