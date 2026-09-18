@@ -3364,11 +3364,13 @@ test_regression_thermal_zone_plausibility() {
     temp_line=$(grep -m1 "Current temp:" <<< "$discover_out" || true)
     if [[ -n "$temp_line" ]]; then
         temp_val=$(sed -E 's/.*Current temp: (-?[0-9]+).*/\1/' <<< "$temp_line")
-        [[ "$temp_val" -ge -20 && "$temp_val" -le 150 ]]
-        assert_true "thermal: discover reports a plausible temperature (${temp_line#  Current temp: })"
     else
-        assert_true "thermal: discover prints no temperature when no zone is usable"
+        # No thermal zone on this machine (common in CI VMs) — the command must
+        # then omit the reading rather than print a nonsense one.
+        temp_val=""
     fi
+    [[ -z "$temp_val" || ( "$temp_val" -ge -20 && "$temp_val" -le 150 ) ]]
+    assert_true "thermal: discover reports a plausible temperature or none (${temp_val:-none / no zone})"
 
     unset -f _detect_thermal_zone make_zone
     rm -rf "$fixture" "$fn_file"
