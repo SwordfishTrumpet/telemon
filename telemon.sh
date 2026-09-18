@@ -3335,55 +3335,52 @@ check_odbc() {
             continue
         fi
         
-        # Build connection string or use DSN
-        local conn_str=""
-        if [[ -n "$conn_dsn" ]]; then
-            # DSN-based connection
-            conn_str="${conn_dsn}"
-        else
-            # Connection string-based
-            conn_str="DRIVER={${conn_driver}};SERVER=${conn_server};"
-            [[ -n "$conn_database" ]] && conn_str+="DATABASE=${conn_database};"
-            [[ -n "$conn_user" ]] && conn_str+="UID=${conn_user};"
-            [[ -n "$conn_pass" ]] && conn_str+="PWD=${conn_pass};"
+        # Test connection using isql. Every credential travels in a 0600
+        # file-based DSN (a .dsn file) handed over as FILEDSN=<path>, so no
+        # secret ever reaches a command line (GH #35). The DSN form used to
+        # pass the password as an argv positional, readable by any local user
+        # from /proc/<pid>/cmdline for the whole duration of the query, and
+        # the driver form's connection string was placed on isql's argv the
+        # same way even though it was read out of a file first.
+        local conn_dsn_file
+        conn_dsn_file=$(mktemp 2>/dev/null) || {
+            log "WARN" "ODBC check: cannot create the credential file — skipping ${safe_conn_name}"
+            continue
+        }
+        # unixODBC resolves a FILEDSN only when the name ends in .dsn
+        # (verified against unixODBC 2.3.12: an extension-less path fails
+        # SQLDriverConnect). Rename rather than re-create so the file keeps
+        # its 0600 mode from mktemp.
+        if mv "$conn_dsn_file" "${conn_dsn_file}.dsn" 2>/dev/null; then
+            conn_dsn_file="${conn_dsn_file}.dsn"
         fi
-        
-        # Test connection using isql
+        chmod 600 "$conn_dsn_file" 2>/dev/null || true
+        {
+            printf '[ODBC]\n'
+            if [[ -n "$conn_dsn" ]]; then
+                printf 'DSN=%s\n' "$conn_dsn"
+            else
+                printf 'DRIVER={%s}\n' "$conn_driver"
+                printf 'SERVER=%s\n' "$conn_server"
+                if [[ -n "$conn_database" ]]; then printf 'DATABASE=%s\n' "$conn_database"; fi
+            fi
+            if [[ -n "$conn_user" ]]; then printf 'UID=%s\n' "$conn_user"; fi
+            if [[ -n "$conn_pass" ]]; then printf 'PWD=%s\n' "$conn_pass"; fi
+        } > "$conn_dsn_file"
+
         local odbc_result
         local odbc_exit=0
         local start_time end_time duration_ms
-        
+
         start_time=$(date +%s%3N 2>/dev/null || echo "0")
-        
-        if [[ -n "$conn_dsn" ]]; then
-            # DSN-based: isql DSN user pass -b -c';' query
-            if [[ -n "$conn_user" && -n "$conn_pass" ]]; then
-                odbc_result=$(run_with_timeout "$check_timeout" bash -c '
-                    export ODBCUSER="$1"
-                    export ODBCPASS="$2"
-                    isql "$3" "$ODBCUSER" "$ODBCPASS" -b -c ";" <<< "$4" 2>&1
-                ' _ "$conn_user" "$conn_pass" "$conn_dsn" "$conn_query" 2>&1) || odbc_exit=$?
-            else
-                odbc_result=$(run_with_timeout "$check_timeout" isql "$conn_dsn" -b -c ";" <<< "$conn_query" 2>&1) || odbc_exit=$?
-            fi
-        else
-            # Connection string-based: isql -k "connection_string" -b -c';' query
-            # The connection string containing PWD= is passed via a temp file descriptor
-            # instead of command line to prevent exposure in /proc/*/cmdline
-            local conn_str_file
-            conn_str_file=$(mktemp)
-            printf '%s' "$conn_str" > "$conn_str_file"
-            chmod 600 "$conn_str_file"
-            odbc_result=$(run_with_timeout "$check_timeout" bash -c '
-                conn_str_file="$1"
-                conn_query="$2"
-                # Read connection string from file, not command line
-                conn_str=$(cat "$conn_str_file")
-                rm -f "$conn_str_file"
-                isql -k "$conn_str" -b -c ";" <<< "$conn_query" 2>&1
-            ' _ "$conn_str_file" "$conn_query" 2>&1) || odbc_exit=$?
-            rm -f "$conn_str_file"  # Cleanup in case the subshell failed early
-        fi
+
+        # -k selects SQLDriverConnect; the file path is the only thing on the
+        # command line. The inner `2>&1` is required because run_with_timeout
+        # discards stderr for every caller, while isql reports driver errors
+        # on stderr and the checks below match on that text.
+        odbc_result=$(run_with_timeout "$check_timeout" \
+            bash -c 'isql -k "$1" -b -c ";" 2>&1' _ "FILEDSN=${conn_dsn_file}" <<< "$conn_query" 2>&1) || odbc_exit=$?
+        rm -f "$conn_dsn_file"
         
         end_time=$(date +%s%3N 2>/dev/null || echo "0")
         duration_ms=$((end_time - start_time))
