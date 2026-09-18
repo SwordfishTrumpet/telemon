@@ -3956,6 +3956,24 @@ check_cron_jobs() {
 # Sources and executes all executable scripts in the checks.d directory.
 # Each plugin outputs STATE|KEY|DETAIL format for integration with Telemon.
 # ===========================================================================
+# GH #32: reduce a plugin's stderr to one bounded, log-safe fragment.
+# Plugin stderr is arbitrary untrusted text: newlines would forge extra log
+# lines through log()'s `tee`, control characters would garble the terminal,
+# and the text can be arbitrarily long. Keep the last few lines (a crash
+# message is normally the tail) and collapse everything to one line.
+sanitize_plugin_stderr() {
+    local raw="$1"
+    local max_chars="${2:-300}"
+    local text
+    text=$(printf '%s' "$raw" | tail -n 3 | tr '\n\t' '  ' | tr -d '[:cntrl:]' | tr -s ' ')
+    text="${text# }"
+    text="${text% }"
+    if [[ ${#text} -gt $max_chars ]]; then
+        text="${text:0:max_chars}..."
+    fi
+    printf '%s' "$text"
+}
+
 check_plugins() {
     local plugin_dir="${CHECKS_DIR:-${SCRIPT_DIR}/checks.d}"
     
@@ -3992,11 +4010,34 @@ check_plugins() {
         # `|| plugin_output=""` used to discard it, so a plugin that crashed
         # was indistinguishable from a healthy one and its checks simply
         # stopped being monitored without any alert.
+        #
+        # GH #32: run_with_timeout discards stderr for every one of its
+        # callers (that is its contract), so an inner shell redirects the
+        # plugin's own stderr to a capture file. Without this the single
+        # diagnostic that explains a crash never reaches the log, leaving a
+        # warning the operator can only investigate by reproducing it by hand.
         local plugin_output plugin_rc=0
-        plugin_output=$(run_with_timeout "$CHECK_TIMEOUT" "$plugin" 2>/dev/null) || plugin_rc=$?
-        
+        local plugin_stderr_file=""
+        plugin_stderr_file=$(mktemp 2>/dev/null) || plugin_stderr_file=""
+        plugin_output=$(run_with_timeout "$CHECK_TIMEOUT" \
+            bash -c '"$1" 2>"$2"' _ "$plugin" "${plugin_stderr_file:-/dev/null}") || plugin_rc=$?
+
+        # Read (bounded) and discard the capture before branching, so no exit
+        # path can leak the file.
+        local plugin_stderr=""
+        if [[ -n "$plugin_stderr_file" && -s "$plugin_stderr_file" ]]; then
+            plugin_stderr=$(tail -c 4096 "$plugin_stderr_file" 2>/dev/null)
+        fi
+        if [[ -n "$plugin_stderr_file" ]]; then
+            rm -f "$plugin_stderr_file" 2>/dev/null
+        fi
+
         if [[ "$plugin_rc" -ne 0 ]]; then
-            log "WARN" "Plugin ${safe_plugin_name} exited ${plugin_rc} — its checks were not reported"
+            local err_suffix=""
+            if [[ -n "$plugin_stderr" ]]; then
+                err_suffix=" [stderr: $(sanitize_plugin_stderr "$plugin_stderr")]"
+            fi
+            log "WARN" "Plugin ${safe_plugin_name} exited ${plugin_rc} — its checks were not reported${err_suffix}"
             failed_plugins+=("$safe_plugin_name")
             continue
         fi
