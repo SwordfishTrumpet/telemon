@@ -4693,12 +4693,247 @@ PCTSTUB
 
     [[ "$err" != *"unbound variable"* ]]
     assert_true "timemachine: no unbound-variable crash when Results.plist missing"
-    assert_eq "WARNING|timemachine-connection|No active Time Machine connections on CT 101" "$out" \
-        "timemachine: emits valid STATE|KEY|DETAIL instead of crashing"
+    assert_eq "OK|timemachine-healthy|Time Machine appears healthy (CT 101 running, Samba active)" "$out" \
+        "timemachine: idle target with no client reports OK, not a connection warning"
     [[ "$rc" -eq 0 ]]
     assert_true "timemachine: plugin exits 0"
 
     rm -rf "$stubdir" "$err_file"
+}
+
+test_regression_timemachine_stuck_apostrophe() {
+    echo ""
+    echo "Testing timemachine plugin apostrophe path + active-connection stuck detection..."
+
+    if [[ ! -f "${SCRIPT_DIR}/checks.d/timemachine-ct101.sh" ]]; then
+        echo -e "${YELLOW}⚠${NC} Skipping timemachine stuck test (site-specific plugin absent in CI)"
+        return 0
+    fi
+
+    # The sparsebundle name contains an apostrophe ("Remco's MacBook Air").
+    # `xargs basename` on that path aborted the plugin under set -e with no
+    # output, which surfaced as a permanent plugin_health WARNING and destroyed
+    # the stuck-backup detection. The band path here reproduces that exactly;
+    # the stub reports one active SMB connection and an ancient last write.
+    local stubdir
+    stubdir=$(mktemp -d)
+    cat > "$stubdir/pct" <<'PCTSTUB'
+#!/usr/bin/env bash
+case "${1:-}" in
+    status)
+        echo "101: running"
+        ;;
+    exec)
+        shift 2
+        [[ "${1:-}" == "--" ]] && shift
+        cmd="${1:-}"
+        shift || true
+        case "$cmd" in
+            systemctl) echo "active" ;;
+            test)      exit 1 ;;
+            smbstatus) echo "TimeMachine    remcov" ;;
+            grep)      echo "<true/>" ;;
+            find)
+                # Only the bands directory lookup returns a band file
+                if [[ "$*" == *bands* ]]; then
+                    echo "1788437312.9574568310 /srv/timemachine/TimeMachine/Remco's MacBook Air.sparsebundle/bands/dc"
+                fi
+                ;;
+            *) ;;
+        esac
+        ;;
+    *) ;;
+esac
+exit 0
+PCTSTUB
+    chmod +x "$stubdir/pct"
+
+    local err_file out err rc
+    err_file=$(mktemp)
+    out=$(PATH="$stubdir:$PATH" bash "${SCRIPT_DIR}/checks.d/timemachine-ct101.sh" 2>"$err_file")
+    rc=$?
+    err=$(cat "$err_file")
+
+    [[ "$err" != *"unbound variable"* ]]
+    assert_true "timemachine stuck: no crash on an apostrophe in the band path"
+    [[ "$out" == CRITICAL\|timemachine-stuck\|* ]]
+    assert_true "timemachine stuck: active connection with no recent writes is CRITICAL"
+    [[ "$out" == *"last write: dc"* ]]
+    assert_true "timemachine stuck: band name extracted without xargs/basename"
+    [[ "$rc" -eq 0 ]]
+    assert_true "timemachine stuck: plugin exits 0"
+
+    rm -rf "$stubdir" "$err_file"
+}
+
+test_regression_disk_hysteresis() {
+    echo ""
+    echo "Testing DISK_HYSTERESIS_PCT deadband (alert-noise reduction)..."
+
+    local fn_file capture
+    fn_file=$(mktemp)
+    capture=$(mktemp)
+    awk '/^check_disk\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+
+    log() { :; }
+    record_trend() { :; }
+    check_prediction() { :; }
+    is_valid_number() { [[ "$1" =~ ^[0-9]+$ ]]; }
+    sanitize_state_key() { printf '%s' "$1" | tr -c 'a-zA-Z0-9_.-' '_'; }
+    html_escape() { printf '%s' "$1"; }
+    check_state_change() { printf '%s|%s\n' "$1" "$2" >> "$capture"; }
+
+    DISK_USAGE=95
+    df() {
+        printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+        printf '/dev/sdb1 100 %s %s %s%% /mnt/music\n' "$DISK_USAGE" "$((100 - DISK_USAGE))" "$DISK_USAGE"
+    }
+    run_with_timeout() { shift; "$@" 2>/dev/null; }
+
+    CHECK_TIMEOUT=5
+    ENABLE_PREDICTIVE_ALERTS=false
+    DISK_THRESHOLD_WARN=85
+    DISK_THRESHOLD_CRIT=95
+    DISK_HYSTERESIS_PCT=3
+    declare -A PREV_STATE=()
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+
+    DISK_USAGE=95; PREV_STATE[disk_mnt_music]=OK; : > "$capture"
+    check_disk
+    grep -q "disk_mnt_music|CRITICAL" "$capture"
+    assert_true "disk hysteresis: 95% at the threshold raises CRITICAL"
+
+    DISK_USAGE=94; PREV_STATE[disk_mnt_music]=CRITICAL; : > "$capture"
+    check_disk
+    grep -q "disk_mnt_music|CRITICAL" "$capture"
+    assert_true "disk hysteresis: 94% holds CRITICAL inside the deadband (no flapping)"
+
+    DISK_USAGE=91; PREV_STATE[disk_mnt_music]=CRITICAL; : > "$capture"
+    check_disk
+    grep -q "disk_mnt_music|WARNING" "$capture"
+    assert_true "disk hysteresis: 91% steps down to WARNING past the deadband"
+
+    DISK_USAGE=84; PREV_STATE[disk_mnt_music]=WARNING; : > "$capture"
+    check_disk
+    grep -q "disk_mnt_music|WARNING" "$capture"
+    assert_true "disk hysteresis: 84% holds WARNING inside the warn deadband"
+
+    DISK_USAGE=81; PREV_STATE[disk_mnt_music]=WARNING; : > "$capture"
+    check_disk
+    grep -q "disk_mnt_music|OK" "$capture"
+    assert_true "disk hysteresis: 81% resolves to OK past the deadband"
+
+    DISK_USAGE=94; DISK_HYSTERESIS_PCT=0; PREV_STATE[disk_mnt_music]=CRITICAL; : > "$capture"
+    check_disk
+    grep -q "disk_mnt_music|WARNING" "$capture"
+    assert_true "disk hysteresis: 0 disables the deadband (legacy exact-threshold behaviour)"
+
+    unset DISK_THRESHOLD_WARN DISK_THRESHOLD_CRIT DISK_HYSTERESIS_PCT CHECK_TIMEOUT \
+        ENABLE_PREDICTIVE_ALERTS PREV_STATE DISK_USAGE
+    unset -f log record_trend check_prediction is_valid_number sanitize_state_key \
+        html_escape check_state_change df run_with_timeout check_disk
+    rm -f "$fn_file" "$capture"
+}
+
+test_regression_disk_loop_root() {
+    echo ""
+    echo "Testing check_disk monitors a loop-mounted root (LXC regression)..."
+
+    local fn_file capture
+    fn_file=$(mktemp)
+    capture=$(mktemp)
+    awk '/^check_disk\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+
+    log() { :; }
+    record_trend() { :; }
+    check_prediction() { :; }
+    is_valid_number() { [[ "$1" =~ ^[0-9]+$ ]]; }
+    sanitize_state_key() { printf '%s' "$1" | tr -c 'a-zA-Z0-9_.-' '_'; }
+    html_escape() { printf '%s' "$1"; }
+    check_state_change() { printf '%s|%s\n' "$1" "$2" >> "$capture"; }
+
+    # LXC roots are loop devices; a loop-backed ISO is a separate mount that
+    # must still be skipped. Before the fix every /dev/loop* was skipped, so
+    # disk_root was never checked inside any container.
+    df() {
+        printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+        printf '/dev/loop0 100 50 50 50%% /\n'
+        printf '/dev/loop9 100 50 50 10%% /mnt/iso\n'
+    }
+    run_with_timeout() { shift; "$@" 2>/dev/null; }
+
+    CHECK_TIMEOUT=5
+    ENABLE_PREDICTIVE_ALERTS=false
+    DISK_THRESHOLD_WARN=85
+    DISK_THRESHOLD_CRIT=95
+    DISK_HYSTERESIS_PCT=0
+    declare -A PREV_STATE=()
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+    check_disk
+
+    grep -q "disk_root|" "$capture"
+    assert_true "disk loop root: loop-mounted / is monitored (was skipped before)"
+    ! grep -q "disk_mnt_iso|" "$capture"
+    assert_true "disk loop root: loop-mounted ISO mount is still skipped"
+
+    unset DISK_THRESHOLD_WARN DISK_THRESHOLD_CRIT DISK_HYSTERESIS_PCT CHECK_TIMEOUT \
+        ENABLE_PREDICTIVE_ALERTS PREV_STATE
+    unset -f log record_trend check_prediction is_valid_number sanitize_state_key \
+        html_escape check_state_change df run_with_timeout check_disk
+    rm -f "$fn_file" "$capture"
+}
+
+test_regression_ping_warn_threshold() {
+    echo ""
+    echo "Testing PING_WARN_FAIL_THRESHOLD (single-blip suppression)..."
+
+    local fn_file capture
+    fn_file=$(mktemp)
+    capture=$(mktemp)
+    awk '/^check_internet\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+
+    log() { :; }
+    is_valid_number() { [[ "$1" =~ ^[0-9]+$ ]]; }
+    is_valid_hostname() { return 0; }
+    html_escape() { printf '%s' "$1"; }
+    check_state_change() { printf '%s\n' "$2" >> "$capture"; }
+    MOCK_FAILS=0
+    run_with_timeout() { printf '%s\n' "$MOCK_FAILS"; }
+
+    PING_TARGET="8.8.8.8"
+    PING_FAIL_THRESHOLD=3
+    PING_WARN_FAIL_THRESHOLD=2
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+
+    MOCK_FAILS=1; : > "$capture"
+    check_internet
+    grep -q "^OK$" "$capture"
+    assert_true "ping: one failed ping stays OK with PING_WARN_FAIL_THRESHOLD=2"
+
+    MOCK_FAILS=2; : > "$capture"
+    check_internet
+    grep -q "^WARNING$" "$capture"
+    assert_true "ping: two failed pings raise WARNING"
+
+    MOCK_FAILS=3; : > "$capture"
+    check_internet
+    grep -q "^CRITICAL$" "$capture"
+    assert_true "ping: all pings failed raise CRITICAL"
+
+    PING_WARN_FAIL_THRESHOLD=1; MOCK_FAILS=1; : > "$capture"
+    check_internet
+    grep -q "^WARNING$" "$capture"
+    assert_true "ping: default threshold 1 warns on a single failure (legacy behaviour)"
+
+    unset PING_TARGET PING_FAIL_THRESHOLD PING_WARN_FAIL_THRESHOLD MOCK_FAILS
+    unset -f log is_valid_number is_valid_hostname html_escape check_state_change run_with_timeout check_internet
+    rm -f "$fn_file" "$capture"
 }
 
 test_regression_strip_html_entities() {
@@ -6733,6 +6968,13 @@ main() {
     test_regression_network_bandwidth_functional
     test_regression_send_telegram_truncation
     test_regression_tcp_port_probe
+
+    # Noise-reduction regressions (2026-09-21): run last on purpose — they mock
+    # and unset shared helpers (log, check_state_change, is_valid_number, ...).
+    test_regression_timemachine_stuck_apostrophe
+    test_regression_disk_hysteresis
+    test_regression_disk_loop_root
+    test_regression_ping_warn_threshold
 
     # Summary
     echo ""
