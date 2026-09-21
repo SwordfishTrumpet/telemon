@@ -484,6 +484,7 @@ MEM_THRESHOLD_CRIT=10
 # Disk: % used
 DISK_THRESHOLD_WARN=85
 DISK_THRESHOLD_CRIT=90
+DISK_HYSTERESIS_PCT=0      # optional deadband in percentage points
 
 # Swap: % used
 SWAP_THRESHOLD_WARN=50
@@ -500,6 +501,7 @@ ZOMBIE_THRESHOLD_CRIT=20
 # Internet connectivity
 PING_TARGET="8.8.8.8"
 PING_FAIL_THRESHOLD=3
+PING_WARN_FAIL_THRESHOLD=1   # failures needed before the intermittent WARNING
 
 # CPU temperature (°C)
 TEMP_THRESHOLD_WARN=75

@@ -5,6 +5,20 @@ All notable changes to Telemon will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.5] - 2026-09-21
+
+### Added
+- **`DISK_HYSTERESIS_PCT`** (default `0`, disabled): a deadband in percentage points for the disk check. Once a filesystem is WARNING or CRITICAL, usage must fall this far below the trigger line before the state clears. A disk parked on a threshold (the production music library sat at 94-95% against a 95% CRIT) used to flip CRITICAL/WARNING every cycle and re-alert each flip.
+- **`PING_WARN_FAIL_THRESHOLD`** (default `1`, the previous behaviour): how many failed pings the connectivity check needs before it reports the intermittent WARNING. Set it to `2` on links where a single dropped ICMP echo is routine, so a transient blip no longer pages.
+
+### Fixed
+- **A loop-mounted root filesystem was never checked**: `check_disk` skipped every `/dev/loop*` filesystem to ignore loop-mounted ISOs, but an LXC container's root is a loop device (`/dev/loopN`). Root-disk monitoring was therefore dead inside every container in a standard deployment; the skip now keeps `/` and only ignores loop mounts elsewhere.
+- **The Time Machine plugin crashed on an apostrophe in the sparsebundle name**: `xargs basename` rejected `Remco's MacBook Air.sparsebundle` and, under `set -e`, aborted the plugin with no output, which surfaced as a permanent `plugin_health` WARNING and silently disabled every Time Machine check. The band name is now split with parameter expansion.
+- **The Time Machine plugin reported a stuck backup while the client was away**: a stale "running" flag in `Results.plist` was treated as a stuck backup even with no active SMB connection, and "no active connection" was itself a permanent WARNING. Stuck detection now requires an active connection, and an idle target reports healthy; the "no successful backup for N hours" check is the signal that a backup has actually stopped.
+
+### Tests
+- 881 → 896 assertions. New functional regressions for the disk hysteresis deadband, the loop-mounted root skip, the ping warn threshold, and the Time Machine apostrophe/active-connection paths.
+
 ## [1.2.4] - 2026-09-18
 
 ### Fixed

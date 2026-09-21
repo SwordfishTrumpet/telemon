@@ -620,6 +620,11 @@ validate_thresholds() {
     check_threshold_pair "CPU" "${CPU_THRESHOLD_WARN:-70}" "${CPU_THRESHOLD_CRIT:-80}" || has_errors=true
     check_threshold_pair "MEM" "${MEM_THRESHOLD_WARN:-15}" "${MEM_THRESHOLD_CRIT:-10}" "true" || has_errors=true
     check_threshold_pair "DISK" "${DISK_THRESHOLD_WARN:-85}" "${DISK_THRESHOLD_CRIT:-90}" || has_errors=true
+    # Optional disk hysteresis deadband, in percentage points (0 = disabled)
+    if ! is_valid_number "${DISK_HYSTERESIS_PCT:-0}"; then
+        log "ERROR" "Invalid DISK_HYSTERESIS_PCT: '${DISK_HYSTERESIS_PCT}' must be a non-negative integer"
+        has_errors=true
+    fi
     check_threshold_pair "SWAP" "${SWAP_THRESHOLD_WARN:-50}" "${SWAP_THRESHOLD_CRIT:-80}" || has_errors=true
     check_threshold_pair "IOWAIT" "${IOWAIT_THRESHOLD_WARN:-30}" "${IOWAIT_THRESHOLD_CRIT:-50}" || has_errors=true
     check_threshold_pair "ZOMBIE" "${ZOMBIE_THRESHOLD_WARN:-5}" "${ZOMBIE_THRESHOLD_CRIT:-20}" || has_errors=true
@@ -666,6 +671,10 @@ validate_thresholds() {
     # Validate ping threshold
     if ! is_valid_number "${PING_FAIL_THRESHOLD:-3}"; then
         log "ERROR" "Invalid PING_FAIL_THRESHOLD: '${PING_FAIL_THRESHOLD}' must be a positive integer"
+        has_errors=true
+    fi
+    if ! is_valid_number "${PING_WARN_FAIL_THRESHOLD:-1}"; then
+        log "ERROR" "Invalid PING_WARN_FAIL_THRESHOLD: '${PING_WARN_FAIL_THRESHOLD}' must be a positive integer"
         has_errors=true
     fi
     
@@ -1627,7 +1636,7 @@ check_disk() {
         [[ "$filesystem" == tmpfs* || "$filesystem" == devtmpfs* ]] && continue
         [[ "$filesystem" == overlay* || "$filesystem" == squashfs* ]] && continue
         [[ "$filesystem" == udev* || "$filesystem" == efivarfs* ]] && continue
-        [[ "$filesystem" == /dev/loop* ]] && continue  # Skip loop-mounted ISOs
+        [[ "$filesystem" == /dev/loop* && "$mountpoint" != "/" ]] && continue  # Skip loop-mounted ISOs, but never the root fs
         [[ "$mountpoint" == /snap/* ]] && continue
         [[ "$mountpoint" == /boot/efi ]] && continue
         [[ "$mountpoint" == /dev || "$mountpoint" == /dev/* ]] && continue
@@ -1656,12 +1665,29 @@ check_disk() {
         local state="OK"
         local detail="Disk ${safe_mount}: ${pct} used (${safe_fs})"
 
-        if (( usage >= ${DISK_THRESHOLD_CRIT:-90} )); then
+        local disk_warn_th="${DISK_THRESHOLD_WARN:-85}"
+        local disk_crit_th="${DISK_THRESHOLD_CRIT:-90}"
+        local disk_hysteresis="${DISK_HYSTERESIS_PCT:-0}"
+        [[ "$disk_hysteresis" =~ ^[0-9]+$ ]] || disk_hysteresis=0
+        local prev_disk_state="${PREV_STATE[$key]:-OK}"
+
+        # Hysteresis deadband: while a threshold state is active, usage must
+        # fall DISK_HYSTERESIS_PCT below the trigger line before the state is
+        # allowed to step down. Without it a disk hovering at the boundary
+        # (e.g. 94-95% against a 95% CRIT) flips CRITICAL/WARNING every cycle
+        # and re-alerts endlessly. Default 0 keeps the original behaviour.
+        if (( usage >= disk_crit_th )); then
             state="CRITICAL"
-            detail="Disk <b>${safe_mount}</b>: <b>${pct}</b> used on ${safe_fs} (threshold: ${DISK_THRESHOLD_CRIT:-90}%)"
-        elif (( usage >= ${DISK_THRESHOLD_WARN:-85} )); then
+            detail="Disk <b>${safe_mount}</b>: <b>${pct}</b> used on ${safe_fs} (threshold: ${disk_crit_th}%)"
+        elif [[ "$prev_disk_state" == "CRITICAL" ]] && (( usage >= disk_crit_th - disk_hysteresis )); then
+            state="CRITICAL"
+            detail="Disk <b>${safe_mount}</b>: <b>${pct}</b> used on ${safe_fs} (threshold: ${disk_crit_th}%, hysteresis: ${disk_hysteresis}%)"
+        elif (( usage >= disk_warn_th )); then
             state="WARNING"
-            detail="Disk <b>${safe_mount}</b>: <b>${pct}</b> used on ${safe_fs} (threshold: ${DISK_THRESHOLD_WARN:-85}%)"
+            detail="Disk <b>${safe_mount}</b>: <b>${pct}</b> used on ${safe_fs} (threshold: ${disk_warn_th}%)"
+        elif [[ "$prev_disk_state" == "WARNING" ]] && (( usage >= disk_warn_th - disk_hysteresis )); then
+            state="WARNING"
+            detail="Disk <b>${safe_mount}</b>: <b>${pct}</b> used on ${safe_fs} (threshold: ${disk_warn_th}%, hysteresis: ${disk_hysteresis}%)"
         fi
 
         check_state_change "$key" "$state" "$detail"
@@ -1753,10 +1779,22 @@ check_internet() {
     safe_target=$(html_escape "$target")
     local detail="Internet: connectivity to ${safe_target} OK"
 
+    # A single dropped ICMP echo is routine (upstream rate limiting, transient
+    # loss) and should not raise a WARNING. PING_WARN_FAIL_THRESHOLD sets how
+    # many failed pings are required before the intermittent WARNING fires
+    # (default 1 keeps the historical behaviour; raise it on lossy links).
+    local warn_fail_min="${PING_WARN_FAIL_THRESHOLD:-1}"
+    if ! is_valid_number "$warn_fail_min"; then
+        warn_fail_min=1
+    fi
+    if (( warn_fail_min > fail_threshold )); then
+        warn_fail_min="$fail_threshold"
+    fi
+
     if (( fail_count >= fail_threshold )); then
         state="CRITICAL"
         detail="Internet: <b>${fail_count}/${fail_threshold}</b> pings to ${safe_target} failed -- connectivity lost"
-    elif (( fail_count > 0 )); then
+    elif (( fail_count >= warn_fail_min )); then
         state="WARNING"
         detail="Internet: ${fail_count}/${fail_threshold} pings to ${safe_target} failed -- intermittent"
     fi
