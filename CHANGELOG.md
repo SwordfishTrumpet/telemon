@@ -5,6 +5,19 @@ All notable changes to Telemon will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.6] - 2026-11-12
+
+### Fixed
+- **Loopback port checks flooded the journal through the very service they probed**: a `localhost:*` entry was verified by opening a TCP connection, so the target logged an error on every cycle. For `localhost:12444` sshd wrote `banner exchange: Connection from 127.0.0.1 ...: invalid format` plus `send_error: write: Broken pipe`, which came to ~1,960 of the ~1,975 lines in `journalctl -b -p err` — 96% of the host's error log was this check. That is exactly why a genuine two-day fault (Plex's NFS music mount down; `/mnt/music` not mounted at all) could not be spotted in the error log. Loopback entries are now verified against the socket table with `ss`, which opens no connection and logs nothing in the target. Remote hosts still use the `/dev/tcp` probe.
+- **The Time Machine plugin could emit nothing at all**: every numeric comparison used a raw value (`[[ "$X" -gt 0 ]]`), and a transient `pct exec` failure or an empty result makes that a syntax error under `set -e`, aborting the plugin before it printed a single line — so *all* Time Machine checks silently disappeared. All numbers now pass through `to_int()`, and an EXIT trap guarantees exactly one output line even on an unexpected abort.
+- **`LOCK_EXISTS` was always `"yes"`**: the `ct_exec` helper ends in `|| echo ""`, so it always returns 0, which made `ct_exec test -f ... && echo yes` unconditionally true. Replaced with a direct `pct exec`.
+- **`LOCK_AGE_HOURS` counted an empty line as one match**: `| wc -l` on empty output returns 1, so any failed `find` looked like "1 stale file". Replaced with an explicit mtime probe and a real age.
+- **An abandoned Time Machine lock raised CRITICAL**: Time Machine leaves a 0-byte `lock` behind after a successful backup, which tripped the >24h stale-lock check and had to be deleted by hand three times. A lock is now only CRITICAL if no backup completed after it was written; otherwise the plugin reports OK (abandoned, not blocking).
+- **`%T@` fractional epochs overflowed `to_int`**: `find -printf '%T@'` emits values like `1788437312.9574568310`. Stripping non-digits alone concatenated the fraction onto the seconds, producing a 20-digit number that wraps the shell's 64-bit arithmetic — so stuck-backup detection silently never fired. `to_int` now truncates at the decimal point first.
+
+### Tests
+- 896 → 897 assertions. The stuck-backup regression caught the epoch-overflow above; the suite also covers the abandoned-lock path.
+
 ## [1.2.5] - 2026-09-21
 
 ### Added

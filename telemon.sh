@@ -2528,9 +2528,12 @@ bash_supports_dev_tcp() {
 check_tcp_ports() {
     [[ -z "${CRITICAL_PORTS:-}" ]] && return
 
+    # /dev/tcp is only needed for remote hosts — loopback entries are verified
+    # against the socket table below, so do not bail out of the whole loop.
+    local dev_tcp_ok=1
     if ! bash_supports_dev_tcp; then
-        log "WARN" "check_tcp_ports: this bash build has no /dev/tcp support — skipping configured port checks"
-        return
+        dev_tcp_ok=0
+        log "WARN" "check_tcp_ports: this bash build has no /dev/tcp support — skipping remote TCP port checks"
     fi
     
     for entry in $CRITICAL_PORTS; do
@@ -2567,10 +2570,32 @@ check_tcp_ports() {
         local state="OK"
         local detail="TCP port <code>${safe_host}:${port}</code> is reachable"
 
-        if ! run_with_timeout "$CHECK_TIMEOUT" bash -c 'echo >/dev/tcp/"$1"/"$2"' _ "$host" "$port" 2>/dev/null; then
-            state="CRITICAL"
-            detail="TCP port <code>${safe_host}:${port}</code> is <b>UNREACHABLE</b>"
-        fi
+        case "$host" in
+            127.0.0.1|localhost|0.0.0.0|::1)
+                # Listen-only probe: read the socket table instead of connecting.
+                # Opening a connection makes the *service* log an error — sshd
+                # records 'banner exchange: Connection from 127.0.0.1 ...:
+                # invalid format' plus 'send_error: write: Broken pipe' on
+                # every probe. With localhost:12444 in CRITICAL_PORTS that was
+                # ~1,960 of the ~1,975 entries in 'journalctl -b -p err' — 96%
+                # of the host's error log was our own health check. That is
+                # precisely why a genuine two-day fault (Plex's NFS music mount
+                # down, 2026-11-12) could not be spotted in the error log.
+                # 'ss' reads the socket table, touches no service and opens no
+                # connection, so nothing is logged.
+                if [ -z "$(ss -Hltn "sport = :$port" 2>/dev/null)" ]; then
+                    state="CRITICAL"
+                    detail="TCP port <code>${safe_host}:${port}</code> has <b>no listener</b>"
+                fi
+                ;;
+            *)
+                if [ "$dev_tcp_ok" -eq 1 ] \
+                   && ! run_with_timeout "$CHECK_TIMEOUT" bash -c 'echo >/dev/tcp/"$1"/"$2"' _ "$host" "$port" 2>/dev/null; then
+                    state="CRITICAL"
+                    detail="TCP port <code>${safe_host}:${port}</code> is <b>UNREACHABLE</b>"
+                fi
+                ;;
+        esac
 
         check_state_change "$key" "$state" "$detail"
     done
