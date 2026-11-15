@@ -75,11 +75,17 @@ just noisy but wrong.
   (`DB_MYSQL_PASS="hunter2"`, `TELEGRAM_BOT_TOKEN="123456:AAHfake"`) is still
   refused, and the masked-password assertion still fails if the mask disappears
   from `telemon.sh`.
+- Time Machine stale-lock completion evidence (GH #44): the regression proves a
+  lock stays CRITICAL when a newer band exists but `SnapshotHistory` records no
+  later completed snapshot, and clears only on a real completion. The plugin
+  itself is site-local and gitignored, so the test skips where it is absent;
+  verified meaningful by reintroducing the band-mtime logic, which makes both
+  CRITICAL assertions fail.
 - Tests that execute the real `check_state_change` now isolate `STATE_FILE`:
   the flap guard and warning digest keep sidecars beside it, and a leftover
   sidecar from an earlier suite run suppressed alerts in a later one (found as
   two order-dependent failures).
-- 897 -> 924 assertions. Functional regressions run the real
+- 897 -> 930 assertions. Functional regressions run the real
   `calculate_cpu_busy_percent` against fixture counters (including the counter
   reset after a reboot) and the real `check_threshold`/`check_state_change` for
   hysteresis (standard and inverted), the flap guard (announce once, suppress,
