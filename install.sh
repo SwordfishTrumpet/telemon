@@ -9,7 +9,7 @@
 #   curl -fsSL ... | bash -s -- /opt/telemon
 #
 # Silent/Automated install (CI/CD, no prompts):
-#   TELEGRAM_BOT_TOKEN="xxx" TELEGRAM_CHAT_ID="yyy" \
+#   TELEGRAM_BOT_TOKEN="<bot-token>" TELEGRAM_CHAT_ID="<chat-id>" \
 #     curl -fsSL ... | bash -s -- --silent
 #
 # With systemd instead of cron:
@@ -202,13 +202,13 @@ Examples:
   bash install.sh
 
   # Silent install with Telegram credentials
-  TELEGRAM_BOT_TOKEN="xxx" TELEGRAM_CHAT_ID="yyy" bash install.sh --silent
+  TELEGRAM_BOT_TOKEN="<bot-token>" TELEGRAM_CHAT_ID="<chat-id>" bash install.sh --silent
 
   # Install with systemd timer instead of cron
   bash install.sh --systemd
 
   # Custom directory with silent mode
-  TELEGRAM_BOT_TOKEN="xxx" TELEGRAM_CHAT_ID="yyy" bash install.sh --silent /opt/telemon
+  TELEGRAM_BOT_TOKEN="<bot-token>" TELEGRAM_CHAT_ID="<chat-id>" bash install.sh --silent /opt/telemon
 
 EOF
 }
@@ -459,7 +459,7 @@ step_5_configure_env_silent() {
     
     if [[ -z "$bot_token" || -z "$chat_id" ]]; then
         log_error "Silent mode requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID environment variables"
-        log_error "Example: TELEGRAM_BOT_TOKEN='xxx' TELEGRAM_CHAT_ID='yyy' bash install.sh --silent"
+        log_error "Example: TELEGRAM_BOT_TOKEN='<bot-token>' TELEGRAM_CHAT_ID='<chat-id>' bash install.sh --silent"
         exit 1
     fi
     

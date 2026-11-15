@@ -18,7 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/SwordfishTrumpet/telemon/main/insta
 For **silent/CI/CD installs** (no prompts):
 
 ```bash
-TELEGRAM_BOT_TOKEN="xxx" TELEGRAM_CHAT_ID="yyy" \
+TELEGRAM_BOT_TOKEN="<bot-token>" TELEGRAM_CHAT_ID="<chat-id>" \
   curl -fsSL https://raw.githubusercontent.com/SwordfishTrumpet/telemon/main/install.sh | bash -s -- --silent
 ```
 
@@ -77,7 +77,7 @@ Check 5: CPU=40% → RESOLVED ALERT SENT (problem cleared)
 | Channel | Dependency | Required For |
 |---------|------------|--------------|
 | Telegram | `curl` | Primary alerts |
-| Webhook | `python3` | Slack/Discord/ntfy/n8n integration |
+| Webhook | `python3` | Slack, Discord, ntfy or n8n integration |
 | Email | `curl` (SMTP) or `sendmail`/`msmtp` | Email alerts |
 
 ### Optional Checks (Auto-Detect, Gracefully Skip)
@@ -225,14 +225,14 @@ curl -fsSL https://raw.githubusercontent.com/SwordfishTrumpet/telemon/main/insta
 
 ```bash
 # Basic silent install (auto-detects Docker/PM2)
-TELEGRAM_BOT_TOKEN="123456789:ABCdefGHIjklMNOpqrSTUvwxyz" \
+TELEGRAM_BOT_TOKEN="<bot-token>" \
 TELEGRAM_CHAT_ID="123456789" \
   curl -fsSL https://raw.githubusercontent.com/SwordfishTrumpet/telemon/main/install.sh | bash -s -- --silent
 ```
 
 ```bash
 # Advanced silent install with all options
-TELEGRAM_BOT_TOKEN="xxx" \
+TELEGRAM_BOT_TOKEN="<bot-token>" \
 TELEGRAM_CHAT_ID="yyy" \
 SERVER_LABEL="web-prod-01" \
 ENABLE_DOCKER=true \
@@ -270,7 +270,7 @@ SITE_URLS="https://example.com https://api.example.com" \
 curl -fsSL https://raw.githubusercontent.com/SwordfishTrumpet/telemon/main/install.sh | bash -s -- --systemd
 
 # Silent install with systemd timer
-TELEGRAM_BOT_TOKEN="xxx" TELEGRAM_CHAT_ID="yyy" \
+TELEGRAM_BOT_TOKEN="<bot-token>" TELEGRAM_CHAT_ID="<chat-id>" \
   curl -fsSL https://raw.githubusercontent.com/SwordfishTrumpet/telemon/main/install.sh | bash -s -- --silent --systemd
 ```
 
@@ -714,14 +714,14 @@ ENABLE_DATABASE_CHECKS=true
 DB_MYSQL_HOST="localhost"
 DB_MYSQL_PORT="3306"
 DB_MYSQL_USER="telemon"
-DB_MYSQL_PASS="secret"
+DB_MYSQL_PASS="<password>"
 DB_MYSQL_NAME="mysql"
 
 # PostgreSQL
 DB_POSTGRES_HOST="localhost"
 DB_POSTGRES_PORT="5432"
 DB_POSTGRES_USER="telemon"
-DB_POSTGRES_PASS="secret"
+DB_POSTGRES_PASS="<password>"
 DB_POSTGRES_NAME="postgres"
 
 # Redis
@@ -744,14 +744,14 @@ ODBC_CONNECTIONS="mssql_prod oracle_dw"
 # DSN-based
 ODBC_MSSQL_PROD_DSN="MSSQL-Production-DSN"
 ODBC_MSSQL_PROD_USER="telemon"
-ODBC_MSSQL_PROD_PASS="secure_password"
+ODBC_MSSQL_PROD_PASS="<password>"
 ODBC_MSSQL_PROD_QUERY="SELECT 1"
 
 # Connection string-based
 ODBC_ORACLE_DW_DRIVER="Oracle ODBC Driver"
 ODBC_ORACLE_DW_SERVER="oracle-dw.example.com:1521/ORCLDW"
 ODBC_ORACLE_DW_USER="monitor"
-ODBC_ORACLE_DW_PASS="secure_password"
+ODBC_ORACLE_DW_PASS="<password>"
 ODBC_ORACLE_DW_QUERY="SELECT 1 FROM DUAL"
 ```
 
