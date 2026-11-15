@@ -51,7 +51,9 @@ just noisy but wrong.
   before the flush is dropped silently because it never reached anyone.
   `CRITICAL` is always immediate, resolving a `CRITICAL` is immediate, and a
   buffered warning that escalates to `CRITICAL` is removed from the buffer so it
-  is not reported twice.
+  is not reported twice. Buffering deliberately does **not** update the per-key
+  cooldown: otherwise a warning at T followed by a critical at T+5min would be
+  rate-limited and the one alert that matters would arrive 15 minutes late.
 
 ### Added
 - `calculate_cpu_busy_percent()`, `flap_guard_evaluate()` and the
@@ -62,7 +64,7 @@ just noisy but wrong.
 - `PROC_STAT_PATH` test seam (fixture `/proc/stat`, not configuration).
 
 ### Tests
-- 897 -> 922 assertions. Functional regressions run the real
+- 897 -> 924 assertions. Functional regressions run the real
   `calculate_cpu_busy_percent` against fixture counters (including the counter
   reset after a reboot) and the real `check_threshold`/`check_state_change` for
   hysteresis (standard and inverted), the flap guard (announce once, suppress,

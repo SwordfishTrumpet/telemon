@@ -1443,12 +1443,19 @@ check_state_change() {
                 (( flap_rc == 1 )) && flap_suppressed=true
             fi
 
+            # ALERT_LAST_SENT feeds the per-key cooldown, so it is only set when
+            # something was actually emitted. A buffered or dropped warning must
+            # not consume the cooldown: otherwise a WARNING at T followed by a
+            # CRITICAL at T+5min would be silently rate-limited, and the one
+            # alert that matters would arrive 15 minutes late.
+            local emitted=false
             if [[ "$flap_suppressed" == "true" ]]; then
                 log "DEBUG" "Flap guard: suppressing ${key} (${prev_state} -> ${new_state}), announced as flapping already"
             else
                 if [[ "$flap_rc" -eq 2 && -n "$FLAP_NOTICE" ]]; then
                     # One actionable message instead of N alert pairs
                     ALERTS+="${FLAP_NOTICE}"
+                    emitted=true
                 elif [[ "${ALERT_WARNINGS_VIA_DIGEST:-false}" == "true" && "$new_state" == "WARNING" ]]; then
                     # Buffered, not sent — flushed hourly at most (GH #49)
                     warn_digest_add "$key" "$detail" "$now_epoch" \
@@ -1469,9 +1476,10 @@ check_state_change() {
                     esac
 
                     ALERTS+="${emoji} <b>${key}</b>: ${detail}%0A%0A"
+                    emitted=true
                 fi
             fi
-            ALERT_LAST_SENT["$key"]="$now_epoch"
+            [[ "$emitted" == "true" ]] && ALERT_LAST_SENT["$key"]="$now_epoch"
             log "INFO" "State change confirmed for ${key}: ${prev_state} -> ${new_state} (count: ${PREV_COUNT[$key]})"
 
             # Audit log the state change
