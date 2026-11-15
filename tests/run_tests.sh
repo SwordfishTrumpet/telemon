@@ -880,6 +880,25 @@ test_rotate_logs() {
 }
 
 # ---------------------------------------------------------------------------
+# Shared source-extraction helper
+# ---------------------------------------------------------------------------
+# Emit telemon's alert path: check_state_change plus the flap-guard and
+# warning-digest helpers it calls. Tests that source the real function must use
+# this, otherwise the extracted function calls helpers that do not exist in the
+# test process (adding a helper to check_state_change then makes every such test
+# print "command not found" and silently skip the guard).
+extract_alert_functions() {
+    local fn
+    for fn in flap_guard_timestamps flap_guard_store flap_guard_hold_until \
+              flap_guard_set_hold flap_guard_evaluate \
+              warn_digest_add warn_digest_remove flush_warning_digest \
+              check_state_change; do
+        awk -v fn="$fn" 'index($0, fn "() {")==1 {f=1} f{print} f&&/^}$/{exit}' \
+            "${SCRIPT_DIR}/telemon.sh"
+    done
+}
+
+# ---------------------------------------------------------------------------
 # Test check_state_change core alerting logic
 # Tests confirmation counting, state transitions, and rate limiting
 # ---------------------------------------------------------------------------
@@ -897,7 +916,7 @@ test_check_state_change() {
     # NOT write PREV_STATE itself).
     local fn_file
     fn_file=$(mktemp)
-    awk '/^check_state_change\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+    extract_alert_functions > "$fn_file"
 
     log() { :; }
     audit_log() { :; }
@@ -5397,7 +5416,7 @@ test_regression_recovery_alert_cooldown() {
     # inline-copy test (GH #11) shipped the bug green.
     local fn_file
     fn_file=$(mktemp)
-    awk '/^check_state_change\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+    extract_alert_functions > "$fn_file"
 
     # Mock external deps the extracted function relies on
     log() { :; }
@@ -5613,7 +5632,7 @@ test_regression_plugin_failure_health() {
 
     # Real check_plugins AND real check_state_change
     awk '/^check_plugins\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" >> "$fn_file"
-    awk '/^check_state_change\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" >> "$fn_file"
+    extract_alert_functions >> "$fn_file"
 
     run_with_timeout() { shift; "$@" 2>/dev/null; }
     log() { printf '%s|%s\n' "$1" "$2" >> "$logfile"; }
@@ -5726,7 +5745,7 @@ test_regression_plugin_stderr_captured() {
 
     awk '/^sanitize_plugin_stderr\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" >> "$fn_file"
     awk '/^check_plugins\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" >> "$fn_file"
-    awk '/^check_state_change\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" >> "$fn_file"
+    extract_alert_functions >> "$fn_file"
 
     # run_with_timeout keeps its stderr-swallowing contract; the capture must
     # work through it (that is exactly how production runs the plugin).
@@ -6287,7 +6306,8 @@ test_regression_env_example_completeness() {
 
     # Not user configuration: shell/environment context and an internal result
     # variable
-    local allow="HOME SCRIPT_DIR THRESHOLD_STATE TMPDIR"
+    # PROC_STAT_PATH is a test seam (fixture /proc/stat), not configuration
+    local allow="HOME SCRIPT_DIR THRESHOLD_STATE TMPDIR PROC_STAT_PATH"
     for var in $read_vars; do
         case " $allow " in *" $var "*) continue ;; esac
         if ! grep -qE "^#?[[:space:]]*${var}=" "$root/.env.example"; then
@@ -6864,6 +6884,338 @@ PY
 # Main test runner
 # ---------------------------------------------------------------------------
 
+test_regression_cpu_busy_metric() {
+    echo ""
+    echo "Testing CPU utilisation metric instead of loadavg (GH #46)..."
+
+    local fn_file statdir statedir out
+    fn_file=$(mktemp)
+    statdir=$(mktemp -d)
+    statedir=$(mktemp -d)
+    awk '/^calculate_cpu_busy_percent\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+
+    log() { :; }
+    is_valid_number() { [[ "$1" =~ ^[0-9]+$ ]]; }
+    safe_write_state_file() { printf '%s\n' "$2" > "$1" 2>/dev/null; }
+    STATE_FILE="${statedir}/state"
+    PROC_STAT_PATH="${statdir}/stat"
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+
+    # Sample 1 (first run -> since-boot average): 26 user, 64 idle, 10 iowait
+    # out of 100 jiffies. loadavg would have called this ~189% of 8 cores.
+    printf 'cpu  26 0 0 64 10 0 0 0 0 0\ncpu0 26 0 0 64 10 0 0 0 0 0\n' > "$PROC_STAT_PATH"
+    out=$(calculate_cpu_busy_percent)
+    [[ "$out" == "26" ]]
+    assert_true "cpu busy: first run reports 26% busy (iowait excluded, not 100%)"
+
+    # Sample 2: +10 busy, +90 idle over the interval -> 10% busy
+    printf 'cpu  36 0 0 154 10 0 0 0 0 0\ncpu0 36 0 0 154 10 0 0 0 0 0\n' > "$PROC_STAT_PATH"
+    out=$(calculate_cpu_busy_percent)
+    [[ "$out" == "10" ]]
+    assert_true "cpu busy: delta between runs reports 10% busy, not the cumulative average"
+
+    # A busy host reads high: +90 busy, +10 idle -> 90% busy
+    printf 'cpu  126 0 0 164 10 0 0 0 0 0\ncpu0 126 0 0 164 10 0 0 0 0 0\n' > "$PROC_STAT_PATH"
+    out=$(calculate_cpu_busy_percent)
+    [[ "$out" == "90" ]]
+    assert_true "cpu busy: a saturated host still alerts (90% busy)"
+
+    # Counter reset (reboot) must not produce a negative/absurd value:
+    # total drops from 300 to 100 -> fall back to the since-boot average (25%)
+    printf 'cpu  25 0 0 75 0 0 0 0 0 0\ncpu0 25 0 0 75 0 0 0 0 0 0\n' > "$PROC_STAT_PATH"
+    out=$(calculate_cpu_busy_percent)
+    [[ "$out" == "25" ]]
+    assert_true "cpu busy: counter reset falls back to the since-boot average (25%)"
+
+    # Missing stat file -> failure so check_cpu can fall back
+    PROC_STAT_PATH="${statdir}/does-not-exist"
+    calculate_cpu_busy_percent >/dev/null 2>&1
+    assert_false "cpu busy: missing /proc/stat returns non-zero (caller falls back to loadavg)"
+
+    unset -f log is_valid_number safe_write_state_file calculate_cpu_busy_percent
+    unset PROC_STAT_PATH STATE_FILE
+    rm -rf "$fn_file" "$statdir" "$statedir"
+}
+
+test_regression_alert_hysteresis() {
+    echo ""
+    echo "Testing shared ALERT_HYSTERESIS_PCT deadband (GH #47)..."
+
+    local fn_file capture
+    fn_file=$(mktemp)
+    capture=$(mktemp)
+    awk '/^check_threshold\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh" > "$fn_file"
+
+    log() { :; }
+    is_valid_number() { [[ "$1" =~ ^[0-9]+$ ]]; }
+    check_state_change() { printf '%s|%s\n' "$1" "$2" >> "$capture"; }
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+
+    declare -A PREV_STATE
+    THRESHOLD_STATE=""
+    ALERT_HYSTERESIS_PCT=3
+
+    # Standard metric: warn 80, crit 95
+    PREV_STATE=([temp]="OK")
+    : > "$capture"
+    check_threshold "temp" "80" "80" "95" "false" "ok" "warn" "crit"
+    grep -qx "temp|WARNING" "$capture"
+    assert_true "hysteresis: crossing the threshold still warns (80 >= 80)"
+
+    PREV_STATE=([temp]="WARNING")
+    : > "$capture"
+    check_threshold "temp" "78" "80" "95" "false" "ok" "warn" "crit"
+    grep -qx "temp|WARNING" "$capture"
+    assert_true "hysteresis: a WARNING holds at 78 (inside the 80-3 deadband)"
+
+    PREV_STATE=([temp]="WARNING")
+    : > "$capture"
+    check_threshold "temp" "76" "80" "95" "false" "ok" "warn" "crit"
+    grep -qx "temp|OK" "$capture"
+    assert_true "hysteresis: a WARNING clears once the value drops below 77"
+
+    PREV_STATE=([temp]="CRITICAL")
+    : > "$capture"
+    check_threshold "temp" "93" "80" "95" "false" "ok" "warn" "crit"
+    grep -qx "temp|CRITICAL" "$capture"
+    assert_true "hysteresis: a CRITICAL holds at 93 (inside the 95-3 deadband)"
+
+    PREV_STATE=([temp]="CRITICAL")
+    : > "$capture"
+    check_threshold "temp" "90" "80" "95" "false" "ok" "warn" "crit"
+    grep -qx "temp|WARNING" "$capture"
+    assert_true "hysteresis: a CRITICAL steps down to WARNING, not straight to OK"
+
+    # Worsening is never deferred by the deadband
+    PREV_STATE=([temp]="WARNING")
+    : > "$capture"
+    check_threshold "temp" "96" "80" "95" "false" "ok" "warn" "crit"
+    grep -qx "temp|CRITICAL" "$capture"
+    assert_true "hysteresis: escalating past crit is immediate, not deadbanded"
+
+    # Inverted metric: available memory, warn 15, crit 8
+    PREV_STATE=([mem]="CRITICAL")
+    : > "$capture"
+    check_threshold "mem" "9" "15" "8" "true" "ok" "warn" "crit"
+    grep -qx "mem|CRITICAL" "$capture"
+    assert_true "hysteresis: inverted metric (available %) holds CRITICAL at 9 (crit+3 = 11)"
+
+    PREV_STATE=([mem]="CRITICAL")
+    : > "$capture"
+    check_threshold "mem" "12" "15" "8" "true" "ok" "warn" "crit"
+    grep -qx "mem|WARNING" "$capture"
+    assert_true "hysteresis: inverted metric steps down to WARNING at 12"
+
+    # Disabled: legacy flapping behaviour
+    ALERT_HYSTERESIS_PCT=0
+    PREV_STATE=([temp]="WARNING")
+    : > "$capture"
+    check_threshold "temp" "78" "80" "95" "false" "ok" "warn" "crit"
+    grep -qx "temp|OK" "$capture"
+    assert_true "hysteresis: ALERT_HYSTERESIS_PCT=0 keeps the legacy behaviour"
+
+    unset -f log is_valid_number check_state_change check_threshold
+    unset ALERT_HYSTERESIS_PCT THRESHOLD_STATE PREV_STATE
+    rm -f "$fn_file" "$capture"
+}
+
+test_regression_flap_guard() {
+    echo ""
+    echo "Testing flap guard — one message instead of an alert pair per excursion (GH #48)..."
+
+    local fn_file statedir
+    fn_file=$(mktemp)
+    statedir=$(mktemp -d)
+    {
+        awk '/^flap_guard_timestamps\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh"
+        awk '/^flap_guard_store\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh"
+        awk '/^flap_guard_hold_until\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh"
+        awk '/^flap_guard_set_hold\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh"
+        awk '/^flap_guard_evaluate\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh"
+        awk '/^check_state_change\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh"
+    } > "$fn_file"
+
+    log() { :; }
+    audit_log() { :; }
+    is_valid_number() { [[ "$1" =~ ^[0-9]+$ ]]; }
+    safe_write_state_file() { printf '%s\n' "$2" > "$1" 2>/dev/null; }
+    FAKE_NOW=1000000
+    date() { printf '%s' "$FAKE_NOW"; }
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+
+    declare -A PREV_STATE CURR_STATE PREV_COUNT STATE_DETAIL ALERT_LAST_SENT
+    ALERTS=""
+    CONFIRMATION_COUNT=1
+    ALERT_COOLDOWN_SEC=0
+    FLAP_MAX_TRANSITIONS=4
+    FLAP_WINDOW_SEC=1800
+    FLAP_SUPPRESS_SEC=3600
+    STATE_FILE="${statedir}/state"
+
+    # 4 confirmed transitions inside the window: the 4th becomes the one
+    # "flapping" message instead of another identical alert.
+    local i state msgs=0 flap_msg=0
+    for i in 1 2 3 4; do
+        if (( i % 2 == 1 )); then state=WARNING; else state=OK; fi
+        ALERTS=""
+        check_state_change "cpu_temp" "$state" "CPU temperature: 82°C"
+        [[ -n "$ALERTS" ]] && msgs=$(( msgs + 1 ))
+        [[ "$ALERTS" == *flapping* ]] && flap_msg=1
+        PREV_STATE["cpu_temp"]="$state"
+        FAKE_NOW=$(( FAKE_NOW + 300 ))
+    done
+    [[ "$flap_msg" -eq 1 ]]
+    assert_true "flap guard: 4th transition announces the flapping condition once"
+
+    # Suppressed from now on, in both directions
+    local suppressed_msgs=0
+    for i in 1 2 3 4; do
+        if (( i % 2 == 1 )); then state=WARNING; else state=OK; fi
+        ALERTS=""
+        check_state_change "cpu_temp" "$state" "CPU temperature: 82°C"
+        [[ -n "$ALERTS" ]] && suppressed_msgs=$(( suppressed_msgs + 1 ))
+        PREV_STATE["cpu_temp"]="$state"
+        FAKE_NOW=$(( FAKE_NOW + 300 ))
+    done
+    [[ "$suppressed_msgs" -eq 0 ]]
+    assert_true "flap guard: further flapping inside the hold window sends nothing"
+
+    # A genuine escalation is never suppressed
+    ALERTS=""
+    check_state_change "cpu_temp" "CRITICAL" "CPU temperature: 101°C"
+    PREV_STATE["cpu_temp"]="CRITICAL"
+    [[ "$ALERTS" == *"101"* ]]
+    assert_true "flap guard: a CRITICAL alert still gets through the hold window"
+
+    # Hold expires: alerts resume
+    FAKE_NOW=$(( FAKE_NOW + 3601 ))
+    ALERTS=""
+    PREV_STATE["cpu_temp"]="OK"
+    check_state_change "cpu_temp" "WARNING" "CPU temperature: 82°C"
+    [[ -n "$ALERTS" ]]
+    assert_true "flap guard: alerts resume once the hold window expires"
+
+    # Disabled guard: every transition alerts
+    rm -f "${STATE_FILE}.flap" "${STATE_FILE}.flaphold"
+    FLAP_MAX_TRANSITIONS=0
+    local disabled_msgs=0
+    for i in 1 2 3 4 5 6; do
+        if (( i % 2 == 1 )); then state=WARNING; else state=OK; fi
+        ALERTS=""
+        check_state_change "cpu_temp" "$state" "CPU temperature: 82°C"
+        [[ -n "$ALERTS" ]] && disabled_msgs=$(( disabled_msgs + 1 ))
+        PREV_STATE["cpu_temp"]="$state"
+        FAKE_NOW=$(( FAKE_NOW + 300 ))
+    done
+    [[ "$disabled_msgs" -eq 6 ]]
+    assert_true "flap guard: FLAP_MAX_TRANSITIONS=0 disables the guard entirely"
+
+    unset -f log audit_log is_valid_number safe_write_state_file date check_state_change
+    unset ALERTS CONFIRMATION_COUNT ALERT_COOLDOWN_SEC FLAP_MAX_TRANSITIONS \
+        FLAP_WINDOW_SEC FLAP_SUPPRESS_SEC STATE_FILE FAKE_NOW PREV_STATE \
+        CURR_STATE PREV_COUNT STATE_DETAIL ALERT_LAST_SENT
+    rm -rf "$fn_file" "$statedir"
+}
+
+test_regression_warning_digest() {
+    echo ""
+    echo "Testing warning digest — transients never interrupt (GH #49)..."
+
+    local fn_file statedir capture
+    fn_file=$(mktemp)
+    statedir=$(mktemp -d)
+    capture=$(mktemp)
+    {
+        awk '/^warn_digest_add\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh"
+        awk '/^warn_digest_remove\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh"
+        awk '/^flush_warning_digest\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh"
+        awk '/^check_state_change\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "${SCRIPT_DIR}/telemon.sh"
+    } > "$fn_file"
+
+    log() { :; }
+    audit_log() { :; }
+    is_valid_number() { [[ "$1" =~ ^[0-9]+$ ]]; }
+    safe_write_state_file() { printf '%s\n' "$2" > "$1" 2>/dev/null; }
+    dispatch_with_retry() { printf '%s\n---\n' "$1" >> "$capture"; return 0; }
+    FAKE_NOW=2000000
+    date() { if [[ "${1:-}" == "+%s" ]]; then printf '%s' "$FAKE_NOW"; else printf '2026-01-01 00:00:00 UTC'; fi; }
+
+    # shellcheck disable=SC1090
+    source "$fn_file"
+
+    declare -A PREV_STATE CURR_STATE PREV_COUNT STATE_DETAIL ALERT_LAST_SENT
+    ALERTS=""
+    CONFIRMATION_COUNT=1
+    ALERT_COOLDOWN_SEC=0
+    FLAP_MAX_TRANSITIONS=0
+    ALERT_WARNINGS_VIA_DIGEST=true
+    WARN_DIGEST_INTERVAL_SEC=3600
+    SERVER_LABEL="test"
+    STATE_FILE="${statedir}/state"
+
+    # A warning is buffered, not sent
+    check_state_change "swap" "WARNING" "Swap 45% used"
+    PREV_STATE["swap"]="WARNING"
+    [[ -z "$ALERTS" ]]
+    assert_true "warning digest: a WARNING transition sends nothing immediately"
+
+    # Flush sends one digest containing it
+    : > "$capture"
+    flush_warning_digest
+    grep -q "Warning digest (1)" "$capture" && grep -q "swap" "$capture"
+    assert_true "warning digest: the buffered warning is flushed as one digest"
+
+    # The interval is respected
+    : > "$capture"
+    FAKE_NOW=$(( FAKE_NOW + 60 ))
+    check_state_change "swap" "OK" "Swap 5% used"
+    PREV_STATE["swap"]="OK"
+    flush_warning_digest
+    [[ ! -s "$capture" ]]
+    assert_true "warning digest: no second digest before the interval elapses"
+
+    # A transient warning that resolves before the flush never reaches anyone
+    : > "$capture"
+    FAKE_NOW=$(( FAKE_NOW + 3600 ))
+    check_state_change "mem" "WARNING" "Memory 14% available"
+    PREV_STATE["mem"]="WARNING"
+    check_state_change "mem" "OK" "Memory 40% available"
+    PREV_STATE["mem"]="OK"
+    flush_warning_digest
+    [[ ! -s "$capture" ]]
+    assert_true "warning digest: a warning that resolves before the flush is dropped silently"
+
+    # CRITICAL is always immediate, and supersedes a buffered warning
+    : > "$capture"
+    ALERTS=""
+    check_state_change "disk_root" "WARNING" "Disk 91% full"
+    PREV_STATE["disk_root"]="WARNING"
+    check_state_change "disk_root" "CRITICAL" "Disk 96% full"
+    PREV_STATE["disk_root"]="CRITICAL"
+    [[ "$ALERTS" == *"96% full"* ]]
+    assert_true "warning digest: CRITICAL is sent immediately, not buffered"
+    flush_warning_digest
+    if grep -q "disk_root" "$capture" 2>/dev/null; then
+        false
+    else
+        true
+    fi
+    assert_true "warning digest: a buffered warning that escalated to CRITICAL is not sent twice"
+
+    unset -f log audit_log is_valid_number safe_write_state_file date \
+        dispatch_with_retry check_state_change warn_digest_add warn_digest_remove flush_warning_digest
+    unset ALERTS CONFIRMATION_COUNT ALERT_COOLDOWN_SEC FLAP_MAX_TRANSITIONS \
+        ALERT_WARNINGS_VIA_DIGEST WARN_DIGEST_INTERVAL_SEC SERVER_LABEL STATE_FILE \
+        FAKE_NOW PREV_STATE CURR_STATE PREV_COUNT STATE_DETAIL ALERT_LAST_SENT
+    rm -rf "$fn_file" "$statedir" "$capture"
+}
+
 main() {
     echo "============================================="
     echo " Telemon Test Suite"
@@ -6975,6 +7327,10 @@ main() {
     test_regression_disk_hysteresis
     test_regression_disk_loop_root
     test_regression_ping_warn_threshold
+    test_regression_cpu_busy_metric
+    test_regression_alert_hysteresis
+    test_regression_flap_guard
+    test_regression_warning_digest
 
     # Summary
     echo ""

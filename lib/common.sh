@@ -178,7 +178,7 @@ get_state_file_variants() {
     local include_drift_baseline="${3:-false}"
     
     # Base variants (always included)
-    local variants="${STATE_FILE}.cooldown ${STATE_FILE}.queue ${STATE_FILE}.escalation ${STATE_FILE}.integrity ${STATE_FILE}.net ${STATE_FILE}.detail ${STATE_FILE}.trend ${STATE_FILE}.drift ${STATE_FILE}.iowait"
+    local variants="${STATE_FILE}.cooldown ${STATE_FILE}.queue ${STATE_FILE}.escalation ${STATE_FILE}.integrity ${STATE_FILE}.net ${STATE_FILE}.detail ${STATE_FILE}.trend ${STATE_FILE}.drift ${STATE_FILE}.iowait ${STATE_FILE}.cpu_busy ${STATE_FILE}.flap ${STATE_FILE}.flaphold ${STATE_FILE}.warndigest"
     
     # Include main state file
     if [[ "$include_main" == "true" ]]; then
