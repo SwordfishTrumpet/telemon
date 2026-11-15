@@ -54,6 +54,9 @@ Check 5: CPU=40% → RESOLVED ALERT SENT (problem cleared)
 
 - **Confirmation count**: Problem must persist N consecutive checks (default: 3 = 15 min)
 - **Rate limiting**: Per-key cooldown prevents flapping floods (default: 15 min)
+- **Hysteresis**: An active state only clears once the value moves clear of its threshold (deadband)
+- **Flap guard**: A metric that keeps crossing its threshold is reported once, then silenced
+- **Warning digest**: Optionally batch WARNINGs so only CRITICAL interrupts immediately
 - **Recovery alerts**: Get notified when problems clear (CRITICAL → OK transitions trigger alerts)
 - **Retry queue**: Failed Telegram alerts retry next cycle
 
@@ -884,6 +887,45 @@ recovers to OK within the cooldown window still sends its "resolved"
 notification immediately (e.g. `12:05, CPU resolves to OK, recovery alert
 sent` fires even if the original alert was at 12:01). Non-OK re-alerts remain
 rate-limited.
+
+### Alert Noise Control
+
+Four independent knobs keep the channel useful. Each is off/neutral by default,
+so behaviour only changes when you ask for it.
+
+```bash
+# Deadband applied to every non-disk threshold check (percentage points).
+# While a check is WARNING/CRITICAL the value must move this far clear of the
+# threshold before the state clears. 0 = legacy behaviour.
+ALERT_HYSTERESIS_PCT=3
+
+# Flap guard: one "flapping" message instead of an alert pair per excursion.
+# After FLAP_MAX_TRANSITIONS alerts inside FLAP_WINDOW_SEC, the key is silenced
+# for FLAP_SUPPRESS_SEC. CRITICAL transitions are never suppressed.
+# FLAP_MAX_TRANSITIONS=0 disables the guard.
+FLAP_MAX_TRANSITIONS=8
+FLAP_WINDOW_SEC=1800
+FLAP_SUPPRESS_SEC=3600
+
+# Batch WARNINGs into a periodic digest; CRITICAL stays immediate.
+# A warning that resolves before the flush is dropped silently.
+ALERT_WARNINGS_VIA_DIGEST=true
+WARN_DIGEST_INTERVAL_SEC=3600
+
+# CPU metric: busy = % of CPU capacity in use (default),
+#             load = legacy loadavg-as-%-of-cores.
+CPU_CHECK_MODE=busy
+```
+
+**Why `CPU_CHECK_MODE=busy` is the default:** load average counts runnable *and*
+uninterruptible (D-state) tasks, so heavy I/O inflates it. A host can report a
+1-minute load of 15 on 8 cores (189% of cores) while actually being 65% busy with
+a quarter of its CPU idle — a CRITICAL alert that describes nothing actionable.
+Busy percentage answers "is the CPU saturated" and matches what the LXC path
+already does with cgroup CPU accounting. Use `load` to keep the old semantics.
+
+**Disk hysteresis is separate:** `DISK_HYSTERESIS_PCT` covers storage, and the
+values here do not apply to it.
 
 ### Alert Dispatch Chain
 
