@@ -4730,6 +4730,94 @@ PCTSTUB
     rm -rf "$stubdir" "$err_file"
 }
 
+test_regression_timemachine_stale_lock_completion() {
+    echo ""
+    echo "Testing timemachine stale-lock completion evidence (GH #44)..."
+
+    if [[ ! -f "${SCRIPT_DIR}/checks.d/timemachine-ct101.sh" ]]; then
+        echo -e "${YELLOW}⚠${NC} Skipping timemachine stale-lock test (site-specific plugin absent in CI)"
+        return 0
+    fi
+
+    # A band write proves activity, not a completed backup. The fixture has an
+    # old lock and a newer band; only SnapshotHistory can prove completion.
+    local stubdir
+    stubdir=$(mktemp -d)
+    cat > "$stubdir/pct" <<'PCTSTUB'
+#!/usr/bin/env bash
+case "${1:-}" in
+    status)
+        echo "101: running"
+        ;;
+    exec)
+        shift 2
+        [[ "${1:-}" == "--" ]] && shift
+        cmd="${1:-}"
+        shift || true
+        case "$cmd" in
+            systemctl) echo "active" ;;
+            test)
+                [[ "$*" == *'/lock' ]] && exit 0 || exit 1
+                ;;
+            stat)
+                if [[ "$*" == *'%Y'* ]]; then
+                    echo "$FIXTURE_LOCK_EPOCH"
+                else
+                    echo "fixture-date"
+                fi
+                ;;
+            find)
+                [[ "$*" == *'/bands'* ]] && echo "$FIXTURE_BAND_EPOCH.0000000000 fixture-band"
+                ;;
+            grep)
+                [[ "$*" == *SnapshotHistory* && -n "${FIXTURE_SNAPSHOT:-}" ]] && echo "$FIXTURE_SNAPSHOT"
+                ;;
+            *) ;;
+        esac
+        ;;
+    *) ;;
+esac
+exit 0
+PCTSTUB
+    chmod +x "$stubdir/pct"
+
+    local lock_epoch band_epoch older_snapshot newer_snapshot
+    lock_epoch=$(date -u -d '48 hours ago' +%s)
+    band_epoch=$(date -u -d '24 hours ago' +%s)
+    older_snapshot=$(date -u -d '72 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+    newer_snapshot=$(date -u -d '23 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+
+    local out rc
+    out=$(PATH="$stubdir:$PATH" FIXTURE_LOCK_EPOCH="$lock_epoch" \
+        FIXTURE_BAND_EPOCH="$band_epoch" FIXTURE_SNAPSHOT="" \
+        bash "${SCRIPT_DIR}/checks.d/timemachine-ct101.sh")
+    rc=$?
+    [[ "$out" == CRITICAL\|timemachine-stale-lock\|* ]]
+    assert_true "timemachine stale lock: a newer band without a completed snapshot stays CRITICAL"
+    [[ "$rc" -eq 0 ]]
+    assert_true "timemachine stale lock: no-completion fixture exits 0"
+
+    out=$(PATH="$stubdir:$PATH" FIXTURE_LOCK_EPOCH="$lock_epoch" \
+        FIXTURE_BAND_EPOCH="$band_epoch" FIXTURE_SNAPSHOT="$newer_snapshot" \
+        bash "${SCRIPT_DIR}/checks.d/timemachine-ct101.sh")
+    rc=$?
+    [[ "$out" == OK\|timemachine-stale-lock\|* ]]
+    assert_true "timemachine stale lock: a completed snapshot after the lock clears the alert"
+    [[ "$rc" -eq 0 ]]
+    assert_true "timemachine stale lock: later-completion fixture exits 0"
+
+    out=$(PATH="$stubdir:$PATH" FIXTURE_LOCK_EPOCH="$lock_epoch" \
+        FIXTURE_BAND_EPOCH="$band_epoch" FIXTURE_SNAPSHOT="$older_snapshot" \
+        bash "${SCRIPT_DIR}/checks.d/timemachine-ct101.sh")
+    rc=$?
+    [[ "$out" == CRITICAL\|timemachine-stale-lock\|* ]]
+    assert_true "timemachine stale lock: a snapshot older than the lock stays CRITICAL"
+    [[ "$rc" -eq 0 ]]
+    assert_true "timemachine stale lock: earlier-completion fixture exits 0"
+
+    rm -rf "$stubdir"
+}
+
 test_regression_timemachine_stuck_apostrophe() {
     echo ""
     echo "Testing timemachine plugin apostrophe path + active-connection stuck detection..."
@@ -7333,6 +7421,7 @@ main() {
     test_regression_proxmox_storage_float
     test_regression_mysql_replication_password
     test_regression_timemachine_missing_results
+    test_regression_timemachine_stale_lock_completion
     test_regression_strip_html_entities
     test_regression_parse_heartbeat_line
     test_regression_proxmox_tasks_filter
