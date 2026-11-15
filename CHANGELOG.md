@@ -5,6 +5,73 @@ All notable changes to Telemon will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-11-15
+
+Alert actionability. The production host was sending ~25 Telegram messages a
+day, of which roughly one a day was worth reading: 346 messages in the 14 days
+to 2026-11-15 broke down as `cpu` 213, `cpu_temp` 93, `iowait` 17, and ~20
+genuine findings. Four defects produced that ratio, and the CPU one was not
+just noisy but wrong.
+
+### Fixed
+- **CPU alerts measured load average, not CPU use (GH #46)**: on a host, load
+  average was divided by the core count, so `CPU_THRESHOLD_CRIT=130` meant
+  "1-minute load >= 1.3 x cores". Load counts runnable *and* uninterruptible
+  (D-state) tasks, so I/O backlog inflates it. Measured on the reporting host at
+  one moment: load `15.15` on 8 cores (189% of cores -> CRITICAL) while
+  `/proc/stat` showed 64.7% busy, 10.6% iowait and 24.4% idle. The check now
+  reports busy-CPU percentage (100 - idle - iowait) over the cross-run window,
+  which is what the LXC path already did with cgroup accounting, and keeps the
+  load average in the detail text for context. `CPU_CHECK_MODE=load` restores
+  the old meaning; thresholds are percentages either way. **Behaviour change:**
+  a `CPU_THRESHOLD_WARN` sized for load semantics (e.g. the old
+  `100`/`130`) must be reinterpreted, because `100` now means "100% busy".
+  The first run after an upgrade falls back to the since-boot average, so no
+  spurious alert is produced.
+- **No hysteresis outside disk checks (GH #47)**: `check_threshold` -- used by
+  `cpu`, `mem`, `swap`, `iowait`, `zombies`, `cpu_temp`, `ups` and `battery` --
+  compared the raw value against the threshold with no deadband, so a metric
+  parked on its line flipped every cycle. `ALERT_HYSTERESIS_PCT` (default `0`,
+  i.e. unchanged) adds a shared deadband: an active state only clears once the
+  value has moved that many percentage points clear of the threshold. Worsening
+  is never deferred. Works for inverted metrics (available memory) too, and
+  falls back to the configured threshold if the deadband would invert the
+  severity order. Storage keeps its own `DISK_HYSTERESIS_PCT`.
+- **No flap guard (GH #48)**: `cpu_temp` alone produced 484 WARNING alerts and
+  260 recoveries since 2026-04. The same key crossing its threshold more than
+  `FLAP_MAX_TRANSITIONS` times inside `FLAP_WINDOW_SEC` now produces one
+  message -- "flapping, the threshold is too close to the normal value" -- and
+  then silence for `FLAP_SUPPRESS_SEC`. `CRITICAL` transitions are never
+  suppressed, so a flapping warning cannot mask a real escalation.
+  `FLAP_MAX_TRANSITIONS=0` disables the guard.
+- **WARNINGs interrupted immediately (GH #49)**: every confirmed transition was
+  dispatched, so a five-minute blip cost two notifications. With
+  `ALERT_WARNINGS_VIA_DIGEST=true` a `WARNING` is buffered and flushed as one
+  digest at most once per `WARN_DIGEST_INTERVAL_SEC`; a warning that resolves
+  before the flush is dropped silently because it never reached anyone.
+  `CRITICAL` is always immediate, resolving a `CRITICAL` is immediate, and a
+  buffered warning that escalates to `CRITICAL` is removed from the buffer so it
+  is not reported twice.
+
+### Added
+- `calculate_cpu_busy_percent()`, `flap_guard_evaluate()` and the
+  `warn_digest_*`/`flush_warning_digest()` helpers; new state sidecars
+  `.cpu_busy`, `.flap`, `.flaphold`, `.warndigest` are enumerated by
+  `get_state_file_variants()` so `reset-state` and `uninstall --full` remove
+  them.
+- `PROC_STAT_PATH` test seam (fixture `/proc/stat`, not configuration).
+
+### Tests
+- 897 -> 922 assertions. Functional regressions run the real
+  `calculate_cpu_busy_percent` against fixture counters (including the counter
+  reset after a reboot) and the real `check_threshold`/`check_state_change` for
+  hysteresis (standard and inverted), the flap guard (announce once, suppress,
+  critical bypass, expiry, disabled) and the warning digest (buffered, flushed,
+  interval, dropped transient, critical precedence). A shared
+  `extract_alert_functions` helper sources `check_state_change` together with
+  the helpers it calls, so adding a helper cannot silently degrade every test
+  that extracts the function.
+
 ## [1.2.6] - 2026-11-12
 
 ### Fixed
