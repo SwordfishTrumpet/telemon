@@ -7191,6 +7191,22 @@ test_regression_warning_digest() {
     [[ ! -s "$capture" ]]
     assert_true "warning digest: a warning that resolves before the flush is dropped silently"
 
+    # A buffered warning must not consume the cooldown for the same key: the
+    # WARNING at T followed by a CRITICAL at T+5min must still alert at once.
+    : > "$capture"
+    ALERTS=""
+    ALERT_LAST_SENT=()
+    check_state_change "cpu" "WARNING" "CPU 88% busy"
+    PREV_STATE["cpu"]="WARNING"
+    [[ -z "$ALERTS" && -z "${ALERT_LAST_SENT[cpu]:-}" ]]
+    assert_true "warning digest: buffering a warning does not consume the alert cooldown"
+    FAKE_NOW=$(( FAKE_NOW + 300 ))
+    ALERTS=""
+    check_state_change "cpu" "CRITICAL" "CPU 99% busy"
+    PREV_STATE["cpu"]="CRITICAL"
+    [[ "$ALERTS" == *"99% busy"* ]]
+    assert_true "warning digest: a CRITICAL 5 min after a buffered WARNING still alerts immediately"
+
     # CRITICAL is always immediate, and supersedes a buffered warning
     : > "$capture"
     ALERTS=""
