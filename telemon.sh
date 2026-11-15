@@ -625,6 +625,27 @@ validate_thresholds() {
         log "ERROR" "Invalid DISK_HYSTERESIS_PCT: '${DISK_HYSTERESIS_PCT}' must be a non-negative integer"
         has_errors=true
     fi
+    # Shared hysteresis deadband for every non-disk threshold check (GH #47)
+    if ! is_valid_number "${ALERT_HYSTERESIS_PCT:-0}"; then
+        log "ERROR" "Invalid ALERT_HYSTERESIS_PCT: '${ALERT_HYSTERESIS_PCT}' must be a non-negative integer"
+        has_errors=true
+    fi
+    case "${CPU_CHECK_MODE:-busy}" in
+        busy|load) ;;
+        *)
+            log "ERROR" "Invalid CPU_CHECK_MODE: '${CPU_CHECK_MODE}' must be 'busy' or 'load'"
+            has_errors=true
+            ;;
+    esac
+    # Alert noise controls (GH #48, GH #49)
+    local flap_var flap_val
+    for flap_var in FLAP_MAX_TRANSITIONS FLAP_WINDOW_SEC FLAP_SUPPRESS_SEC WARN_DIGEST_INTERVAL_SEC; do
+        eval "flap_val=\${${flap_var}:-0}"
+        is_valid_number "$flap_val" || {
+            log "ERROR" "Invalid ${flap_var}: '${flap_val}' must be a non-negative integer"
+            has_errors=true
+        }
+    done
     check_threshold_pair "SWAP" "${SWAP_THRESHOLD_WARN:-50}" "${SWAP_THRESHOLD_CRIT:-80}" || has_errors=true
     check_threshold_pair "IOWAIT" "${IOWAIT_THRESHOLD_WARN:-30}" "${IOWAIT_THRESHOLD_CRIT:-50}" || has_errors=true
     check_threshold_pair "ZOMBIE" "${ZOMBIE_THRESHOLD_WARN:-5}" "${ZOMBIE_THRESHOLD_CRIT:-20}" || has_errors=true
@@ -940,6 +961,68 @@ get_lxc_cpu_usage_usec() {
     echo "${user_usec:-0} ${system_usec:-0}"
 }
 
+# Calculate host/VM CPU utilisation as a percentage of total capacity,
+# excluding iowait (GH #46).
+#
+# Why not loadavg: the 1-minute load average counts runnable AND
+# uninterruptible (D-state) tasks, so I/O backlog inflates it. Measured on the
+# pve host at a single moment: load 15.15 on 8 cores = 189 % of cores (which the
+# old check reported as CRITICAL) while /proc/stat showed 64.7 % busy,
+# 10.6 % iowait and 24.4 % idle. An alert that fires while a quarter of the CPU
+# is idle is not actionable, and it fired 213 times in 14 days.
+#
+# Uses the cross-run delta like check_iowait (no sleep in the check). On the
+# first run the single /proc/stat sample is already a since-boot average, so it
+# is used as-is.
+calculate_cpu_busy_percent() {
+    local state_file="${STATE_FILE}.cpu_busy"
+    local stat_file="${PROC_STAT_PATH:-/proc/stat}"
+    [[ -f "$stat_file" ]] || return 1
+
+    local -a cur
+    read -r -a cur < <(awk '/^cpu /{for(i=2;i<=NF;i++) printf "%s ", $i}' "$stat_file")
+    # user nice system idle iowait ... — need at least through iowait
+    [[ ${#cur[@]} -lt 4 ]] && return 1
+
+    local idle_cur total_cur v iowait_cur
+    idle_cur="${cur[3]:-0}"
+    iowait_cur="${cur[4]:-0}"
+    is_valid_number "$idle_cur" || idle_cur=0
+    is_valid_number "$iowait_cur" || iowait_cur=0
+    total_cur=0
+    for v in "${cur[@]}"; do
+        is_valid_number "$v" || v=0
+        total_cur=$(( total_cur + v ))
+    done
+    [[ "$total_cur" -le 0 ]] && return 1
+
+    local prev_idle=0 prev_iowait=0 prev_total=0
+    if [[ -f "$state_file" ]]; then
+        read -r prev_idle prev_iowait prev_total < "$state_file" 2>/dev/null || true
+    fi
+    is_valid_number "$prev_idle" || prev_idle=0
+    is_valid_number "$prev_iowait" || prev_iowait=0
+    is_valid_number "$prev_total" || prev_total=0
+
+    safe_write_state_file "$state_file" "$idle_cur $iowait_cur $total_cur"
+
+    local d_idle d_iowait d_total
+    if [[ "$prev_total" -eq 0 || "$total_cur" -le "$prev_total" ]]; then
+        # First run (or counter reset) — the sample is a since-boot average.
+        d_idle="$idle_cur"; d_iowait="$iowait_cur"; d_total="$total_cur"
+    else
+        d_total=$(( total_cur - prev_total ))
+        d_idle=$(( idle_cur - prev_idle ))
+        d_iowait=$(( iowait_cur - prev_iowait ))
+        (( d_idle < 0 )) && d_idle=0
+        (( d_iowait < 0 )) && d_iowait=0
+    fi
+    [[ "$d_total" -le 0 ]] && return 1
+
+    awk -v t="$d_total" -v i="$d_idle" -v w="$d_iowait" \
+        'BEGIN { pct = 100 - ((i + w) * 100 / t); if (pct < 0) pct = 0; if (pct > 100) pct = 100; printf "%d", pct }'
+}
+
 # Calculate CPU usage percentage for LXC containers
 # Uses delta calculation like iowait check
 # State file key: "lxc_cpu_baseline"
@@ -1041,6 +1124,234 @@ use_lxc_metrics() {
     is_lxc_container && is_cgroup_v2
 }
 
+# ---------------------------------------------------------------------------
+# Flap guard (GH #48)
+# ---------------------------------------------------------------------------
+# A metric oscillating across its threshold is one tuning problem, not a stream
+# of incidents. The host audit log shows cpu_temp alone producing 484 WARNING
+# alerts and 260 recoveries — every excursion costs two messages.
+#
+# State lives in two sidecars next to the main state file:
+#   ${STATE_FILE}.flap      key=epoch,epoch,...   (confirmed alert timestamps)
+#   ${STATE_FILE}.flaphold  key=epoch             (suppressed until)
+# They are listed in lib/common.sh:get_state_file_variants so reset/uninstall
+# remove them.
+
+# Emit the recorded confirmations for a key (space separated, oldest first).
+flap_guard_timestamps() {
+    local key="$1"
+    local file="${STATE_FILE}.flap"
+    [[ -f "$file" ]] || return 0
+    local k v
+    while IFS='=' read -r k v; do
+        if [[ "$k" == "$key" ]]; then
+            printf '%s\n' "$v"
+            return 0
+        fi
+    done < "$file"
+}
+
+# Replace the recorded confirmations for a key (empty list deletes the entry).
+flap_guard_store() {
+    local key="$1" list="$2"
+    local file="${STATE_FILE}.flap" tmp
+    [[ -L "$file" ]] && return 0
+    tmp=$(mktemp "${file}.XXXXXX" 2>/dev/null) || return 0
+    if [[ -f "$file" ]]; then
+        local k v
+        while IFS='=' read -r k v; do
+            [[ -z "$k" || "$k" == "$key" ]] && continue
+            printf '%s=%s\n' "$k" "$v" >> "$tmp"
+        done < "$file"
+    fi
+    [[ -n "$list" ]] && printf '%s=%s\n' "$key" "$list" >> "$tmp"
+    chmod 600 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$file" 2>/dev/null || rm -f "$tmp"
+}
+
+# Read the suppression expiry for a key (0 = not suppressed).
+flap_guard_hold_until() {
+    local key="$1"
+    local file="${STATE_FILE}.flaphold"
+    [[ -f "$file" ]] || { echo 0; return 0; }
+    local k v
+    while IFS='=' read -r k v; do
+        if [[ "$k" == "$key" ]]; then
+            is_valid_number "$v" && { echo "$v"; return 0; }
+        fi
+    done < "$file"
+    echo 0
+}
+
+# Set (or clear, with epoch 0) the suppression expiry for a key.
+flap_guard_set_hold() {
+    local key="$1" until="$2"
+    local file="${STATE_FILE}.flaphold" tmp
+    [[ -L "$file" ]] && return 0
+    tmp=$(mktemp "${file}.XXXXXX" 2>/dev/null) || return 0
+    if [[ -f "$file" ]]; then
+        local k v
+        while IFS='=' read -r k v; do
+            [[ -z "$k" || "$k" == "$key" ]] && continue
+            printf '%s=%s\n' "$k" "$v" >> "$tmp"
+        done < "$file"
+    fi
+    (( until > 0 )) && printf '%s=%s\n' "$key" "$until" >> "$tmp"
+    chmod 600 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$file" 2>/dev/null || rm -f "$tmp"
+}
+
+# Decide what to do with an about-to-be-sent alert for $key at $now.
+#   0 = send normally
+#   1 = suppressed (already announced as flapping, or hold window active)
+#   2 = announce the flapping condition once, then go quiet
+# On 2 the operator-facing text is left in FLAP_NOTICE.
+# FLAP_MAX_TRANSITIONS=0 disables the guard entirely.
+flap_guard_evaluate() {
+    local key="$1" now="$2"
+    FLAP_NOTICE=""
+    local max="${FLAP_MAX_TRANSITIONS:-8}"
+    is_valid_number "$max" || max=8
+    (( max == 0 )) && return 0
+    local window="${FLAP_WINDOW_SEC:-1800}"
+    is_valid_number "$window" || window=1800
+    local suppress="${FLAP_SUPPRESS_SEC:-3600}"
+    is_valid_number "$suppress" || suppress=3600
+
+    local hold
+    hold=$(flap_guard_hold_until "$key")
+    if (( hold > now )); then
+        return 1
+    fi
+    (( hold > 0 )) && flap_guard_set_hold "$key" 0
+
+    # Record this confirmation, pruning anything older than the window.
+    local recorded ts kept="" count=0
+    recorded=$(flap_guard_timestamps "$key")
+    for ts in ${recorded//,/ }; do
+        is_valid_number "$ts" || continue
+        (( ts > now - window )) || continue
+        kept+="${kept:+,}${ts}"
+        count=$(( count + 1 ))
+    done
+    kept+="${kept:+,}${now}"
+    count=$(( count + 1 ))
+    flap_guard_store "$key" "$kept"
+
+    if (( count >= max )); then
+        flap_guard_set_hold "$key" $(( now + suppress ))
+        flap_guard_store "$key" ""
+        local mins=$(( window / 60 ))
+        local quiet=$(( suppress / 60 ))
+        FLAP_NOTICE="&#128992; <b>${key}</b>: flapping — ${max} alerts in ${mins}min; suppressed for ${quiet}min. The threshold is too close to the normal value.%0A%0A"
+        return 2
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Warning digest (GH #49)
+# ---------------------------------------------------------------------------
+# With ALERT_WARNINGS_VIA_DIGEST=true a WARNING is buffered instead of sent.
+# The buffer is flushed at most once per WARN_DIGEST_INTERVAL_SEC, and a
+# warning that resolves before the flush is dropped silently — that transient
+# never interrupted anyone, which is the point. CRITICAL always sends now.
+
+# Buffer (or refresh) a warning entry: key<TAB>epoch<TAB>detail
+warn_digest_add() {
+    local key="$1" detail="$2" now="$3"
+    local file="${STATE_FILE}.warndigest" tmp
+    [[ -L "$file" ]] && return 1
+    detail="${detail//$'\t'/ }"
+    detail="${detail//$'\n'/ }"
+    tmp=$(mktemp "${file}.XXXXXX" 2>/dev/null) || return 1
+    local last=0
+    if [[ -f "$file" ]]; then
+        local line
+        while IFS= read -r line; do
+            case "$line" in
+                last=*) last="${line#last=}"; continue ;;
+            esac
+            [[ -z "$line" ]] && continue
+            [[ "${line%%$'\t'*}" == "$key" ]] && continue
+            printf '%s\n' "$line" >> "$tmp"
+        done < "$file"
+    fi
+    printf '%s\t%s\t%s\n' "$key" "$now" "$detail" >> "$tmp"
+    printf 'last=%s\n' "$last" >> "$tmp"
+    chmod 600 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$file" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    return 0
+}
+
+# Remove a buffered entry. Returns 0 when an entry was present (i.e. this
+# warning was never announced), 1 otherwise.
+warn_digest_remove() {
+    local key="$1"
+    local file="${STATE_FILE}.warndigest"
+    [[ -f "$file" ]] || return 1
+    local tmp found=1
+    tmp=$(mktemp "${file}.XXXXXX" 2>/dev/null) || return 1
+    local line
+    while IFS= read -r line; do
+        case "$line" in
+            last=*) printf '%s\n' "$line" >> "$tmp"; continue ;;
+        esac
+        [[ -z "$line" ]] && continue
+        if [[ "${line%%$'\t'*}" == "$key" ]]; then
+            found=0
+            continue
+        fi
+        printf '%s\n' "$line" >> "$tmp"
+    done < "$file"
+    chmod 600 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$file" 2>/dev/null || { rm -f "$tmp"; return 1; }
+    return $found
+}
+
+# Flush the buffered warnings as one digest when the interval has elapsed.
+# Always keeps at least WARN_DIGEST_INTERVAL_SEC between digests.
+flush_warning_digest() {
+    [[ "${ALERT_WARNINGS_VIA_DIGEST:-false}" == "true" ]] || return 0
+    local file="${STATE_FILE}.warndigest"
+    [[ -f "$file" ]] || return 0
+    local now last=0 entries="" line count=0
+    now=$(date +%s)
+    while IFS= read -r line; do
+        case "$line" in
+            last=*) last="${line#last=}"; continue ;;
+        esac
+        [[ -z "$line" ]] && continue
+        entries+="${line}"$'\n'
+        count=$(( count + 1 ))
+    done < "$file"
+    (( count == 0 )) && return 0
+    is_valid_number "$last" || last=0
+    local interval="${WARN_DIGEST_INTERVAL_SEC:-3600}"
+    is_valid_number "$interval" || interval=3600
+    if (( last > 0 && now - last < interval )); then
+        return 0
+    fi
+
+    local msg="<b>&#128202; [${SERVER_LABEL}] Warning digest (${count})</b>%0A"
+    msg+="<i>$(date '+%Y-%m-%d %H:%M:%S %Z')</i>%0A%0A"
+    local key ts detail
+    while IFS=$'\t' read -r key ts detail; do
+        [[ -z "$key" ]] && continue
+        msg+="&#128992; <b>${key}</b>: ${detail:-WARNING}%0A"
+    done <<< "$entries"
+    # Point at the mechanism so the operator knows why these arrived together
+    msg+="%0A<i>Batched warnings; transient ones are dropped. CRITICAL alerts are never batched.</i>"
+
+    if dispatch_with_retry "$msg"; then
+        safe_write_state_file "$file" "last=${now}"
+        log "INFO" "Warning digest dispatched (${count} warning(s))"
+        audit_log "alert" "Warning digest dispatched (${count} warning(s))"
+    else
+        log "WARN" "Warning digest delivery failed — buffered warnings kept for the next attempt"
+    fi
+}
+
 check_state_change() {
     local key="$1"
     local new_state="$2"
@@ -1122,16 +1433,47 @@ check_state_change() {
             cooldown_blocked=true
         fi
         if [[ "$cooldown_blocked" == "false" ]]; then
-                local emoji=""
-                case "$new_state" in
-                    CRITICAL) emoji="&#128308;" ;;  # Red circle
-                    WARNING)  emoji="&#128992;" ;;  # Orange circle
-                esac
-                
-                ALERTS+="${emoji} <b>${key}</b>: ${detail}%0A%0A"
+            # Flap guard (GH #48): never applied to CRITICAL — a genuine
+            # escalation must always get through, and a flapping WARNING must
+            # not be able to silence one.
+            local flap_rc=0 flap_suppressed=false
+            if [[ "$new_state" != "CRITICAL" && "$prev_state" != "CRITICAL" ]]; then
+                flap_rc=0
+                flap_guard_evaluate "$key" "$now_epoch" || flap_rc=$?
+                (( flap_rc == 1 )) && flap_suppressed=true
+            fi
+
+            if [[ "$flap_suppressed" == "true" ]]; then
+                log "DEBUG" "Flap guard: suppressing ${key} (${prev_state} -> ${new_state}), announced as flapping already"
+            else
+                if [[ "$flap_rc" -eq 2 && -n "$FLAP_NOTICE" ]]; then
+                    # One actionable message instead of N alert pairs
+                    ALERTS+="${FLAP_NOTICE}"
+                elif [[ "${ALERT_WARNINGS_VIA_DIGEST:-false}" == "true" && "$new_state" == "WARNING" ]]; then
+                    # Buffered, not sent — flushed hourly at most (GH #49)
+                    warn_digest_add "$key" "$detail" "$now_epoch" \
+                        && log "DEBUG" "Warning digest: buffered ${key}"
+                elif [[ "${ALERT_WARNINGS_VIA_DIGEST:-false}" == "true" && "$new_state" == "OK" ]] \
+                        && warn_digest_remove "$key"; then
+                    # Resolved before the flush — this transient never reached
+                    # the operator, so stay quiet instead of sending "OK".
+                    log "DEBUG" "Warning digest: ${key} resolved before flush — dropped"
+                else
+                    # A CRITICAL supersedes any buffered warning for this key
+                    [[ "$new_state" == "CRITICAL" ]] && warn_digest_remove "$key" >/dev/null 2>&1
+
+                    local emoji=""
+                    case "$new_state" in
+                        CRITICAL) emoji="&#128308;" ;;  # Red circle
+                        WARNING)  emoji="&#128992;" ;;  # Orange circle
+                    esac
+
+                    ALERTS+="${emoji} <b>${key}</b>: ${detail}%0A%0A"
+                fi
+            fi
             ALERT_LAST_SENT["$key"]="$now_epoch"
             log "INFO" "State change confirmed for ${key}: ${prev_state} -> ${new_state} (count: ${PREV_COUNT[$key]})"
-            
+
             # Audit log the state change
             audit_log "state_change" "Key: ${key}, State: ${new_state}, Previous: ${prev_state}"
         fi
@@ -1408,25 +1750,62 @@ check_threshold() {
     # Default warn_detail and crit_detail if not provided
     [[ -z "$warn_detail" ]] && warn_detail="${crit_detail:-}"
     [[ -z "$crit_detail" ]] && crit_detail="$warn_detail"
-    
+
+    # Hysteresis (GH #47): an active state is only cleared once the value has
+    # moved CLEAR of the threshold, not when it merely touches the line again.
+    # Without a deadband a metric parked on its threshold (cpu_temp around 80 °C)
+    # flips OK <-> WARNING every cycle and each flip costs two messages.
+    # ALERT_HYSTERESIS_PCT = percentage points (0 = disabled). Only clears are
+    # deferred: worsening still crosses the real threshold immediately.
+    local hysteresis="${ALERT_HYSTERESIS_PCT:-0}"
+    is_valid_number "$hysteresis" || hysteresis=0
+    local warn_eff="$warn" crit_eff="$crit"
+    if (( hysteresis > 0 )); then
+        case "${PREV_STATE[$key]:-OK}" in
+            CRITICAL)
+                if [[ "$inverted" == "true" ]]; then
+                    crit_eff=$(( crit + hysteresis )); warn_eff=$(( warn + hysteresis ))
+                else
+                    crit_eff=$(( crit - hysteresis )); warn_eff=$(( warn - hysteresis ))
+                fi
+                ;;
+            WARNING)
+                if [[ "$inverted" == "true" ]]; then
+                    warn_eff=$(( warn + hysteresis ))
+                else
+                    warn_eff=$(( warn - hysteresis ))
+                fi
+                ;;
+        esac
+        (( warn_eff < 0 )) && warn_eff=0
+        (( crit_eff < 0 )) && crit_eff=0
+        # The deadband must never invert the severity order — fall back to the
+        # configured value if it would (e.g. warn 2 with hysteresis 5).
+        if [[ "$inverted" == "true" ]]; then
+            (( crit_eff > warn_eff )) && crit_eff="$crit"
+        else
+            (( crit_eff < warn_eff )) && crit_eff="$crit"
+        fi
+    fi
+
     local state="OK"
     local detail="$ok_detail"
     
     if [[ "$inverted" == "true" ]]; then
         # Inverted metrics: lower value = worse (e.g., available memory %)
-        if (( value <= crit )); then
+        if (( value <= crit_eff )); then
             state="CRITICAL"
             detail="$crit_detail"
-        elif (( value <= warn )); then
+        elif (( value <= warn_eff )); then
             state="WARNING"
             detail="$warn_detail"
         fi
     else
         # Standard metrics: higher value = worse (e.g., CPU load %)
-        if (( value >= crit )); then
+        if (( value >= crit_eff )); then
             state="CRITICAL"
             detail="$crit_detail"
-        elif (( value >= warn )); then
+        elif (( value >= warn_eff )); then
             state="WARNING"
             detail="$warn_detail"
         fi
@@ -1449,38 +1828,61 @@ check_cpu() {
         cores=1
     fi
     
-    local load_pct load_1m
-    
+    local load_pct load_1m cpu_metric="busy"
+
     # LXC Container: Use cgroup v2 metrics instead of /proc/loadavg (host's load)
     if use_lxc_metrics; then
         log "DEBUG" "check_cpu: using LXC cgroup v2 metrics for accurate container CPU"
         load_pct=$(calculate_lxc_cpu_percent)
         # For display purposes, estimate load from percentage
         load_1m=$(awk -v pct="$load_pct" -v cores="$cores" 'BEGIN {printf "%.2f", (pct / 100) * cores}')
-        
+
         if ! is_valid_number "$load_pct"; then
             log "WARN" "check_cpu: LXC CPU calculation returned invalid value '${load_pct}' — skipping"
             return
         fi
     else
-        # Standard host/VM: Use /proc/loadavg
+        # Standard host/VM
         if [[ ! -f /proc/loadavg ]]; then
             log "WARN" "check_cpu: /proc/loadavg not found — skipping"
             return
         fi
-        
+
         load_1m=$(awk '{print $1}' /proc/loadavg)
         if [[ -z "$load_1m" || ! "$load_1m" =~ ^[0-9.]+$ ]]; then
             log "WARN" "check_cpu: invalid load value from /proc/loadavg — skipping"
             return
         fi
 
-        # Calculate load as percentage of cores (bash integer math, x100 for precision)
-        load_pct=$(awk -v ld="$load_1m" -v cores="$cores" 'BEGIN {printf "%.0f", (ld / cores) * 100}')
+        # Busy-CPU percentage is the metric that answers "is the CPU
+        # saturated" (GH #46); loadavg is kept for the detail text only.
+        # CPU_CHECK_MODE=load restores the old loadavg/cores semantics.
+        if [[ "${CPU_CHECK_MODE:-busy}" == "load" ]]; then
+            cpu_metric="load"
+            load_pct=$(awk -v ld="$load_1m" -v cores="$cores" 'BEGIN {printf "%.0f", (ld / cores) * 100}')
+        else
+            load_pct=$(calculate_cpu_busy_percent)
+            if [[ -z "$load_pct" ]] || ! is_valid_number "$load_pct"; then
+                log "WARN" "check_cpu: CPU utilisation sample unavailable — falling back to loadavg"
+                cpu_metric="load"
+                load_pct=$(awk -v ld="$load_1m" -v cores="$cores" 'BEGIN {printf "%.0f", (ld / cores) * 100}')
+            fi
+        fi
     fi
     if [[ -z "$load_pct" ]] || ! is_valid_number "$load_pct"; then
         log "WARN" "check_cpu: computed load_pct '${load_pct}' is not numeric — skipping"
         return
+    fi
+
+    local cpu_ok_detail cpu_warn_detail cpu_crit_detail
+    if [[ "$cpu_metric" == "load" ]]; then
+        cpu_ok_detail="CPU load ${load_1m} (${load_pct}% of ${cores} cores)"
+        cpu_warn_detail="CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_WARN:-70}%)"
+        cpu_crit_detail="CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_CRIT:-80}%)"
+    else
+        cpu_ok_detail="CPU ${load_pct}% busy (load ${load_1m} on ${cores} cores)"
+        cpu_warn_detail="CPU <b>${load_pct}%</b> busy (load ${load_1m} on ${cores} cores, threshold: ${CPU_THRESHOLD_WARN:-70}%)"
+        cpu_crit_detail="CPU <b>${load_pct}%</b> busy (load ${load_1m} on ${cores} cores, threshold: ${CPU_THRESHOLD_CRIT:-80}%)"
     fi
 
     # Use check_threshold helper for consistent threshold handling
@@ -1488,9 +1890,9 @@ check_cpu() {
         "${CPU_THRESHOLD_WARN:-70}" \
         "${CPU_THRESHOLD_CRIT:-80}" \
         "false" \
-        "CPU load ${load_1m} (${load_pct}% of ${cores} cores)" \
-        "CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_WARN:-70}%)" \
-        "CPU load ${load_1m} = <b>${load_pct}%</b> of ${cores} cores (threshold: ${CPU_THRESHOLD_CRIT:-80}%)"
+        "$cpu_ok_detail" \
+        "$cpu_warn_detail" \
+        "$cpu_crit_detail"
     
     # Capture top processes if CPU is under stress
     if [[ "${THRESHOLD_STATE:-OK}" == "WARNING" || "${THRESHOLD_STATE:-OK}" == "CRITICAL" ]]; then
@@ -7426,7 +7828,8 @@ main() {
         fi
     fi
 
-    # Post-dispatch: exports and escalation
+    # Post-dispatch: buffered warning digest, exports and escalation
+    flush_warning_digest
     export_prometheus
     export_json_status
     check_escalation
