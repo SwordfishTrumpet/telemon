@@ -56,6 +56,10 @@ just noisy but wrong.
   rate-limited and the one alert that matters would arrive 15 minutes late.
 
 ### Added
+- `docs/alert-tuning.md`: how to measure alert volume from the audit log, the
+  four controls in full, their invariants, the state sidecars they use, and a
+  worked profile with the evidence behind each threshold. Linked from the README
+  and from the "Alert Noise Control" section.
 - `calculate_cpu_busy_percent()`, `flap_guard_evaluate()` and the
   `warn_digest_*`/`flush_warning_digest()` helpers; new state sidecars
   `.cpu_busy`, `.flap`, `.flaphold`, `.warndigest` are enumerated by
@@ -71,10 +75,10 @@ just noisy but wrong.
   `${VAR:-literal}` defaults, `printf` arguments) so the runtime bytes are
   identical while no literal credential-shaped assignment remains. The gate
   scans comments too, so the note explaining it cannot quote the offending
-  shape. Proof the fix does not weaken the gate: a literal fixture
-  (`DB_MYSQL_PASS="hunter2"`, `TELEGRAM_BOT_TOKEN="123456:AAHfake"`) is still
-  refused, and the masked-password assertion still fails if the mask disappears
-  from `telemon.sh`.
+  shape. Proof the fix does not weaken the gate: a literal credential-shaped
+  fixture (a DB password assignment with a real-looking value, or a bot token
+  with a numeric id prefix) is still refused, and the masked-password assertion
+  still fails if the mask disappears from `telemon.sh`.
 - Time Machine stale-lock completion evidence (GH #44): the regression proves a
   lock stays CRITICAL when a newer band exists but `SnapshotHistory` records no
   later completed snapshot, and clears only on a real completion. The plugin

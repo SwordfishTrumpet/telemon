@@ -927,6 +927,12 @@ already does with cgroup CPU accounting. Use `load` to keep the old semantics.
 **Disk hysteresis is separate:** `DISK_HYSTERESIS_PCT` covers storage, and the
 values here do not apply to it.
 
+See [Alert Tuning](docs/alert-tuning.md) for how to measure alert volume in the
+audit log, the four controls in full, and a worked profile with its rationale.
+
+See [Alert Tuning](docs/alert-tuning.md) for how to measure alert volume in the
+audit log, the four controls in full, and a worked profile with its rationale.
+
 ### Alert Dispatch Chain
 
 Queued alerts from failed deliveries are retried at the start of **every** cycle
@@ -1201,6 +1207,10 @@ The table above is the authoritative list. Nothing outside it is tested, and the
 
 - [Quick Reference](docs/QUICKREF.md): command cheat sheet
 - [Troubleshooting Guide](docs/TROUBLESHOOTING.md): common issues and solutions
+- [Alert Tuning](docs/alert-tuning.md): hysteresis, flap guard, warning digest, and
+  the CPU metric — how to measure alert volume and pick defensible thresholds
+- [Alert Tuning](docs/alert-tuning.md): hysteresis, flap guard, warning digest, and
+  the CPU metric — how to measure alert volume and pick defensible thresholds
 - [Systemd Setup](systemd/README.md): running with systemd instead of cron
 
 ---
