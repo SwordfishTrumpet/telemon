@@ -9,6 +9,8 @@ backups/
 
 # --- editor / IDE ---
 .env
+# .env backups contain credentials (tokens, chat ids)
+.env.bak-*
 .idea/
 .vscode/
 
